@@ -524,7 +524,46 @@ export function apply(ctx, config) {
     '洗钱', '跑分', '股票', '荐股', '基金', '炒币', '贷款', '套现', '返利', '破解', '外挂', '盗号', '黑产', '刷单', '代考']
   const repliesToday = (now = new Date()) => Object.values(readLedger().replies || {})
     .filter((r) => r && r.day === dayKey(now)).length
-  const repliedCids = () => new Set(Object.keys(readLedger().replies || {}))
+  /** 回过的 cid 索引（一行一个，只有宿主导入；不进模型上下文，所以不费 token） */
+  const replyIndexFile = join(stateDir, 'replied-cids.txt')
+  const readReplyIndex = () => {
+    try {
+      return new Set(readFileSync(replyIndexFile, 'utf8').split(/\r?\n/).filter(Boolean))
+    } catch { return new Set() }
+  }
+  const appendReplyIndex = (cid) => {
+    try { appendFileSync(replyIndexFile, String(cid) + '\n', 'utf8') } catch { /* 记不上不影响去重 */ }
+  }
+  /** 账本按月分片：把上个月以前的 replies/comments 挪进 ledger/YYYY-MM.json，主账本只留当月 */
+  const pruneLedger = (l) => {
+    const month = dayKey().slice(0, 7)
+    const old = { replies: {}, comments: [] }
+    for (const [cid, rec] of Object.entries(l.replies || {})) {
+      const m = String(rec?.day || '').slice(0, 7)
+      if (m && m < month) { old.replies[cid] = rec; delete l.replies[cid] }
+    }
+    const keep = []
+    for (const c of l.comments || []) {
+      const m = String(c?.day || '').slice(0, 7)
+      if (m && m < month) old.comments.push(c); else keep.push(c)
+    }
+    l.comments = keep
+    if (Object.keys(old.replies).length || old.comments.length) {
+      try {
+        mkdirSync(join(stateDir, 'ledger'), { recursive: true })
+        const sampleDay = old.replies[Object.keys(old.replies)[0]]?.day || old.comments[0]?.day || dayKey()
+        const shard = join(stateDir, 'ledger', String(sampleDay).slice(0, 7) + '.json')
+        const prev = existsSync(shard) ? readJson(shard, {}) : {}
+        const merged = {
+          replies: { ...(prev.replies || {}), ...old.replies },
+          comments: [...(prev.comments || []), ...old.comments],
+        }
+        writeJson(shard, merged)
+      } catch { /* 分片失败不影响主流程 */ }
+    }
+    return l
+  }
+  const repliedCids = () => new Set([...readReplyIndex(), ...Object.keys(readLedger().replies || {})])
   /** 我自己在抖音的昵称（用来跳过"我自己的评论/我自己的回复"） */
   const myNames = () => {
     const raw = [String(cfg.myNickname || ''), '大白鲸', '大白鲸（爱吃白饭版）', '大白鲸爱吃白饭版']
@@ -542,7 +581,8 @@ export function apply(ctx, config) {
     const l = readLedger()
     l.replies = l.replies || {}
     l.replies[String(cid)] = { day: dayKey(), at: new Date().toISOString(), ...rec }
-    writeLedger(l)
+    writeLedger(pruneLedger(l))
+    appendReplyIndex(cid)
   }
   /** 今天发过的作品 id（只有当日发布的才回；过了当天就不碰）
    *  来源：抖音站内 /aweme/post（登录态）→ 按 create_time 过滤今天
@@ -641,7 +681,7 @@ export function apply(ctx, config) {
       if (out.filter((x) => x.sent).length >= want) break
       let list = []
       try {
-        const r = await call('douyin_comments', { aweme_id: v, num: 40 }, { timeoutMs: 120_000 })
+        const r = await call('douyin_comments', { aweme_id: v, num: 20, compact: true, exclude_cids: [...doneCids].slice(-300) }, { timeoutMs: 120_000 })
         list = Array.isArray(r?.items) ? r.items : []
       } catch (e) {
         out.push({ aweme_id: v, ok: false, error: String(e?.message ?? e) })

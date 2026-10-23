@@ -2226,16 +2226,31 @@ async def douyin_video(aweme_id: str) -> str:
 
 
 @mcp.tool()
-async def douyin_comments(aweme_id: str, num: int = 30) -> str:
+async def douyin_comments(aweme_id: str, num: int = 30, compact: bool = False,
+                          exclude_cids: list[str] | None = None) -> str:
     """获取视频热门评论（越多越慢，会自动滚动评论区）。
 
-    返回 {ok, items:[{cid,user,text,digg,time}], count, notes?}。
+    Args:
+        num: 取几条
+        compact: True ⇒ 只回 {cid,user,text(30字)}，省 token（回评论时用这个）
+        exclude_cids: 已回过的 cid，服务端直接过滤掉（不回传，进一步省 token）
+
+    返回 {ok, items, count, notes?}。
     """
     async def _impl():
         page = await _browser.page()
-        return await _comments_core(page, aweme_id, num)
+        res = await _comments_core(page, aweme_id, num)
+        items = res.get("items") or []
+        if exclude_cids:
+            skip = {str(x) for x in exclude_cids}
+            items = [x for x in items if str(x.get("cid")) not in skip]
+        if compact:
+            items = [{"cid": str(x.get("cid")), "user": x.get("user", ""), "text": str(x.get("text", ""))[:30]} for x in items]
+        res["items"] = items
+        res["count"] = len(items)
+        return res
 
-    return j(await _guard(_impl, 55))
+    return j(await _guard(_impl, 60))
 
 
 @mcp.tool()
