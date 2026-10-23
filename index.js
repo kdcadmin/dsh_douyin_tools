@@ -110,6 +110,8 @@ export const Config = !z ? undefined : z.object({
   replyVideoIds: z.string().default('').extra('volatile', true),
   /** 「要回的自己的视频 id」是否只算一次（true=回完清空；false=长期保留） */
   replyOneShot: z.boolean().default(true).extra('volatile', true),
+  /** 同一个人只回一次（默认关；开了之后同一个人后来的新评论也不回） */
+  replyOncePerUser: z.boolean().default(false).extra('volatile', true),
   /** 隔多少分钟看一次评论区（默认 30；会自动 ±20% 抖动，像人在看） */
   replyIntervalMin: z.natural().default(30).extra('volatile', true),
   /** 我自己在抖音的昵称（跳过自己的评论/回复；留空自动认「大白鲸」那几个） */
@@ -181,7 +183,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyIntervalMin: 30,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -231,12 +233,13 @@ export function apply(ctx, config) {
     if ('commentPerDay' in p) p.commentPerDay = Math.max(0, Math.min(Number(p.commentPerDay) || 0, 50))
     if ('autoReply' in p) p.autoReply = Boolean(p.autoReply)
     if ('replyPerRun' in p) p.replyPerRun = Math.max(0, Math.min(Number(p.replyPerRun) || 0, 20))
-    if ('replyPerDay' in p) p.replyPerDay = Math.max(0, Math.min(Number(p.replyPerDay) || 0, 100))
+    if ('replyPerDay' in p) p.replyPerDay = Math.max(0, Math.min(Number(p.replyPerDay) || 0, 1000))
     if ('replyRandom' in p) p.replyRandom = Boolean(p.replyRandom)
     if ('replyVideoIds' in p) p.replyVideoIds = String(p.replyVideoIds || '').replace(/[^0-9,\s]/g, '').slice(0, 400)
     if ('replyOneShot' in p) p.replyOneShot = Boolean(p.replyOneShot)
     if ('myNickname' in p) p.myNickname = String(p.myNickname || '').slice(0, 40)
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
+    if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
     if ('publishTitle' in p) p.publishTitle = String(p.publishTitle || '').slice(0, 120)
     if ('publishTags' in p) p.publishTags = String(p.publishTags || '').slice(0, 200)
@@ -583,6 +586,22 @@ export function apply(ctx, config) {
     return l
   }
   const repliedCids = () => new Set([...readReplyIndex(), ...Object.keys(readLedger().replies || {})])
+  /** 回过谁（昵称归一化）+ 索引文件，给「同一个人只回一次」用 */
+  const normUser = (u) => String(u || '').replace(/[\s（）()【】]/g, '').toLowerCase()
+  const repliedUsersFile = join(stateDir, 'replied-users.txt')
+  const readRepliedUsers = () => {
+    const s = new Set()
+    try {
+      for (const line of readFileSync(repliedUsersFile, 'utf8').split(/\r?\n/)) if (line.trim()) s.add(line.trim())
+    } catch { /* 没文件 */ }
+    for (const r of Object.values(readLedger().replies || {})) if (r?.user) s.add(normUser(r.user))
+    return s
+  }
+  const appendRepliedUser = (user) => {
+    const n = normUser(user)
+    if (!n) return
+    try { appendFileSync(repliedUsersFile, n + '\n', 'utf8') } catch { /* 记不上不影响 */ }
+  }
   /** 我自己在抖音的昵称（用来跳过"我自己的评论/我自己的回复"） */
   const myNames = () => {
     const raw = [String(cfg.myNickname || ''), '大白鲸', '大白鲸（爱吃白饭版）', '大白鲸爱吃白饭版']
@@ -707,12 +726,14 @@ export function apply(ctx, config) {
         continue
       }
       const myTexts = myReplyTexts()
+      const repliedUsers = cfg.replyOncePerUser ? readRepliedUsers() : new Set()
       const seenThisRound = new Set()
       let fresh = list.filter((c) => {
         if (!c || !c.cid) return false
         const cid = String(c.cid)
         if (doneCids.has(cid) || seenThisRound.has(cid)) return false
         if (isMine(c.user)) return false                       // 我自己发的评论/回复
+        if (cfg.replyOncePerUser && repliedUsers.has(normUser(c.user))) return false  // 同一个人只回一次（默认关）
         const txt = String(c.text || '').trim()
         if (myTexts.has(txt)) return false                      // 兜底：那是我回过的句子
         const rec = readLedger().replies?.[cid]
@@ -728,7 +749,8 @@ export function apply(ctx, config) {
           const r = await call('douyin_comment', { aweme_id: v, text, reply_cid: String(c.cid), mention: '' }, { timeoutMs: 150_000 })
           const okk = r && r.ok !== false && r.needLogin !== true
           const prev = (readLedger().replies || {})[String(c.cid)] || {}
-          noteReply(c.cid, { aweme_id: v, text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').slice(0, 60) })
+          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').slice(0, 60) })
+          if (okk) appendRepliedUser(c.user)
           out.push({ aweme_id: v, cid: String(c.cid), comment: String(c.text || '').slice(0, 40), reply: text, sensitive, sent: okk, error: okk ? undefined : (r?.error || '没发出去') })
         } catch (e) {
           const prev2 = (readLedger().replies || {})[String(c.cid)] || {}
