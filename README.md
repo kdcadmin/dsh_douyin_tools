@@ -13,7 +13,7 @@
 - **刷一轮**：按你的高峰/谷时窗口挑几条视频，读标题、字幕、评论区，挑出**值得看**的（不是按播放量排）；
 - **写日报**：每条带链接、时长、点赞/评论数、一句话「为什么值得」；按日期分文件，页面里直接看，不用打开文件；
 - **动手（默认关）**：点赞、评论并 @ 你、投稿视频——三个闸门各自独立，你开了它才动，做完在日报里如实写结果（失败也写）；
-- **回自己视频的评论**：随机挑视频、随机挑评论，每条不超过 20 字；敏感话题换成委婉拒绝；
+- **回自己视频的评论**：**只回当天发布的视频**（过了当天就不碰），随机挑评论，每条不超过 20 字；敏感话题换成委婉拒绝；
 - **出片**：接你本机的 ComfyUI，把输出目录里最新的成片发到抖音（默认只存草稿）。
 
 它不碰你的密码：登录态留在插件自己的浏览器 profile 里，扫码一次就行。
@@ -75,9 +75,9 @@ dsh plugin --profile desktop add link:D:/path/to/dsh-douyin-life
 | 记忆 | `<家>/memory/YYYY-MM.md` |
 | 登录态 | `<家>/browser/`（Playwright 持久化 profile） |
 
-## 工具（23 个 `dy_*`）
+## 工具（25 个 `dy_*`）
 
-读：`dy_status` `dy_whoami` `dy_hot` `dy_hot_videos` `dy_search` `dy_video` `dy_comments` `dy_my_videos` `dy_comfy_list`
+读：`dy_status` `dy_whoami` `dy_hot` `dy_hot_videos` `dy_search` `dy_video` `dy_comments` `dy_my_posts`（今天发过哪些）`dy_my_videos` `dy_comfy_list`
 写（有闸门）：`dy_like` `dy_comment` `dy_reply` `dy_reply_round` `dy_publish`
 其它：`dy_config` `dy_login_start` `dy_login_poll` `dy_login_sms` `dy_login_sms_submit` `dy_remember` `dy_thumb` `dy_run` `dy_selfcheck` `dy_chrome_open`
 
