@@ -1,0 +1,19 @@
+# ============================================================================
+# dsh-douyin-life —— DSH bundle patch（插件**自带**的挂载声明）
+# ============================================================================
+# 包自己声明要往 profile 的配置树里插什么。装上之后，profile 只要在
+# `dsh.profile.bundles` 里列出 `dsh-douyin-life` 即生效，不用手改 profile 的 patch：
+#
+#   dsh plugin --profile desktop add dsh-douyin-life
+#   （本地开发：dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-life）
+#
+# 🔴 `id` 必须等于 index.js 里的 `export const name`（`douyin-life`）：
+#    设置层的命名空间 ns、volatile 写入、loader entry 认的都是这个 id。
+# ============================================================================
+
+- insert:
+    - id: douyin-life
+      name: dsh-douyin-life
+      config:
+        # 真正的用户配置在插件自己的 config.json / 设置里，这里只放默认值
+        enabled: true

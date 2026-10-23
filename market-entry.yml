@@ -1,0 +1,6 @@
+url: https://github.com/kdcadmin/dsh_douyin_tools
+name: kdcadmin/dsh_douyin_tools
+category: usage
+description:
+  en: 'Douyin duty plugin: reads a daily round of videos and comments, writes a report, can like/comment/@ you, and publishes clips rendered by your own ComfyUI.'
+  zh: '抖音值班插件：每天刷一轮视频、读评论、写日报，可点赞、评论并 @ 你，还能发布你自己 ComfyUI 出的片子。'

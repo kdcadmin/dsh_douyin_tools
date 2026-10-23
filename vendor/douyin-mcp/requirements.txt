@@ -1,0 +1,4 @@
+# douyin-mcp 依赖（宿主在 %USERPROFILE%\.dsh\douyin-duty\.venv 里装）
+# 注意：必须 mcp<2 —— mcp 2.x 把 FastMCP 改名成 MCPServer，本文件用的是 v1 的 FastMCP API。
+mcp>=1.9,<2
+playwright>=1.45
