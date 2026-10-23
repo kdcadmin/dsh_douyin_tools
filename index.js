@@ -110,6 +110,8 @@ export const Config = !z ? undefined : z.object({
   replyVideoIds: z.string().default('').extra('volatile', true),
   /** 「要回的自己的视频 id」是否只算一次（true=回完清空；false=长期保留） */
   replyOneShot: z.boolean().default(true).extra('volatile', true),
+  /** 我自己在抖音的昵称（跳过自己的评论/回复；留空自动认「大白鲸」那几个） */
+  myNickname: z.string().default('').extra('volatile', true),
   /** 它自己发视频：每天最多几条（0 = 不发） */
   publishPerDay: z.natural().default(1).extra('volatile', true),
   /** 视频标题模板（可用 {date} 占位；留空 = 「日常 <日期>」） */
@@ -177,7 +179,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '',
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -231,6 +233,7 @@ export function apply(ctx, config) {
     if ('replyRandom' in p) p.replyRandom = Boolean(p.replyRandom)
     if ('replyVideoIds' in p) p.replyVideoIds = String(p.replyVideoIds || '').replace(/[^0-9,\s]/g, '').slice(0, 400)
     if ('replyOneShot' in p) p.replyOneShot = Boolean(p.replyOneShot)
+    if ('myNickname' in p) p.myNickname = String(p.myNickname || '').slice(0, 40)
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
     if ('publishTitle' in p) p.publishTitle = String(p.publishTitle || '').slice(0, 120)
     if ('publishTags' in p) p.publishTags = String(p.publishTags || '').slice(0, 200)
@@ -522,6 +525,19 @@ export function apply(ctx, config) {
   const repliesToday = (now = new Date()) => Object.values(readLedger().replies || {})
     .filter((r) => r && r.day === dayKey(now)).length
   const repliedCids = () => new Set(Object.keys(readLedger().replies || {}))
+  /** 我自己在抖音的昵称（用来跳过"我自己的评论/我自己的回复"） */
+  const myNames = () => {
+    const raw = [String(cfg.myNickname || ''), '大白鲸', '大白鲸（爱吃白饭版）', '大白鲸爱吃白饭版']
+    return new Set(raw.map((s) => s.replace(/[\s（）()【】]/g, '')).filter(Boolean))
+  }
+  const isMine = (user) => {
+    const norm = String(user || '').replace(/[\s（）()【】]/g, '')
+    if (!norm) return false
+    for (const n of myNames()) if (norm.includes(n) || n.includes(norm)) return true
+    return false
+  }
+  /** 我回过的句子（用来兜底：万一账本丢了，看到自己那句就不再回） */
+  const myReplyTexts = () => new Set(Object.values(readLedger().replies || {}).map((r) => String(r?.text || '').trim()).filter(Boolean))
   const noteReply = (cid, rec) => {
     const l = readLedger()
     l.replies = l.replies || {}
@@ -631,7 +647,20 @@ export function apply(ctx, config) {
         out.push({ aweme_id: v, ok: false, error: String(e?.message ?? e) })
         continue
       }
-      let fresh = list.filter((c) => c && c.cid && !doneCids.has(String(c.cid)))
+      const myTexts = myReplyTexts()
+      const seenThisRound = new Set()
+      let fresh = list.filter((c) => {
+        if (!c || !c.cid) return false
+        const cid = String(c.cid)
+        if (doneCids.has(cid) || seenThisRound.has(cid)) return false
+        if (isMine(c.user)) return false                       // 我自己发的评论/回复
+        const txt = String(c.text || '').trim()
+        if (myTexts.has(txt)) return false                      // 兜底：那是我回过的句子
+        const rec = readLedger().replies?.[cid]
+        if (rec && rec.ok === false && Number(rec.attempts || 0) >= 2) return false  // 失败两次别死磕
+        seenThisRound.add(cid)
+        return true
+      })
       if (!fresh.length) { out.push({ aweme_id: v, ok: true, skipped: '这个视频没有新评论' }); continue }
       if (rand) fresh = shuffle(fresh)
       for (const c of fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))) {
@@ -639,9 +668,12 @@ export function apply(ctx, config) {
         try {
           const r = await call('douyin_comment', { aweme_id: v, text, reply_cid: String(c.cid), mention: '' }, { timeoutMs: 150_000 })
           const okk = r && r.ok !== false && r.needLogin !== true
-          noteReply(c.cid, { aweme_id: v, text, sensitive, ok: okk, comment: String(c.text || '').slice(0, 60) })
+          const prev = (readLedger().replies || {})[String(c.cid)] || {}
+          noteReply(c.cid, { aweme_id: v, text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').slice(0, 60) })
           out.push({ aweme_id: v, cid: String(c.cid), comment: String(c.text || '').slice(0, 40), reply: text, sensitive, sent: okk, error: okk ? undefined : (r?.error || '没发出去') })
         } catch (e) {
+          const prev2 = (readLedger().replies || {})[String(c.cid)] || {}
+          noteReply(c.cid, { aweme_id: v, text, sensitive, ok: false, attempts: Number(prev2.attempts || 0) + 1, error: String(e?.message ?? e).slice(0, 80) })
           out.push({ aweme_id: v, cid: String(c.cid), reply: text, sent: false, error: String(e?.message ?? e) })
         }
       }
