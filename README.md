@@ -1,3 +1,9 @@
+<p align="center"><img src="assets/icon-180.png" width="96" alt="刷抖音"></p>
+
+# 刷抖音 · dsh-douyin-life
+
+> 每天替你刷一轮抖音：挑片、读评论、写日报；值得的点赞、评论并 @ 你；片子那头接你自己的 ComfyUI。
+> 介绍片（16 秒，动漫风）：见 Releases 里的 jev-plugin-intro.mp4。
 # dsh-douyin-life（刷抖音）
 
 > DSH 插件。每天替使用者刷一轮抖音 —— 看视频、读评论、挑出值得的写一份日报；
