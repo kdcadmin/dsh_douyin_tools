@@ -577,25 +577,34 @@ export function apply(ctx, config) {
     }
     return a
   }
-  /** 一句回复（≤20 字）：敏感话题婉拒，问句给软回应，其余按味道挑一句 */
+  /** 一句回复（≤20 字）：敏感话题婉拒；其余带点人味，可以挂一个抖音表情
+   *  表情用抖音的文本码（[憨笑] [笑哭] …），一条最多一个，别堆。
+   */
+  const EMOJIS = ['[憨笑]', '[笑哭]', '[捂脸]', '[比心]', '[害羞]', '[赞]', '[微笑]']
+  const pickEmoji = () => (Math.random() < 0.65 ? EMOJIS[Math.floor(Math.random() * EMOJIS.length)] : '')
   const pickReply = (comment) => {
     const c = String(comment || '').trim()
     if (SENSITIVE_WORDS.some((k) => c.includes(k))) {
       return { text: '这个我不太方便聊，换个话题吧。', sensitive: true }
     }
+    const e = pickEmoji()
     let t
-    if (/[?？]|怎么|为什么|能不能|有没有/.test(c)) t = '这个不好一句话说清，回头细讲'
-    else if (/谢谢|感谢|爱你|喜欢|好可爱|太棒/.test(c)) t = '谢谢喜欢～这条我记着了'
-    else if (/哈哈|笑死|草/.test(c)) t = '哈哈哈，你抓到重点了'
-    else if (/更新|什么时候|催/.test(c)) t = '在弄了在弄了，别催'
-    else t = ['收到，我记下了', '这条评论我看完了', '嗯…你说得对', '我懂你意思'][Math.floor(Math.random() * 4)]
+    if (/[?？]|怎么|为什么|能不能|有没有|求/.test(c)) t = `这个我也说不好${e || '，回头细说'}`
+    else if (/谢谢|感谢|爱你|喜欢|好可爱|太棒|厉害/.test(c)) t = `谢谢喜欢～${e}`
+    else if (/哈哈|笑死|草|绝了/.test(c)) t = `哈哈哈你抓到重点了${e}`
+    else if (/更新|什么时候|催|快更/.test(c)) t = `在弄了在弄了${e || '，别催'}`
+    else if (/回我|理我|在吗|说话/.test(c)) t = `在的在的${e}`
+    else t = [`我懂你意思${e}`, `这条我看完了${e}`, `嗯…你说得对${e || ''}`, `收到，记下了${e}`][Math.floor(Math.random() * 4)]
+    t = String(t).trim()
+    if (!t) t = '收到[微笑]'
     if (t.length > 20) {
       const cut = t.slice(0, 20)
       const m = cut.match(/^.*[，。！？~、,.!?]/)
       t = (m ? m[0] : cut).replace(/[，。、]$/, '').slice(0, 20)
     }
-    return { text: t, sensitive: false }
+    return { text: t, sensitive: false, emoji: Boolean(e) }
   }
+
   /** 回一轮：随机挑视频 → 读该视频评论 → 跳过已回过的 → 回 N 条 */
   const replyRound = async ({ count, random } = {}) => {
     const perDay = Math.max(0, Number(cfg.replyPerDay) || 0)
