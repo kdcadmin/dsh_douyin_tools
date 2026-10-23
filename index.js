@@ -110,6 +110,8 @@ export const Config = !z ? undefined : z.object({
   replyVideoIds: z.string().default('').extra('volatile', true),
   /** 「要回的自己的视频 id」是否只算一次（true=回完清空；false=长期保留） */
   replyOneShot: z.boolean().default(true).extra('volatile', true),
+  /** 隔多少分钟看一次评论区（默认 30；会自动 ±20% 抖动，像人在看） */
+  replyIntervalMin: z.natural().default(30).extra('volatile', true),
   /** 我自己在抖音的昵称（跳过自己的评论/回复；留空自动认「大白鲸」那几个） */
   myNickname: z.string().default('').extra('volatile', true),
   /** 它自己发视频：每天最多几条（0 = 不发） */
@@ -179,7 +181,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '',
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyIntervalMin: 30,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -234,6 +236,7 @@ export function apply(ctx, config) {
     if ('replyVideoIds' in p) p.replyVideoIds = String(p.replyVideoIds || '').replace(/[^0-9,\s]/g, '').slice(0, 400)
     if ('replyOneShot' in p) p.replyOneShot = Boolean(p.replyOneShot)
     if ('myNickname' in p) p.myNickname = String(p.myNickname || '').slice(0, 40)
+    if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
     if ('publishTitle' in p) p.publishTitle = String(p.publishTitle || '').slice(0, 120)
     if ('publishTags' in p) p.publishTags = String(p.publishTags || '').slice(0, 200)
@@ -1287,6 +1290,7 @@ export function apply(ctx, config) {
           publishPerDay: Math.max(0, Number(cfg.publishPerDay) || 0),
           lastPublished: lastPublished(),
           todayReplies: repliesToday(now),
+          replyTimer: replyState(),
           replyPerDay: Math.max(0, Number(cfg.replyPerDay) || 0),
           replyPerRun: Math.max(0, Number(cfg.replyPerRun) || 0),
           myVideos: myVideoIds().length,
@@ -1921,6 +1925,50 @@ export function apply(ctx, config) {
     timer.unref?.()                                    // 别因为这个定时器让进程不肯退出
     ctx.effect(() => () => clearInterval(timer), 'douyin-duty: 谷时定时器')
   } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
+
+  /* ─────────────── 评论区定时检查（每 N 分钟看一次，带抖动） ───────────────
+   * 使用者 2026-10-24：「评论区可以设置每隔多少时间查看一次，这样才像随机回复」
+   * · 间隔 = replyIntervalMin 分钟，实际在 ±20% 里随机（30 分钟 ⇒ 24~36 分钟）
+   * · 只有 autoReply 开着才跑；跟谷时窗口无关（评论是随时有人来的）
+   * · 回调自己兜异常，绝不往上抛（宿主进程不能被它带走）
+   */
+  let replyTimer = null
+  let replyBusy = false
+  let lastReplyCheckAt = null
+  let nextReplyCheckAt = null
+  const replyState = () => ({ lastAt: lastReplyCheckAt, nextAt: nextReplyCheckAt, busy: replyBusy })
+  const scheduleReply = () => {
+    try { if (replyTimer) clearTimeout(replyTimer) } catch { /* 忽略 */ }
+    const base = Math.max(5, Math.min(Number(cfg.replyIntervalMin) || 30, 1440)) * 60_000
+    const jitter = base * (0.8 + Math.random() * 0.4)
+    nextReplyCheckAt = new Date(Date.now() + jitter).toISOString()
+    replyTimer = setTimeout(async () => {
+      try {
+        refreshCfg()
+        if (cfg.autoReply && !replyBusy) {
+          replyBusy = true
+          lastReplyCheckAt = new Date().toISOString()
+          try {
+            const r = await replyRound({ count: Number(cfg.replyPerRun) || 3 })
+            log(`定时看评论：${r?.ok ? `发出 ${r.sent} 条` : (r?.error || '没跑成')}`)
+          } catch (e) {
+            log(`定时看评论出错（已兜住）：${e?.message ?? e}`)
+          } finally {
+            replyBusy = false
+          }
+        }
+      } catch (e) {
+        log(`定时器这一跳出错（已兜住）：${e?.message ?? e}`)
+      } finally {
+        scheduleReply()
+      }
+    }, jitter)
+    replyTimer.unref?.()
+  }
+  try {
+    scheduleReply()
+    ctx.effect(() => () => { try { if (replyTimer) clearTimeout(replyTimer) } catch { /* 收摊 */ } }, 'douyin-duty: 评论定时检查')
+  } catch (e) { log(`评论定时器没起来：${e?.message ?? e}`) }
 
   /* ─────────────── HTTP（给以后设置页用） ─────────────── */
 
