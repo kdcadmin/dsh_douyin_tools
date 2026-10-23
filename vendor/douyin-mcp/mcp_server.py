@@ -1598,7 +1598,7 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         cmt_net.close()
 
 
-async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft: bool, ai_declare: bool = True) -> dict:
+async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft: bool, ai_declare: bool = True, cover_path: str = "") -> dict:
     if isinstance(draft, str):
         draft = draft.strip().lower() not in ("0", "false", "no", "off", "")
     path = Path(str(video_path or "").strip())
@@ -1690,6 +1690,53 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
                 notes.append(f"填话题失败：{type(exc).__name__}: {exc}")
 
     await page.wait_for_timeout(800)
+
+    # ⭐ 2026-10-24：自定义封面（设置封面 → 上传封面 → 裁剪弹层点「完成」）
+    #    踩坑：传完图会弹 ReactCrop 裁剪层，不点「完成」它就一直在，后面所有点击被它吃掉。
+    if cover_path and os.path.isfile(cover_path):
+        try:
+            opened = False
+            for sel in ["text=设置封面", "text=选择封面", "text=更换封面", "text=编辑封面"]:
+                loc = page.locator(sel).first
+                if await loc.count():
+                    await loc.click(timeout=6000, force=True)
+                    opened = True
+                    break
+            if opened:
+                await page.wait_for_timeout(2500)
+                img_input = page.locator("input[type=file][accept*='image']").last
+                await img_input.set_input_files(cover_path)
+                # 等裁剪层出现
+                try:
+                    await page.wait_for_selector(".ReactCrop__image", timeout=20000)
+                except Exception:
+                    notes.append("没等到裁剪层（可能直接用了原图）")
+                await page.wait_for_timeout(2000)
+                # ⭐ 弹层里的确认键叫「保存」（不是「完成」）——2026-10-24 抓 DOM 确认
+                clicked_done = await page.evaluate(
+                    """() => {
+                        const bs = Array.from(document.querySelectorAll('button'));
+                        const save = bs.find((x) => (x.innerText || '').trim() === '保存' && /primary/i.test(x.className || ''));
+                        const any = save || bs.find((x) => (x.innerText || '').trim() === '保存');
+                        if (any) { any.click(); return true; }
+                        return false;
+                    }"""
+                )
+                await page.wait_for_timeout(4000)
+                # 等裁剪层消失
+                for _ in range(10):
+                    still = await page.evaluate("() => !!document.querySelector('.ReactCrop__image')")
+                    if not still:
+                        break
+                    await page.wait_for_timeout(1200)
+                else:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(1500)
+                notes.append(("已上传自定义封面：" if clicked_done else "封面图已选但没点到「完成」：") + os.path.basename(cover_path))
+            else:
+                notes.append("⚠️ 没找到封面入口（设置封面/选择封面）")
+        except Exception as exc:
+            notes.append(f"上传封面失败：{type(exc).__name__}: {exc}")
 
     # ⭐ 2026-10-23：发布前先点「自主声明」→ 勾「内容由AI生成」
     #    不勾这个，AI 视频会被判"未声明"，轻则限流重则下架。
@@ -2206,6 +2253,66 @@ async def douyin_like(aweme_id: str, undo: bool = False) -> str:
 
 
 @mcp.tool()
+async def douyin_my_posts(days: int = 1) -> str:
+    """我自己的作品列表（按发布时间过滤，默认只要今天的）。
+
+    用于「自动回评论」：只回**当日发布**的视频，过了当天就不再回。
+    走站内接口 /aweme/v1/web/aweme/post/（登录态在浏览器里，带 Cookie 同源请求）。
+    返回 {ok, items:[{aweme_id,title,create_time,day}], count, days}
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        await _goto(page, "https://www.douyin.com/user/self", settle=4.0)
+        sec = ""
+        try:
+            sec = await page.evaluate("() => (location.pathname.match(/user\\/([^/?]+)/) || [])[1] || ''")
+        except Exception:
+            sec = ""
+        if not sec:
+            # 从页面上找自己的链接
+            try:
+                sec = await page.evaluate(
+                    """() => {
+                        const a = Array.from(document.querySelectorAll("a[href*='/user/']"))
+                            .map((e) => (e.getAttribute('href') || '').match(/user\\/([^/?]+)/))
+                            .filter(Boolean).map((m) => m[1]);
+                        return a.length ? a[0] : '';
+                    }"""
+                )
+            except Exception:
+                sec = ""
+        if not sec:
+            return _err("没拿到自己的 sec_user_id（/user/self 可能跳转了）", needLogin=False)
+        data = await page.evaluate(
+            """async (uid) => {
+                const r = await fetch('/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id='
+                    + encodeURIComponent(uid) + '&max_cursor=0&count=20&locate_query=false&show_live_replay_strategy=1', { credentials: 'include' });
+                const j = await r.json();
+                return (j.aweme_list || []).map((a) => ({
+                    aweme_id: a.aweme_id,
+                    title: (a.desc || '').slice(0, 60),
+                    create_time: a.create_time || 0,
+                }));
+            }""",
+            sec,
+        )
+        import time as _t
+        today = _t.strftime("%Y-%m-%d")
+        cutoff = _t.mktime(_t.strptime(today, "%Y-%m-%d"))
+        items = []
+        for a in (data or []):
+            ct = int(a.get("create_time") or 0)
+            day = _t.strftime("%Y-%m-%d", _t.localtime(ct)) if ct else ""
+            if days <= 1 and ct and ct < cutoff:
+                continue
+            items.append({"aweme_id": str(a["aweme_id"]), "title": a.get("title", ""), "create_time": ct, "day": day})
+        return _ok(items=items, count=len(items), days=days, sec_user_id=sec)
+
+    return j(await _guard(_impl, 70))
+
+
+@mcp.tool()
 async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention: str = "") -> str:
     """发评论或回复某条评论（需登录）。reply_cid 非空时回复该评论；
     mention 非空时走**真人 @ 提醒**（打 @昵称 → 点联想面板那一行），不是纯文本 @。
@@ -2221,7 +2328,7 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
 
 
 @mcp.tool()
-async def douyin_publish(video_path: str, title: str, tags: str = "", draft: bool = True, ai_declare: bool = True) -> str:
+async def douyin_publish(video_path: str, title: str, tags: str = "", draft: bool = True, ai_declare: bool = True, cover_path: str = "") -> str:
     """投稿视频（需登录）。draft=True（默认）只存草稿；draft=False 才点发布。
 
     返回 {ok, url, draft, notes?}。
@@ -2229,7 +2336,7 @@ async def douyin_publish(video_path: str, title: str, tags: str = "", draft: boo
     async def _impl():
         ctx = await _browser.context()
         page = await _browser.page()
-        return await _publish_core(page, ctx, video_path, title, tags, draft, ai_declare)
+        return await _publish_core(page, ctx, video_path, title, tags, draft, ai_declare, cover_path)
 
     return j(await _guard(_impl, 120))
 

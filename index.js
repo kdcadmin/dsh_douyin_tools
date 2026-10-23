@@ -525,7 +525,22 @@ export function apply(ctx, config) {
     l.replies[String(cid)] = { day: dayKey(), at: new Date().toISOString(), ...rec }
     writeLedger(l)
   }
-  /** 要回哪些视频：配置里写死的 id + 投稿账本里发过的 */
+  /** 今天发过的作品 id（只有当日发布的才回；过了当天就不碰）
+   *  来源：抖音站内 /aweme/post（登录态）→ 按 create_time 过滤今天
+   *  退路：配置里手填的 replyVideoIds（当你就是想固定回某几条时）
+   */
+  const todayVideoIds = async () => {
+    try {
+      const r = await call('douyin_my_posts', { days: 1 }, { timeoutMs: 90_000 })
+      const list = Array.isArray(r?.items) ? r.items : []
+      const ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
+      if (ids.length) return { ids, source: 'douyin_my_posts', titles: list.map((x) => x.title) }
+    } catch (e) {
+      log('取今日作品失败：' + String(e?.message ?? e))
+    }
+    const fromCfg = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
+    return { ids: [...new Set(fromCfg)], source: fromCfg.length ? 'replyVideoIds' : 'none', titles: [] }
+  }
   const myVideoIds = () => {
     const fromCfg = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
     const fromLedger = Object.values(readLedger().published || {}).map((p) => String(p?.awemeId || p?.video_id || '')).filter(Boolean)
@@ -566,8 +581,11 @@ export function apply(ctx, config) {
     if (today >= perDay) return { ok: false, error: '今天已经回满了', today, perDay }
     const want = Math.max(1, Math.min(Number(count) || Number(cfg.replyPerRun) || 3, perDay - today, 10))
     const rand = random === undefined ? Boolean(cfg.replyRandom) : Boolean(random)
-    const vids = myVideoIds()
-    if (!vids.length) return { ok: false, error: '还不知道哪些视频是我的：要么用插件投过稿，要么在「要回的自己的视频」里填 id', today, perDay }
+    const got = await todayVideoIds()
+    const vids = got.ids
+    if (!vids.length) {
+      return { ok: false, error: '今天还没有发过视频（只回当日发布的）；要固定回某几条，可在「要回的自己的视频 id」里填', today, perDay, source: got.source }
+    }
     const order = rand ? shuffle(vids) : vids
     const doneCids = repliedCids()
     const out = []
@@ -597,8 +615,8 @@ export function apply(ctx, config) {
       }
     }
     const sent = out.filter((x) => x.sent).length
-    log(`回评论一轮：想回 ${want} 条，实际发出 ${sent} 条`)
-    return { ok: true, want, sent, today: repliesToday(), perDay, items: out }
+    log(`回评论一轮：今日作品 ${vids.length} 条（来源 ${got.source}），想回 ${want} 条，实际发出 ${sent} 条`)
+    return { ok: true, want, sent, today: repliesToday(), perDay, videos: vids, source: got.source, titles: got.titles, items: out }
   }
 
   const notePublish = (key, rec) => {
@@ -1340,6 +1358,18 @@ export function apply(ctx, config) {
       const id = String(args.aweme_id ?? '').trim()
       if (!id) return { ok: false, error: 'aweme_id 是空的' }
       return call('douyin_thumb', { aweme_id: id }, { timeoutMs: 90_000 })
+    },
+  })
+
+  tool({
+    name: 'dy_my_posts',
+    description: '我今天发过的作品（抖音站内接口，按发布时间过滤当天）。\n'
+      + '「自动回评论」就是靠它决定回哪些视频：**只回当日发布的，过了当天不再回**。',
+    parameters: { days: { type: 'number', description: '要几天内的（默认 1 = 今天）' } },
+    async execute(args) {
+      const days = Math.max(1, Math.min(Number(args.days) || 1, 30))
+      const r = await call('douyin_my_posts', { days }, { timeoutMs: 90_000 })
+      return r
     },
   })
 

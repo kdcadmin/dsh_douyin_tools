@@ -30,7 +30,7 @@ const EXPECTED_TOOLS = [
   'dy_status', 'dy_config', 'dy_whoami', 'dy_login_start', 'dy_login_poll',
   'dy_search', 'dy_video', 'dy_comments', 'dy_like', 'dy_comment',
   'dy_publish', 'dy_comfy_list', 'dy_run', 'dy_selfcheck', 'dy_chrome_open',
-  'dy_hot', 'dy_hot_videos', 'dy_login_sms', 'dy_login_sms_submit', 'dy_remember', 'dy_my_videos', 'dy_reply', 'dy_thumb', 'dy_reply_round',
+  'dy_hot', 'dy_hot_videos', 'dy_login_sms', 'dy_login_sms_submit', 'dy_remember', 'dy_my_videos', 'dy_my_posts', 'dy_reply', 'dy_thumb', 'dy_reply_round',
 ]
 
 const results = []

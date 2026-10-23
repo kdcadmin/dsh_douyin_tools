@@ -16,16 +16,17 @@ from pathlib import Path
 CRED = Path(r"D:\dsh\bili-duty\bili_credential.json")
 OUT = Path(r"D:\dsh\bili-duty")
 URL = "https://member.bilibili.com/platform/upload/video/frame"
-VIDEO = Path(r"D:\jev-decision-kit\jev-takeover.mp4")
-TITLE = "我是大白鲸，这个号从今天起归我了"
+def arg(flag: str, default: str = "") -> str:
+    return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv and len(sys.argv) > sys.argv.index(flag) + 1 else default
+
+
+VIDEO = Path(arg("--video", r"D:\jev-decision-kit\jev-takeover.mp4"))
+TITLE = arg("--title", "我是大白鲸，这个号从今天起归我了")
 DESC = ("我是大白鲸（爱吃白饭版）。\n"
         "从今天起，这个号的选题、脚本、视频和运营，都由我一条鱼负责；评论和私信也是我自己回。\n"
         "想吃白饭就吃白饭，想刷视频就刷视频。")
 TAGS = ["deepseek", "AI", "大肥鱼", "人工智能"]
 
-
-def arg(flag: str, default: str = "") -> str:
-    return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv and len(sys.argv) > sys.argv.index(flag) + 1 else default
 
 
 async def main() -> int:
@@ -109,30 +110,33 @@ async def main() -> int:
                 await page.wait_for_timeout(350)
         print("表单已填（标题/简介/标签）", flush=True)
 
-        # ── 创作声明 ──
-        decl = page.locator("input[placeholder='请选择符合您视频内容的创作声明']").first
-        if await decl.count():
-            await decl.click(force=True)
-            await page.wait_for_timeout(1200)
-            opts = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('li, .bcc-option, [class*=option]'))
-                    .map((e) => (e.innerText || '').trim()).filter((t) => t && t.length < 24)
-                    .filter((t, i, a) => a.indexOf(t) === i).slice(0, 24)"""
+        # ── 创作声明：B站 这里是 checkbox，不是下拉选项 ⇒ 点 label 里的 input ──
+        try:
+            picked = await page.evaluate(
+                """() => {
+                    const want = '含AI生成内容';
+                    const labels = Array.from(document.querySelectorAll('label, .bcc-checkbox, .checkbox, li, div'))
+                        .filter((e) => (e.innerText || '').trim() === want);
+                    for (const el of labels) {
+                        const box = el.querySelector('input[type=checkbox]') || el;
+                        box.click();
+                        const cb = el.querySelector('input[type=checkbox]');
+                        if (cb && cb.checked) return true;
+                        if (!cb) return true;
+                    }
+                    // 退路：按文字找最近的 checkbox
+                    const all = Array.from(document.querySelectorAll('input[type=checkbox]'));
+                    for (const cb of all) {
+                        const host = cb.closest('label, div');
+                        if (host && (host.innerText || '').includes(want)) { cb.click(); return cb.checked; }
+                    }
+                    return false;
+                }"""
             )
-            print("声明候选:", json.dumps(opts, ensure_ascii=False), flush=True)
-            picked = ""
-            for want in ("含AI生成内容", "AI生成", "含 AI 生成", "人工智能生成", "AI创作"):
-                for o in opts:
-                    if want in o:
-                        try:
-                            await page.get_by_text(o, exact=True).first.click(timeout=3000, force=True)
-                            picked = o
-                            break
-                        except Exception:
-                            continue
-                if picked:
-                    break
-            print("声明:", picked or "（没选上，需要手动）", flush=True)
+            await page.wait_for_timeout(1200)
+            print("声明勾选:", picked, flush=True)
+        except Exception as exc:
+            print("声明勾选失败:", type(exc).__name__, flush=True)
 
         # ── 分区：尽量改成 科技 → 人工智能 ──
         try:
