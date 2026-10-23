@@ -108,6 +108,8 @@ export const Config = !z ? undefined : z.object({
   replyRandom: z.boolean().default(true).extra('volatile', true),
   /** 指定要回的自己的视频 id（逗号分隔；留空 = 用投稿账本里发过的） */
   replyVideoIds: z.string().default('').extra('volatile', true),
+  /** 「要回的自己的视频 id」是否只算一次（true=回完清空；false=长期保留） */
+  replyOneShot: z.boolean().default(true).extra('volatile', true),
   /** 它自己发视频：每天最多几条（0 = 不发） */
   publishPerDay: z.natural().default(1).extra('volatile', true),
   /** 视频标题模板（可用 {date} 占位；留空 = 「日常 <日期>」） */
@@ -175,7 +177,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '',
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -228,6 +230,7 @@ export function apply(ctx, config) {
     if ('replyPerDay' in p) p.replyPerDay = Math.max(0, Math.min(Number(p.replyPerDay) || 0, 100))
     if ('replyRandom' in p) p.replyRandom = Boolean(p.replyRandom)
     if ('replyVideoIds' in p) p.replyVideoIds = String(p.replyVideoIds || '').replace(/[^0-9,\s]/g, '').slice(0, 400)
+    if ('replyOneShot' in p) p.replyOneShot = Boolean(p.replyOneShot)
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
     if ('publishTitle' in p) p.publishTitle = String(p.publishTitle || '').slice(0, 120)
     if ('publishTags' in p) p.publishTags = String(p.publishTags || '').slice(0, 200)
@@ -530,16 +533,36 @@ export function apply(ctx, config) {
    *  退路：配置里手填的 replyVideoIds（当你就是想固定回某几条时）
    */
   const todayVideoIds = async () => {
+    // 「只回当日发布」：站内接口按 create_time 过滤今天
+    let ids = []
+    let titles = []
+    let source = 'none'
     try {
       const r = await call('douyin_my_posts', { days: 1 }, { timeoutMs: 90_000 })
       const list = Array.isArray(r?.items) ? r.items : []
-      const ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
-      if (ids.length) return { ids, source: 'douyin_my_posts', titles: list.map((x) => x.title) }
+      ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
+      titles = list.map((x) => x.title)
+      if (ids.length) source = 'douyin_my_posts'
     } catch (e) {
       log('取今日作品失败：' + String(e?.message ?? e))
     }
-    const fromCfg = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
-    return { ids: [...new Set(fromCfg)], source: fromCfg.length ? 'replyVideoIds' : 'none', titles: [] }
+    // ⭐ 额外允许的视频（比如「昨天那条也算今天」）：
+    //    ① <家>/reply-allow.txt 一行一个 id —— 文件在就一直生效（重启也不丢，不依赖配置字段）
+    //    ② 设置里「要回的自己的视频 id」—— 一次性/长期看 replyOneShot
+    let fileExtras = []
+    try {
+      const fp = join(stateDir, 'reply-allow.txt')
+      if (existsSync(fp)) {
+        fileExtras = readFileSync(fp, 'utf8').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
+      }
+    } catch { /* 没文件就算了 */ }
+    const cfgExtras = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
+    const extras = [...new Set([...fileExtras, ...cfgExtras])]
+    if (extras.length) {
+      source = source === 'none' ? 'replyVideoIds' : source + '+replyVideoIds'
+      ids = [...new Set([...ids, ...extras])]
+    }
+    return { ids, source, titles, extras }
   }
   const myVideoIds = () => {
     const fromCfg = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
@@ -613,6 +636,15 @@ export function apply(ctx, config) {
           out.push({ aweme_id: v, cid: String(c.cid), reply: text, sent: false, error: String(e?.message ?? e) })
         }
       }
+    }
+    // 一次性附加 id 用完即清（只限这一次）
+    if (cfgExtras.length && cfg.replyOneShot === true) {
+      try {
+        cfg.replyVideoIds = ''
+        saveCfg({ replyVideoIds: '' })
+        appendMemory(`回评论用过一次性 id：${got.extras.join(',')}（已清空，只算这一次）`)
+        out.push({ note: '一次性 id 已清空：' + got.extras.join(',') })
+      } catch (e) { log('清空一次性 id 失败：' + String(e?.message ?? e)) }
     }
     const sent = out.filter((x) => x.sent).length
     log(`回评论一轮：今日作品 ${vids.length} 条（来源 ${got.source}），想回 ${want} 条，实际发出 ${sent} 条`)
