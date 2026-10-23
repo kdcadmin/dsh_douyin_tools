@@ -534,33 +534,49 @@ export function apply(ctx, config) {
   const appendReplyIndex = (cid) => {
     try { appendFileSync(replyIndexFile, String(cid) + '\n', 'utf8') } catch { /* 记不上不影响去重 */ }
   }
-  /** 账本按月分片：把上个月以前的 replies/comments 挪进 ledger/YYYY-MM.json，主账本只留当月 */
+  /** 账本按「年/月/日」归档：主账本只留**今天**，往前的按 ledger/YYYY/MM/DD.json 存
+   *  使用者 2026-10-24 要求：年文件夹 → 月文件夹 → 日文件
+   */
+  const dayFilePath = (day) => {
+    const d = String(day || dayKey()).slice(0, 10)
+    const [y, m, dd] = d.split('-')
+    return join(stateDir, 'ledger', y, m, `${dd}.json`)
+  }
+  const moveToDayFile = (day, replies, comments) => {
+    try {
+      const fp = dayFilePath(day)
+      mkdirSync(join(fp, '..'), { recursive: true })
+      const prev = existsSync(fp) ? readJson(fp, {}) : {}
+      writeJson(fp, {
+        day,
+        replies: { ...(prev.replies || {}), ...replies },
+        comments: [...(prev.comments || []), ...comments],
+      })
+      return true
+    } catch (e) {
+      log('按日归档失败：' + String(e?.message ?? e))
+      return false
+    }
+  }
   const pruneLedger = (l) => {
-    const month = dayKey().slice(0, 7)
-    const old = { replies: {}, comments: [] }
+    const today = dayKey()
+    const byDay = new Map()
     for (const [cid, rec] of Object.entries(l.replies || {})) {
-      const m = String(rec?.day || '').slice(0, 7)
-      if (m && m < month) { old.replies[cid] = rec; delete l.replies[cid] }
+      const d = String(rec?.day || today).slice(0, 10)
+      if (d === today) continue
+      if (!byDay.has(d)) byDay.set(d, { replies: {}, comments: [] })
+      byDay.get(d).replies[cid] = rec
+      delete l.replies[cid]
     }
     const keep = []
     for (const c of l.comments || []) {
-      const m = String(c?.day || '').slice(0, 7)
-      if (m && m < month) old.comments.push(c); else keep.push(c)
+      const d = String(c?.day || today).slice(0, 10)
+      if (d === today) { keep.push(c); continue }
+      if (!byDay.has(d)) byDay.set(d, { replies: {}, comments: [] })
+      byDay.get(d).comments.push(c)
     }
     l.comments = keep
-    if (Object.keys(old.replies).length || old.comments.length) {
-      try {
-        mkdirSync(join(stateDir, 'ledger'), { recursive: true })
-        const sampleDay = old.replies[Object.keys(old.replies)[0]]?.day || old.comments[0]?.day || dayKey()
-        const shard = join(stateDir, 'ledger', String(sampleDay).slice(0, 7) + '.json')
-        const prev = existsSync(shard) ? readJson(shard, {}) : {}
-        const merged = {
-          replies: { ...(prev.replies || {}), ...old.replies },
-          comments: [...(prev.comments || []), ...old.comments],
-        }
-        writeJson(shard, merged)
-      } catch { /* 分片失败不影响主流程 */ }
-    }
+    for (const [d, bucket] of byDay) moveToDayFile(d, bucket.replies, bucket.comments)
     return l
   }
   const repliedCids = () => new Set([...readReplyIndex(), ...Object.keys(readLedger().replies || {})])
