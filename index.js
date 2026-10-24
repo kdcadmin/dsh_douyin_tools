@@ -1262,6 +1262,9 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
+  /** 本机直跑一轮（下面赋值；这里先声明，保证 HTTP 路由一定能看到它） */
+  let localRound = null
+
   const runDuty = (why = 'window') => {
     try {
       refreshCfg()
@@ -1984,7 +1987,7 @@ export function apply(ctx, config) {
    * 而宿主自己的 MCP 是能正常驱动浏览器的。所以「跑一轮」默认走这里：宿主调 MCP → 挑片 → 写报告。
    * 代价：日报文字是模板化的（不是模型现写），但**能用、能刷、能挑、能点赞评论**。
    */
-  const localRound = async () => {
+  localRound = async () => {
     refreshCfg()
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const left = Math.max(0, quota - countPickedToday())
@@ -2364,7 +2367,7 @@ export function apply(ctx, config) {
     if (method === 'POST' && path === '/api/douyin-duty/run') {
       refreshCfg()
       // ⭐ 2026-10-25：默认本机直跑（宿主自己调 MCP），不再 spawn headless（那个在沙箱里开不了管道）
-      if (cfg.localRound !== false) {
+      if (cfg.localRound !== false && typeof localRound === 'function') {
         try {
           const r = await localRound()
           return sendJson(res, 200, { ok: r.ok !== false, ...r, mode: 'local' })
