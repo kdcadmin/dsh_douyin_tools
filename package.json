@@ -1,6 +1,6 @@
 {
   "name": "dsh-douyin-life",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH 插件：每天替你刷一轮抖音 —— 看视频读评论挑出值得的、写一份日报，值得的就点赞并在评论里 @ 你；视频那头接你自己的 ComfyUI 出片",
   "keywords": [
     "dsh",
@@ -9,9 +9,20 @@
     "douyin",
     "comfyui",
     "mcp",
-    "duty"
+    "duty",
+    "automation"
   ],
   "license": "MIT",
+  "author": "TiAmoSS",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kdcadmin/jev-decision-kit.git",
+    "directory": "plugins/dsh-douyin-life"
+  },
+  "homepage": "https://github.com/kdcadmin/jev-decision-kit/tree/main/plugins/dsh-douyin-life",
+  "bugs": {
+    "url": "https://github.com/kdcadmin/jev-decision-kit/issues"
+  },
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -23,12 +34,13 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "lib",
-    "prompts",
-    "vendor",
+    "lib/",
+    "prompts/",
+    "vendor/douyin-mcp/mcp_server.py",
+    "vendor/douyin-mcp/requirements.txt",
     "README.md",
     "SPEC.md",
-    "selfcheck.mjs"
+    "LICENSE"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",
