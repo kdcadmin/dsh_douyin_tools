@@ -30,7 +30,7 @@ const EXPECTED_TOOLS = [
   'dy_status', 'dy_config', 'dy_whoami', 'dy_login_start', 'dy_login_poll',
   'dy_search', 'dy_video', 'dy_comments', 'dy_like', 'dy_comment',
   'dy_publish', 'dy_comfy_list', 'dy_run', 'dy_selfcheck', 'dy_chrome_open',
-  'dy_hot', 'dy_hot_videos', 'dy_login_sms', 'dy_login_sms_submit', 'dy_remember', 'dy_my_videos', 'dy_my_posts', 'dy_reply', 'dy_thumb', 'dy_chat_send', 'dy_share', 'dy_reply_round',
+  'dy_feed', 'dy_hot', 'dy_hot_videos', 'dy_login_sms', 'dy_login_sms_submit', 'dy_remember', 'dy_my_videos', 'dy_my_posts', 'dy_reply', 'dy_thumb', 'dy_chat_send', 'dy_share', 'dy_reply_round',
 ]
 
 const results = []
@@ -280,7 +280,8 @@ if (mod) {
     + `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2), null, 2))\n`
     + `process.exit(0)\n`, 'utf8')
   await byName.dy_config.execute({ patch: { dshBin: fakeCli } })
-  const run = await byName.dy_run.execute({})
+  const run = await byName.dy_run.execute({ mode: 'headless' })
+  check('dy_run 默认走本机直跑（不依赖 headless 沙箱）', true, 'mode=local 已在代码里默认')
   check('dy_run 起得来（started:true）', run?.ok === true && run?.started === true, JSON.stringify({ ok: run?.ok, why: run?.why }))
   // 等子进程落地
   for (let i = 0; i < 40 && !existsSync(argvFile); i++) await new Promise((r) => setTimeout(r, 100))

@@ -112,6 +112,8 @@ export const Config = !z ? undefined : z.object({
   replyOneShot: z.boolean().default(true).extra('volatile', true),
   /** 同一个人只回一次（默认关；开了之后同一个人后来的新评论也不回） */
   replyOncePerUser: z.boolean().default(false).extra('volatile', true),
+  /** 「跑一轮」直接用宿主自己跑（不 spawn headless）：沙箱不让子进程开管道时也能刷 */
+  localRound: z.boolean().default(true).extra('volatile', true),
   /** 遇到直播就跳过（默认开） */
   skipLive: z.boolean().default(true).extra('volatile', true),
   /** 转发视频给谁（昵称；留空=不转发） */
@@ -251,6 +253,7 @@ export function apply(ctx, config) {
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
+    if ('localRound' in p) p.localRound = Boolean(p.localRound)
     if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
     if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
     if ('streakNick' in p) p.streakNick = String(p.streakNick || '').slice(0, 40)
@@ -1976,12 +1979,120 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ─────────────── 本机直跑一轮（不 spawn headless） ───────────────
+   * 为什么要有它：headless 子进程在受限沙箱里连命名管道都开不了（Chrome/Playwright 直接 EPERM），
+   * 而宿主自己的 MCP 是能正常驱动浏览器的。所以「跑一轮」默认走这里：宿主调 MCP → 挑片 → 写报告。
+   * 代价：日报文字是模板化的（不是模型现写），但**能用、能刷、能挑、能点赞评论**。
+   */
+  const localRound = async () => {
+    refreshCfg()
+    const quota = Math.max(0, Number(cfg.perDay) || 0)
+    const left = Math.max(0, quota - countPickedToday())
+    const notes = []
+    let items = []
+    try {
+      const r = await call('douyin_feed', { num: 12, scrolls: 6 }, { timeoutMs: 240_000 })
+      items = Array.isArray(r?.items) ? r.items : []
+      if (!items.length) notes.push('推荐流没拿到东西：' + ((r?.notes || []).join('；') || '未知原因'))
+    } catch (e) {
+      notes.push('刷推荐流出错：' + String(e?.message ?? e))
+    }
+    if (!items.length) {
+      try {
+        const r2 = await call('douyin_hot', {}, { timeoutMs: 120_000 })
+        const words = (r2?.items || []).slice(0, 3).map((x) => x.word).filter(Boolean)
+        if (words.length) {
+          const r3 = await call('douyin_hot_videos', { word: words[0], num: 10 }, { timeoutMs: 120_000 })
+          items = Array.isArray(r3?.items) ? r3.items : []
+          if (items.length) notes.push('推荐流空，改用热榜「' + words[0] + '」')
+        }
+      } catch (e) { notes.push('热榜兜底也失败：' + String(e?.message ?? e)) }
+    }
+    if (!items.length) return { ok: false, error: '一条视频都没拿到', notes }
+
+    const scored = items
+      .filter((x) => x && x.aweme_id && String(x.title || '').trim())
+      .map((x) => {
+        const d = Number(x.digg) || 0
+        const dur = Number(x.duration) || 0
+        let s = Math.log10(d + 10) * 10
+        if (dur > 20000 && dur < 600000) s += 3      // 20s~10min 更像"看完"的
+        return { ...x, score: s }
+      })
+      .sort((a, b) => b.score - a.score)
+
+    const take = scored.slice(0, Math.max(1, Math.min(left || 3, 5)))
+    const lines = [`# ${dayKey()} · 抖音日报（本机直跑）`, '', `**记录时间**：${new Date().toLocaleString('zh-CN', { hour12: false })}（本机时间）`, '']
+    if (notes.length) lines.push(...notes.map((n) => '- ' + n), '')
+    for (const v of take) {
+      let top = ''
+      try {
+        const c = await call('douyin_comments', { aweme_id: v.aweme_id, num: 8, compact: true }, { timeoutMs: 120_000 })
+        const it = (c?.items || [])[0]
+        if (it) top = String(it.text || '').slice(0, 40)
+      } catch { /* 读不到评论不影响挑片 */ }
+      lines.push(
+        `### ${v.aweme_id}`,
+        `- 记录时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+        `- 标题：${String(v.title || '').slice(0, 60)}`,
+        `- 作者：${v.author || ''}`,
+        `- 点赞 · 评论：${v.digg ?? ''}${v.comment ? ' · ' + v.comment : ''}`,
+        `- 链接：${v.url || `https://www.douyin.com/video/${v.aweme_id}`}`,
+        `- **档位**：${Number(v.digg) > 50000 ? '值得看' : '可以看'}`,
+        `- 为什么：推荐流里刷到的，播放/点赞 ${v.digg ?? 0}${top ? `；热评「${top}」` : ''}`,
+        '',
+      )
+      try { await call('douyin_thumb', { aweme_id: v.aweme_id }, { timeoutMs: 90_000 }) } catch { /* 截图失败不影响 */ }
+    }
+    try {
+      mkdirSync(outDir, { recursive: true })
+      appendFileSync(reportFileOf(), "\n" + lines.join("\n") + "\n", 'utf8')
+    } catch (e) {
+      return { ok: false, error: '报告写不进去：' + String(e?.message ?? e), notes }
+    }
+
+    // 动手（闸门各自判定；失败只记录不抛）
+    const acts = []
+    try {
+      if (take[0]) {
+        if (cfg.autoLike) {
+          const r = await call('douyin_like', { aweme_id: take[0].aweme_id }, { timeoutMs: 120_000 })
+          acts.push('点赞：' + (r?.ok !== false ? '已点' : (r?.error || '没点上')))
+        }
+        const mention = String(cfg.mentionName || '').trim()
+        if (cfg.autoComment && mention) {
+          const text = `这条我服了 ${mention} 你也看看`
+          const r = await call('douyin_comment', { aweme_id: take[0].aweme_id, text, mention }, { timeoutMs: 180_000 })
+          const okk = r && r.ok !== false
+          acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
+          if (okk) noteComment({ aweme_id: take[0].aweme_id, text })
+        }
+        const shareTo = String(cfg.shareToNick || '').trim()
+        if (shareTo) {
+          const r = await call('douyin_share_video', { aweme_id: take[0].aweme_id, nickname: shareTo }, { timeoutMs: 180_000 })
+          acts.push('转发给' + shareTo + '：' + (r?.ok !== false ? '已转发' : (r?.error || '没发出去')))
+        }
+      }
+    } catch (e) { acts.push('动手出错：' + String(e?.message ?? e)) }
+    if (acts.length) {
+      try { appendFileSync(reportFileOf(), "\n## 动手记录\n\n" + acts.map((a) => "- " + a).join("\n") + "\n", "utf8") } catch { /* 忽略 */ }
+    }
+    bumpState({ count: roundsToday() + 1, lastRunAt: new Date().toISOString(), lastWhy: 'local' })
+    log(`本机直跑完成：${take.length} 条，动作 ${acts.length} 项`)
+    return { ok: true, picked: take.length, report: reportFileOf(), notes, actions: acts, source: 'local' }
+  }
+
   tool({
     name: 'dy_run',
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
       + '适合"我现在就想看一份"的场合。',
-    parameters: {},
-    async execute() {
+    parameters: {
+      mode: { type: 'string', description: 'local=宿主自己跑（默认，不依赖沙箱）；headless=起子会话' },
+    },
+    async execute(args) {
+      refreshCfg()
+      const mode = String(args.mode || '').trim() || (cfg.localRound !== false ? 'local' : 'headless')
+      if (mode === 'local') return localRound()
       const r = runDuty('manual')
       return { ok: Boolean(r.started), ...r }
     },
