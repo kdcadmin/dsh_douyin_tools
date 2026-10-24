@@ -115,7 +115,7 @@ export const Config = !z ? undefined : z.object({
   /** 「跑一轮」直接用宿主自己跑（不 spawn headless）：沙箱不让子进程开管道时也能刷 */
   localRound: z.boolean().default(true).extra('volatile', true),
   /** 每天最多转发几条（和「评论@」互斥：同一条视频不会被既@又转发） */
-  sharePerDay: z.natural().default(3).extra('volatile', true),
+  sharePerDay: z.natural().default(10).extra('volatile', true),
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
   msgAllowTo: z.string().default('').extra('volatile', true),
   /** 自动回复私信（别人发来消息就回一条） */
@@ -266,7 +266,7 @@ export function apply(ctx, config) {
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
-    if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 20))
+    if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
     if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
