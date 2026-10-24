@@ -717,6 +717,22 @@ export function apply(ctx, config) {
     const fromLedger = Object.values(readLedger().published || {}).map((p) => String(p?.awemeId || p?.video_id || '')).filter(Boolean)
     return [...new Set([...fromCfg, ...fromLedger])]
   }
+  /** 转发时配的那句话：可能是**吐槽**，也可能是**总结**（看视频内容），偶尔带一句热评 */
+  const makeShareNote = (video) => {
+    const fixed = String(cfg.shareNote || '').trim()
+    if (fixed) return fixed
+    const title = String(video?.title || '').replace(/\s+/g, ' ').trim()
+    const short = title.length > 26 ? title.slice(0, 26) + '…' : title
+    const joke = ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '笑死我了[捂脸]你也来看看',
+      '刚刷到这个，觉得你会喜欢[比心]', '这条真的有点东西，你看看']
+    const summary = short
+      ? [`总结一下：${short}，讲得挺清楚[比心]`, `这期在说「${short}」，看完有点收获[憨笑]`,
+         `刚看完一条：${short}。你要是感兴趣我发你[微笑]`]
+      : []
+    const pool = summary.length && Math.random() < 0.5 ? summary : joke
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+
   /** 这个人允不允许我「主动」发消息（白名单，空=谁都不许）；回复别人的消息不走这个 */
   const allowInitiate = (name) => {
     const list = String(cfg.msgAllowTo || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
@@ -1682,9 +1698,7 @@ export function apply(ctx, config) {
       const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
       if (r && r.ok !== false) {
         // 分享完再补一句「人话」——不然对方只收到一张卡片，很冷
-        const notes = ['这个视频好好笑，主人你也看看，哈哈哈', '刚刷到这个，觉得你会喜欢[笑哭]',
-          '这条真的有点东西，你看看[比心]', '笑死我了[捂脸]你也来看看']
-        const note = String(cfg.shareNote || '').trim() || notes[Math.floor(Math.random() * notes.length)]
+        const note = makeShareNote({ title: args.title || '' })
         let noteOk = false
         try {
           const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
@@ -2244,8 +2258,7 @@ export function apply(ctx, config) {
           if (okk) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             // 转发后附一句带表情的话 + 一个表情包（都失败也不影响转发本身）
-            const note = String(cfg.shareNote || '').trim()
-              || ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '刚刷到这条，给你[比心]'][Math.floor(Math.random() * 2)]
+            const note = makeShareNote(v)
             try {
               const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
               acts.push('转发附言：' + ((r2 && r2.ok !== false) ? '已发' : (r2?.error || '没发出去')))
