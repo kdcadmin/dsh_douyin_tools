@@ -226,8 +226,17 @@ window.__ModuleLoader__.load({
         setBusy('run'); setMsg('')
         try {
           const r = await jpost('/run', {})
-          setMsg(r.started ? '已经起了一轮（去「日常 → 今天的报告」看结果）' : ('没跑起来：' + (r.hint || r.error || '原因不明')))
-          setTone(r.started ? 'good' : 'warn')
+          if (r.ok) {
+            const acts = Array.isArray(r.actions) ? r.actions : []
+            setMsg(`刷完一轮：挑了 ${r.picked ?? 0} 条${acts.length ? '，' + acts.join('；') : ''}`)
+            setTone(acts.some((a) => /没|失败/.test(a)) ? 'warn' : 'good')
+            setWatched(null); setReport(null)
+            await load()
+            await loadWatched().catch(() => {})
+          } else {
+            setMsg('没跑成：' + (r.error || r.hint || '原因不明') + (Array.isArray(r.notes) && r.notes.length ? '（' + r.notes.join('；') + '）' : ''))
+            setTone('warn')
+          }
         } catch (e) { setMsg('跑一轮失败：' + String(e.message || e)); setTone('warn') }
         setBusy('')
       }

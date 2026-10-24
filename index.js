@@ -2008,7 +2008,13 @@ export function apply(ctx, config) {
         }
       } catch (e) { notes.push('热榜兜底也失败：' + String(e?.message ?? e)) }
     }
-    if (!items.length) return { ok: false, error: '一条视频都没拿到', notes }
+    if (!items.length) {
+      try {
+        mkdirSync(outDir, { recursive: true })
+        appendFileSync(reportFileOf(), "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：一条视频都没拿到" + (notes.length ? '（' + notes.join('；') + '）' : '') + "\n", 'utf8')
+      } catch { /* 忽略 */ }
+      return { ok: false, error: '一条视频都没拿到', notes }
+    }
 
     const scored = items
       .filter((x) => x && x.aweme_id && String(x.title || '').trim())
@@ -2356,8 +2362,23 @@ export function apply(ctx, config) {
     }
 
     if (method === 'POST' && path === '/api/douyin-duty/run') {
+      refreshCfg()
+      // ⭐ 2026-10-25：默认本机直跑（宿主自己调 MCP），不再 spawn headless（那个在沙箱里开不了管道）
+      if (cfg.localRound !== false) {
+        try {
+          const r = await localRound()
+          return sendJson(res, 200, { ok: r.ok !== false, ...r, mode: 'local' })
+        } catch (e) {
+          const msg = String(e?.message ?? e)
+          try {
+            mkdirSync(outDir, { recursive: true })
+            appendFileSync(reportFileOf(), "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：" + msg + "\n", 'utf8')
+          } catch { /* 报告都写不了就算了 */ }
+          return sendJson(res, 200, { ok: false, error: msg, mode: 'local' })
+        }
+      }
       const r = runDuty('http')
-      return sendJson(res, 200, { ok: Boolean(r.started), ...r })
+      return sendJson(res, 200, { ok: Boolean(r.started), ...r, mode: 'headless' })
     }
 
     // ⭐ 给设置页用：没有封面 URL 的条目，现截一张缩略图（<家>/thumbs/<id>.jpg）
