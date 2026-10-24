@@ -2732,6 +2732,65 @@ async def douyin_chat_send(nickname: str, text: str) -> str:
 
 
 @mcp.tool()
+async def douyin_inbox(limit: int = 12) -> str:
+    """读消息抽屉里的会话列表（谁发来的、最后一句是什么、什么时候）。
+
+    返回 {ok, items:[{name, preview, time}], count}
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
+        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
+        st = await _login_state(page, ctx)
+        if not st["loggedIn"]:
+            return _need_login("读私信要登录")
+        icon = page.locator('[data-e2e="im-entry"]').first
+        if not await icon.count():
+            return _err("没找到「消息」图标")
+        box = await icon.bounding_box()
+        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        # 抽屉是否打开：看右侧有没有那个「搜索」框（x 靠右），比数文案可靠
+        opened = False
+        for _ in range(14):
+            await page.wait_for_timeout(500)
+            opened = await page.evaluate(
+                """() => {
+                    const W = innerWidth;
+                    return Array.from(document.querySelectorAll('input'))
+                        .some((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.55);
+                }"""
+            )
+            if opened:
+                break
+        if not opened:
+            await page.screenshot(path=str(HOME / "thumbs" / "_inbox.png"))
+            return _err("消息抽屉没打开")
+        items = await page.evaluate(
+            """(limit) => {
+                const W = innerWidth;
+                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
+                    const r = e.getBoundingClientRect();
+                    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+                    return r.x > W * 0.5 && r.width > 140 && r.height >= 40 && r.height <= 110 && t.length > 1 && t.length < 80;
+                });
+                const out = [];
+                for (const e of rows) {
+                    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (t.indexOf('消息') === 0 && t.length < 4) continue;
+                    if (out.some((o) => o.text === t)) continue;
+                    out.push({ text: t });
+                }
+                return out.slice(0, limit);
+            }""",
+            max(1, min(int(limit or 12), 30)),
+        )
+        return _ok(items=items, count=len(items))
+
+    return j(await _guard(_impl, 90))
+
+
+@mcp.tool()
 async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0) -> str:
     """在私信里发表情包：打开抽屉 → 点那个人 → 输入关键词（默认「大肥鱼」）→ 联想表情面板 → 点其中一个发出去。
 

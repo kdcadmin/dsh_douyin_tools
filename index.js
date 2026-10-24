@@ -114,6 +114,14 @@ export const Config = !z ? undefined : z.object({
   replyOncePerUser: z.boolean().default(false).extra('volatile', true),
   /** 「跑一轮」直接用宿主自己跑（不 spawn headless）：沙箱不让子进程开管道时也能刷 */
   localRound: z.boolean().default(true).extra('volatile', true),
+  /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
+  msgAllowTo: z.string().default('').extra('volatile', true),
+  /** 自动回复私信（别人发来消息就回一条） */
+  dmReply: z.boolean().default(true).extra('volatile', true),
+  /** 每个联系人每天最多回几条 */
+  dmReplyPerContact: z.natural().default(1).extra('volatile', true),
+  /** 每天最多回几条私信（所有人合计） */
+  dmReplyPerDay: z.natural().default(5).extra('volatile', true),
   /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
   shareNote: z.string().default('').extra('volatile', true),
   /** 遇到直播就跳过（默认开） */
@@ -256,6 +264,10 @@ export function apply(ctx, config) {
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
+    if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
+    if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
+    if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
+    if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 100))
     if ('localRound' in p) p.localRound = Boolean(p.localRound)
     if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
     if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
@@ -693,6 +705,14 @@ export function apply(ctx, config) {
     const fromLedger = Object.values(readLedger().published || {}).map((p) => String(p?.awemeId || p?.video_id || '')).filter(Boolean)
     return [...new Set([...fromCfg, ...fromLedger])]
   }
+  /** 这个人允不允许我「主动」发消息（白名单，空=谁都不许）；回复别人的消息不走这个 */
+  const allowInitiate = (name) => {
+    const list = String(cfg.msgAllowTo || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+    if (!list.length) return false
+    const key = String(name || '').replace(/\s+/g, '').slice(0, 4)
+    return list.some((n) => String(n).replace(/\s+/g, '').slice(0, 4) === key)
+  }
+
   const shuffle = (arr) => {
     const a = [...arr]
     for (let i = a.length - 1; i > 0; i -= 1) {
@@ -1599,6 +1619,7 @@ export function apply(ctx, config) {
       const nick = String(args.nickname ?? '').trim()
       const text = String(args.text ?? '').trim()
       if (!nick || !text) return { ok: false, error: 'nickname 和 text 都要给' }
+      if (!allowInitiate(nick)) return { ok: false, error: `「${nick}」不在「可以主动发消息的人」名单里（设置 → 互动）` }
       const r = await call('douyin_chat_send', { nickname: nick, text }, { timeoutMs: 180_000 })
       log(`私信 → ${nick}：${text.slice(0, 40)}`)
       return r
@@ -1616,6 +1637,7 @@ export function apply(ctx, config) {
     async execute(args) {
       const nick = String(args.nickname ?? '').trim()
       if (!nick) return { ok: false, error: 'nickname 必填' }
+      if (!allowInitiate(nick)) return { ok: false, error: `「${nick}」不在「可以主动发消息的人」名单里（设置 → 互动）` }
       const r = await call('douyin_chat_sticker', {
         nickname: nick,
         keyword: String(args.keyword || '大肥鱼'),
@@ -1623,6 +1645,13 @@ export function apply(ctx, config) {
       }, { timeoutMs: 240_000 })
       return r
     },
+  })
+
+  tool({
+    name: 'dy_dm_round',
+    description: '看一遍私信：谁发来新消息就回一句（每人每天「回几条」有限制，总条数也有上限）。陌生人消息也会回。',
+    parameters: {},
+    async execute() { return dmRound() },
   })
 
   tool({
@@ -1636,6 +1665,7 @@ export function apply(ctx, config) {
       const id = String(args.aweme_id ?? '').trim()
       const to = String(args.to ?? '').trim() || String(cfg.shareToNick || '').trim()
       if (!id || !to) return { ok: false, error: '要么给 aweme_id 和 to，要么先在设置里填「转发给谁」' }
+      if (!allowInitiate(to)) return { ok: false, error: `「${to}」不在「可以主动发消息的人」名单里（设置 → 互动）` }
       // 走「分享面板」转发（视频页 → 分享 → 点那个人的分享）
       const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
       if (r && r.ok !== false) {
@@ -2030,6 +2060,58 @@ export function apply(ctx, config) {
    * 而宿主自己的 MCP 是能正常驱动浏览器的。所以「跑一轮」默认走这里：宿主调 MCP → 挑片 → 写报告。
    * 代价：日报文字是模板化的（不是模型现写），但**能用、能刷、能挑、能点赞评论**。
    */
+  /** 自动回复私信：读消息抽屉 → 找到「别人发来的、还没回过的」→ 回一句（每人每天 limit 条） */
+  const dmRound = async () => {
+    refreshCfg()
+    if (!cfg.dmReply) return { ok: true, skipped: '自动回私信关着' }
+    const perDay = Math.max(0, Number(cfg.dmReplyPerDay) || 0)
+    if (!perDay) return { ok: true, skipped: '每天最多回 0 条' }
+    const today = dayKey()
+    const led = readLedger()
+    led.dm = led.dm || {}
+    const usedToday = Object.values(led.dm).filter((r) => r && r.day === today).reduce((n, r) => n + (Number(r.count) || 0), 0)
+    if (usedToday >= perDay) return { ok: true, skipped: `今天私信额度用完了（${usedToday}/${perDay}）` }
+
+    const inbox = await call('douyin_inbox', { limit: 12 }, { timeoutMs: 120_000 })
+    const rows = Array.isArray(inbox?.items) ? inbox.items : []
+    const out = []
+    for (const row of rows) {
+      const m = String(row.text || '').match(/^(.+?)\s+(\d|昨天|刚刚|\d+月|\d+分钟|\d+小时)/)
+      const name = (m ? m[1] : String(row.text || '')).trim()
+      const preview = String(row.text || '').replace(name, '').trim()
+      if (!name || /^(充钻石|消息|通知)/.test(name)) continue
+      if (isMine(name)) continue                                   // 自己的会话不回
+      if (usedToday >= perDay) break
+      const rec = led.dm[name] || { count: 0, lastSeen: '' }
+      if (rec.day !== today) { rec.count = 0; rec.day = today }
+      if (rec.lastSeen === preview) continue                        // 没有新消息
+      if (rec.count >= Math.max(1, Number(cfg.dmReplyPerContact) || 1)) continue
+      const reply = /表情|\[/.test(preview) ? '哈哈哈你也太可爱了[憨笑]'
+        : /你好|在吗|在不在/.test(preview) ? '在的在的[比心]'
+        : /视频|分享/.test(preview) ? '看到了，我去看看[笑哭]'
+        : '收到啦[憨笑]'
+      try {
+        const r = await call('douyin_chat_send', { nickname: name, text: reply }, { timeoutMs: 180_000 })
+        const ok = r && r.ok !== false
+        rec.count = Number(rec.count || 0) + 1
+        rec.lastSeen = preview
+        led.dm[name] = rec
+        if (ok) usedToday += 1
+        out.push({ to: name, preview: preview.slice(0, 30), reply, ok, error: ok ? undefined : (r?.error || '没发出去') })
+      } catch (e) {
+        out.push({ to: name, ok: false, error: String(e?.message ?? e) })
+      }
+    }
+    writeLedger(led)
+    if (out.length) {
+      try {
+        appendFileSync(reportFileOf(), "\n## 回了私信\n\n" + out.map((o) => `- ${o.to}：${o.ok ? '已回「' + o.reply + '」' : '没回成（' + o.error + '）'}`).join("\n") + "\n", 'utf8')
+      } catch { /* 忽略 */ }
+    }
+    log(`回私信：${out.filter((o) => o.ok).length}/${out.length} 条`)
+    return { ok: true, replied: out.filter((o) => o.ok).length, items: out, usedToday, perDay }
+  }
+
   localRound = async () => {
     refreshCfg()
     const quota = Math.max(0, Number(cfg.perDay) || 0)
@@ -2278,6 +2360,7 @@ export function apply(ctx, config) {
       try {
         refreshCfg()
         await maybeKeepStreak()
+        try { await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
         if (cfg.autoReply && !replyBusy) {
           replyBusy = true
           lastReplyCheckAt = new Date().toISOString()
