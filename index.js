@@ -1139,7 +1139,9 @@ export function apply(ctx, config) {
     // ⚠️ 2026-10-25 实测：桌面端用的 provider（比如 qwen-token-plan-cn）是**桌面 profile 里装的插件**，
     //    headless profile 没有那个 adapter ⇒ 直接报 `NO_ADAPTER: no adapter registered for provider "…"`，那一轮根本跑不起来。
     //    所以默认**不写** provider/model：让 headless 用它自己的默认模型；真要指定就填设置里的「headless 模型」。
-    const forced = String(cfg.headlessModel || '').trim()
+    // 桌面端用登录态（deepseek-account）；headless 默认走 llm-deepseek 的 deepseek-official 需要 API key，
+    // 没填 key 就会 MISSING_CREDENTIAL ⇒ 默认指定成账号路由。
+    const forced = String(cfg.headlessModel || '').trim() || 'deepseek-account/deepseek-flash'
     try {
       let selProvider = ''
       let selModel = ''
