@@ -1115,10 +1115,15 @@ export function apply(ctx, config) {
   /* ─────────────── 跑一轮 ─────────────── */
 
   const mcpWhitelist = () => {
-    const list = ['douyin_hot', 'douyin_hot_videos', 'douyin_search', 'douyin_video', 'douyin_comments']
+    // ⭐ 2026-10-25：之前漏了 feed/my_posts/chat/share —— 结果「刷推荐流」「转发」「续火花」「@豆包」
+    //    在那一轮里根本看不到工具，所以永远不会发生。
+    const list = ['douyin_feed', 'douyin_hot', 'douyin_hot_videos', 'douyin_search', 'douyin_video',
+      'douyin_comments', 'douyin_my_posts']
     if (cfg.autoLike) list.push('douyin_like')
     if (cfg.autoComment && String(cfg.mentionName || '').trim()) list.push('douyin_comment')
     if (cfg.autoPublish) list.push('douyin_publish')
+    if (String(cfg.shareToNick || '').trim()) list.push('douyin_share_video')
+    if (String(cfg.streakNick || '').trim()) list.push('douyin_chat_send')
     return list
   }
 
