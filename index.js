@@ -2368,7 +2368,10 @@ export function apply(ctx, config) {
    * 🔴 定时器回调里抛的异常没人接 ⇒ 会杀掉整个宿主进程（bili 版 2026-10-14 的事故）。
    *    ⇒ **回调必须自己兜住所有异常**：插件再错也只该"这一轮没跑成"。
    */
-  const tick = () => {
+  /** 谷时窗口到点就刷 —— ⭐ 2026-10-25 修：以前这里调 runDuty()（spawn headless，沙箱里必挂），
+   *  而且窗口标记是「跑之前」就写上 ⇒ 一轮没跑成也当天不再试。现在改成跑本机直跑（localRound），
+   *  并且**只有真的挑到东西才记窗口**，失败下一分钟还会再试（同一天最多试 6 次，别死循环）。 */
+  const tick = async () => {
     try {
       refreshCfg()
       if (!cfg.peakValley) return
@@ -2381,14 +2384,28 @@ export function apply(ctx, config) {
         if (!cfg[k]) continue
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
-        if (st.windows?.[key]) continue
-        bumpState({
-          windows: { ...(st.windows || {}), [key]: true },
-          count: roundsToday(now) + 1,
-          lastRunAt: now.toISOString(),
-          lastWhy: k,
-        })
-        runDuty(`window:${k}`)
+        const triesKey = `winTries:${key}`
+        if (st.windows?.[key]) return
+        if (Number(st[triesKey] || 0) >= 6) return
+        bumpState({ [triesKey]: Number(st[triesKey] || 0) + 1 })
+        log(`谷时窗口到了（${k}），开始刷一轮`)
+        let r = null
+        try {
+          r = typeof localRound === 'function' ? await localRound() : null
+        } catch (e) {
+          log(`谷时那一轮抛错（已兜住）：${e?.message ?? e}`)
+        }
+        if (r && r.ok !== false && (r.picked > 0 || r.skipped)) {
+          bumpState({
+            windows: { ...(readState().windows || {}), [key]: true },
+            count: roundsToday(now) + 1,
+            lastRunAt: now.toISOString(),
+            lastWhy: `window:${k}`,
+          })
+          log(`谷时那一轮完成：挑了 ${r.picked ?? 0} 条`)
+        } else {
+          log(`谷时那一轮没成：${r?.error || '未知原因'}（下一分钟再试）`)
+        }
         return
       }
     } catch (e) {
