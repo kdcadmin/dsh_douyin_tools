@@ -114,6 +114,8 @@ export const Config = !z ? undefined : z.object({
   replyOncePerUser: z.boolean().default(false).extra('volatile', true),
   /** 「跑一轮」直接用宿主自己跑（不 spawn headless）：沙箱不让子进程开管道时也能刷 */
   localRound: z.boolean().default(true).extra('volatile', true),
+  /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
+  shareNote: z.string().default('').extra('volatile', true),
   /** 遇到直播就跳过（默认开） */
   skipLive: z.boolean().default(true).extra('volatile', true),
   /** 转发视频给谁（昵称；留空=不转发） */
@@ -253,6 +255,7 @@ export function apply(ctx, config) {
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
+    if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('localRound' in p) p.localRound = Boolean(p.localRound)
     if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
     if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
@@ -1615,7 +1618,18 @@ export function apply(ctx, config) {
       if (!id || !to) return { ok: false, error: '要么给 aweme_id 和 to，要么先在设置里填「转发给谁」' }
       // 走「分享面板」转发（视频页 → 分享 → 点那个人的分享）
       const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
-      if (r && r.ok !== false) return { ...r, shared_to: to, via: 'share-panel' }
+      if (r && r.ok !== false) {
+        // 分享完再补一句「人话」——不然对方只收到一张卡片，很冷
+        const notes = ['这个视频好好笑，主人你也看看，哈哈哈', '刚刷到这个，觉得你会喜欢[笑哭]',
+          '这条真的有点东西，你看看[比心]', '笑死我了[捂脸]你也来看看']
+        const note = String(cfg.shareNote || '').trim() || notes[Math.floor(Math.random() * notes.length)]
+        let noteOk = false
+        try {
+          const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
+          noteOk = r2 && r2.ok !== false
+        } catch { /* 附言失败不影响转发成功 */ }
+        return { ...r, shared_to: to, via: 'share-panel', note, noteOk }
+      }
       // 面板里没有这个人就退回发链接
       const url = `https://www.douyin.com/video/${id}`
       const r2 = await call('douyin_chat_send', { nickname: to, text: `这个好看，给你：${url}` }, { timeoutMs: 180_000 })
