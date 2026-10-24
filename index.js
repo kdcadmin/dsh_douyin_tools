@@ -717,20 +717,42 @@ export function apply(ctx, config) {
     const fromLedger = Object.values(readLedger().published || {}).map((p) => String(p?.awemeId || p?.video_id || '')).filter(Boolean)
     return [...new Set([...fromCfg, ...fromLedger])]
   }
-  /** 转发时配的那句话：可能是**吐槽**，也可能是**总结**（看视频内容），偶尔带一句热评 */
+  /** 转发时配的那句话：按视频类型变——
+   *   · 好看/娱乐的 ⇒ 直接夸「好好看，给我看」
+   *   · 知识/干货的 ⇒ 说清它讲了什么 + 感觉有用
+   *   · 其它 ⇒ 随口一句吐槽
+   *  设置里填了 shareNote 就按你写的发。
+   */
   const makeShareNote = (video) => {
     const fixed = String(cfg.shareNote || '').trim()
     if (fixed) return fixed
-    const title = String(video?.title || '').replace(/\s+/g, ' ').trim()
-    const short = title.length > 26 ? title.slice(0, 26) + '…' : title
-    const joke = ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '笑死我了[捂脸]你也来看看',
+    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
+    const short = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
+    const kw = (s) => raw.includes(s)
+    const know = ['知识', '教程', '讲解', '解析', '科普', '课程', '习题', '考研', '入门', '实战',
+      '原理', '源码', '框架', '教学', '精讲', '干货', '方法论', '如何', '怎么', '技巧', '复盘']
+      .some(kw)
+    const pretty = ['好看', '颜值', '舞蹈', '翻唱', '剧情', '短片', 'MV', '摄影', '穿搭', 'cos', 'cosplay']
+      .some(kw)
+    const fun = ['搞笑', '沙雕', '整活', '段子', '笑死', '沙雕', '游戏', '王者', '三角洲', '萌宠', '猫', '狗']
+      .some(kw)
+
+    if (know) {
+      const pool = short
+        ? [`这期讲「${short}」，感觉挺有用的[比心]`,
+           `总结一下：${short}。看完有点收获[憨笑]`,
+           `这个视频把「${short}」讲清楚了，你可以看看[微笑]`]
+        : ['这条挺干货的，感觉有用[比心]']
+      return pool[Math.floor(Math.random() * pool.length)]
+    }
+    if (pretty || fun) {
+      const pool = ['好好看，给我看[比心]', '这个太好看了，你也看看[笑哭]',
+        '刷到这个就想到你，好看[害羞]', '好看！这个必须给你看[比心]']
+      return pool[Math.floor(Math.random() * pool.length)]
+    }
+    const other = ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '笑死我了[捂脸]你也来看看',
       '刚刷到这个，觉得你会喜欢[比心]', '这条真的有点东西，你看看']
-    const summary = short
-      ? [`总结一下：${short}，讲得挺清楚[比心]`, `这期在说「${short}」，看完有点收获[憨笑]`,
-         `刚看完一条：${short}。你要是感兴趣我发你[微笑]`]
-      : []
-    const pool = summary.length && Math.random() < 0.5 ? summary : joke
-    return pool[Math.floor(Math.random() * pool.length)]
+    return other[Math.floor(Math.random() * other.length)]
   }
 
   /** 这个人允不允许我「主动」发消息（白名单，空=谁都不许）；回复别人的消息不走这个 */
