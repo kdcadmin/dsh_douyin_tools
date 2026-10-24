@@ -2000,6 +2000,9 @@ export function apply(ctx, config) {
     refreshCfg()
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const left = Math.max(0, quota - countPickedToday())
+    if (left <= 0) {
+      return { ok: true, picked: 0, skipped: `今天已经挑够 ${quota} 条了（不再重复挑）`, report: reportFileOf(), actions: [] }
+    }
     const notes = []
     let items = []
     try {
@@ -2028,7 +2031,13 @@ export function apply(ctx, config) {
       return { ok: false, error: '一条视频都没拿到', notes }
     }
 
-    const scored = items
+    // 今天报告里已经写过的 id 不再挑（否则每点一次就多 5 条）
+    let seenIds = new Set()
+    try {
+      const txt = readFileSync(reportFileOf(), 'utf8')
+      for (const m of txt.matchAll(/^###\s*(\d{6,})/gm)) seenIds.add(m[1])
+    } catch { /* 没报告就全算新的 */ }
+    const scored = items.filter((x) => !seenIds.has(String(x.aweme_id)))
       .filter((x) => x && x.aweme_id && String(x.title || '').trim())
       .map((x) => {
         const d = Number(x.digg) || 0
@@ -2039,7 +2048,7 @@ export function apply(ctx, config) {
       })
       .sort((a, b) => b.score - a.score)
 
-    const take = scored.slice(0, Math.max(1, Math.min(left || 3, 5)))
+    const take = scored.slice(0, Math.max(1, Math.min(left, 5)))
     const lines = [`# ${dayKey()} · 抖音日报（本机直跑）`, '', `**记录时间**：${new Date().toLocaleString('zh-CN', { hour12: false })}（本机时间）`, '']
     if (notes.length) lines.push(...notes.map((n) => '- ' + n), '')
     for (const v of take) {
