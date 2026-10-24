@@ -2286,6 +2286,86 @@ def _drop_live(items):
         keep.append(it)
     return keep, dropped
 
+async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
+    """刷推荐流：打开首页推荐，滚几屏，把露出的视频收下来（不搜关键词）。"""
+    notes = []
+    await _goto(page, "https://www.douyin.com/", settle=5.0)
+    st = await _login_state(page, ctx)
+    if not st["loggedIn"]:
+        notes.append("没登录：推荐流会更窄，仍然能刷")
+    seen = {}
+
+    async def _on_resp(resp):
+        try:
+            u = resp.url or ""
+            if "/aweme/v1/web/tab/feed/" not in u and "/aweme/v1/web/module/feed/" not in u:
+                return
+            data = await resp.json()
+            for a in (data or {}).get("aweme_list") or []:
+                aid = str(a.get("aweme_id") or "")
+                if not aid or aid in seen:
+                    continue
+                desc = str(a.get("desc") or "")
+                seen[aid] = {"aweme_id": aid, "title": desc[:60],
+                             "url": "https://www.douyin.com/video/" + aid,
+                             "duration": a.get("duration") or 0,
+                             "author": ((a.get("author") or {}).get("nickname") or "")[:20],
+                             "digg": (a.get("statistics") or {}).get("digg_count") or 0}
+        except Exception:
+            return
+
+    page.on("response", _on_resp)
+    try:
+        await _goto(page, "https://www.douyin.com/?recommend=1", settle=5.0)
+        st = await _login_state(page, ctx)
+        if not st["loggedIn"]:
+            notes.append("没登录：推荐流会更窄，仍然能刷")
+        idle = 0
+        for i in range(max(1, scrolls)):
+            if len(seen) >= num or idle >= 3:
+                break
+            before = len(seen)
+            try:
+                await page.mouse.wheel(0, 1800)
+                await page.wait_for_timeout(2200)
+            except Exception:
+                break
+            if len(seen) == before:
+                idle += 1
+            else:
+                idle = 0
+        if not seen:
+            notes.append("推荐流的接口没抓到东西（可能要登录/风控）")
+    finally:
+        try:
+            page.remove_listener("response", _on_resp)
+        except Exception:
+            pass
+
+    items = list(seen.values())[:num]
+    items, dropped = _drop_live(items)
+    if dropped:
+        notes.append(f"跳过 {dropped} 条直播")
+    return _ok(items=items, count=len(items), source="feed", notes=notes or None)
+
+@mcp.tool()
+async def douyin_feed(num: int = 10, scrolls: int = 6) -> str:
+    """刷抖音推荐流（**不搜索**）：打开首页推荐，往下滚几屏，把露出的视频收下来。
+
+    Args:
+        num: 想要几条（默认 10）
+        scrolls: 最多滚几屏（默认 6）
+
+    返回 {ok, items:[{aweme_id,title,url}], count, notes?}
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        return await _feed_core(page, ctx, max(1, min(int(num or 10), 50)), max(1, min(int(scrolls or 6), 30)))
+
+    return j(await _guard(_impl, 120))
+
+
 @mcp.tool()
 async def douyin_search(keyword: str, num: int = 10, order: str = "general") -> str:
     """搜索抖音视频（需登录）。
@@ -2440,70 +2520,139 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
     return j(await _guard(_impl, 70))
 
 
+async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
+    """转发：打开视频 → 点分享 → 面板里找到那个人 → 点他这行的「分享」。
+    选择器来自实测：分享按钮 = [data-e2e="video-player-share"] / [aria-label="video-share-icon-container"]。
+    """
+    notes = []
+    aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
+    await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=4.0)
+    st = await _login_state(page, ctx)
+    if not st["loggedIn"]:
+        return _need_login("转发要登录", aweme_id=aid)
+
+    opened = False
+    for sel in ['[data-e2e="video-player-share"]', '[aria-label="video-share-icon-container"]']:
+        loc = page.locator(sel).first
+        if await loc.count():
+            try:
+                await loc.click(timeout=6000, force=True)
+                opened = True
+                break
+            except Exception:
+                continue
+    if not opened:
+        return _err("没找到分享按钮（页面可能改版）", aweme_id=aid, url=page.url)
+    await page.wait_for_timeout(2000)
+
+    hit = await page.evaluate(
+        """(nick) => {
+            const rows = Array.from(document.querySelectorAll('div, li'));
+            for (const row of rows) {
+                const t = (row.innerText || '');
+                if (!t.includes(nick)) continue;
+                const btns = Array.from(row.querySelectorAll('div, span, button'))
+                    .filter((b) => (b.innerText || '').trim() === '分享');
+                for (const b of btns) {
+                    b.click();
+                    return { ok: true, row: t.replace(/\s+/g, ' ').slice(0, 40) };
+                }
+            }
+            return { ok: false };
+        }""",
+        nickname,
+    )
+    await page.wait_for_timeout(2500)
+    if hit.get("ok"):
+        return _ok(shared_to=nickname, aweme_id=aid, matched=hit.get("row"), notes=notes or None)
+    return _err(f"分享面板里没找到「{nickname}」（面板里可能没有这个人）", aweme_id=aid, notes=notes or None)
+
+
+async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
+    """私信：首页右上「消息」→ 右侧抽屉 → 搜索昵称 → 点会话 → 输入 → 回车。
+    续火花 / 发表情包 / 发链接都走这一条。
+    """
+    notes = []
+    await _goto(page, "https://www.douyin.com/", settle=4.0)
+    st = await _login_state(page, ctx)
+    if not st["loggedIn"]:
+        return _need_login("私信要登录", nickname=nickname)
+
+    # 打开「消息」抽屉
+    opened = await page.evaluate(
+        """() => {
+            const nodes = Array.from(document.querySelectorAll('div, span, button, a'));
+            const hit = nodes.find((e) => (e.innerText || '').trim() === '消息' && e.getClientRects().length);
+            if (hit) { hit.click(); return true; }
+            return false;
+        }"""
+    )
+    if not opened:
+        notes.append("没点到「消息」按钮")
+    await page.wait_for_timeout(2500)
+
+    # 抽屉里的搜索框
+    box = await _first_of(page, [
+        "input[placeholder*='搜索']",
+        "div[contenteditable='true']",
+        "input[type='text']",
+    ], 5000)
+    if box is None:
+        return _err("消息抽屉里没找到搜索框", url=page.url, notes=notes)
+    try:
+        await box.click()
+        await page.keyboard.type(nickname, delay=40)
+        await page.wait_for_timeout(2200)
+        # 点搜索结果里的会话
+        picked = await page.evaluate(
+            """(nick) => {
+                const nodes = Array.from(document.querySelectorAll('div, li'));
+                const hit = nodes.find((e) => {
+                    const t = (e.innerText || '');
+                    return t.includes(nick) && t.length < 120 && e.getClientRects().length;
+                });
+                if (hit) { hit.click(); return true; }
+                return false;
+            }""",
+            nickname,
+        )
+        notes.append("选中会话" if picked else "没点到会话，尝试直接发")
+        await page.wait_for_timeout(2000)
+        ed = await _first_of(page, ["div[contenteditable='true']", "textarea"], 5000)
+        if ed is None:
+            return _err("没找到输入框", url=page.url, notes=notes)
+        await ed.click()
+        await page.keyboard.type(text, delay=30)
+        await page.wait_for_timeout(600)
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(1800)
+        return _ok(to=nickname, sent=text, notes=notes)
+    except Exception as exc:
+        return _err(f"发私信失败：{type(exc).__name__}: {exc}", url=page.url, notes=notes)
+
 @mcp.tool()
 async def douyin_chat_send(nickname: str, text: str) -> str:
-    """给某个好友发一条私信（抖音聊天页）。
+    """给好友发一条私信（首页右上「消息」→ 搜索昵称 → 输入 → 回车）。
 
-    一个原语干三件事：
-      · 转发视频：text 里放视频链接（https://www.douyin.com/video/<id>）
-      · 续火花：随便发一句（比如「今天也在哦」）
-      · 发表情包：text 里写抖音表情文本码（如 [憨笑]），聊天里会渲染成表情
-
-    Args:
-        nickname: 对方昵称（会先在聊天页搜索）
-        text: 发送内容（可含链接 / 表情文本码）
-
-    返回 {ok, to, sent, notes?}
+    一个原语干三件事：转发（正文放视频链接）、续火花（随便一句）、发表情包（写 [憨笑] 这类文本码）。
     """
     async def _impl():
         ctx = await _browser.context()
         page = await _browser.page()
-        notes = []
-        await _goto(page, "https://www.douyin.com/chat", settle=4.0)
-        st = await _login_state(page, ctx)
-        if not st["loggedIn"]:
-            return _need_login("私信要登录", nickname=nickname)
-        # 搜索框：找人
-        box = await _first_of(page, [
-            "input[placeholder*='搜索']",
-            "input[type='text']",
-        ], 6000)
-        if box is None:
-            await page.screenshot(path=str(_thumb_dir() / "_chat.png"))
-            return _err("聊天页没找到搜索框（可能改版）", url=page.url, notes=notes)
-        try:
-            await box.click()
-            await box.fill(nickname)
-            await page.wait_for_timeout(2500)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(2500)
-        except Exception as exc:
-            notes.append(f"搜索失败：{type(exc).__name__}")
-        # 点第一个会话
-        hit = page.get_by_text(nickname, exact=False).first
-        if await hit.count():
-            try:
-                await hit.click(timeout=5000)
-                await page.wait_for_timeout(2000)
-            except Exception:
-                notes.append("点会话失败")
-        # 输入框：contenteditable 或 textarea
-        ed = await _first_of(page, ["div[contenteditable='true']", "textarea", "input[type='text']"], 5000)
-        if ed is None:
-            await page.screenshot(path=str(_thumb_dir() / "_chat.png"))
-            return _err("没找到消息输入框", url=page.url, notes=notes)
-        try:
-            await ed.click()
-            await page.keyboard.type(text, delay=25)
-            await page.wait_for_timeout(600)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(1800)
-            notes.append("已按 Enter 发送")
-        except Exception as exc:
-            return _err(f"发送失败：{type(exc).__name__}: {exc}", notes=notes)
-        return _ok(to=nickname, sent=text, notes=notes)
+        return await _chat_send_core(page, ctx, nickname, text)
 
-    return j(await _guard(_impl, 80))
+    return j(await _guard(_impl, 90))
+
+
+@mcp.tool()
+async def douyin_share_video(aweme_id: str, nickname: str) -> str:
+    """把视频转发给某个人：视频页 → 分享 → 面板里点他那行的「分享」。"""
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        return await _share_core(page, ctx, aweme_id, nickname)
+
+    return j(await _guard(_impl, 90))
 
 
 @mcp.tool()

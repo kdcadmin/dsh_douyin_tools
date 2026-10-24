@@ -1566,9 +1566,13 @@ export function apply(ctx, config) {
       const id = String(args.aweme_id ?? '').trim()
       const to = String(args.to ?? '').trim() || String(cfg.shareToNick || '').trim()
       if (!id || !to) return { ok: false, error: '要么给 aweme_id 和 to，要么先在设置里填「转发给谁」' }
+      // 走「分享面板」转发（视频页 → 分享 → 点那个人的分享）
+      const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
+      if (r && r.ok !== false) return { ...r, shared_to: to, via: 'share-panel' }
+      // 面板里没有这个人就退回发链接
       const url = `https://www.douyin.com/video/${id}`
-      const r = await call('douyin_chat_send', { nickname: to, text: `这个好看，给你：${url}` }, { timeoutMs: 180_000 })
-      return { ...(r || {}), shared_to: to, url }
+      const r2 = await call('douyin_chat_send', { nickname: to, text: `这个好看，给你：${url}` }, { timeoutMs: 180_000 })
+      return { ...(r2 || {}), shared_to: to, via: 'chat-link', panelError: r?.error }
     },
   })
 
@@ -1670,6 +1674,22 @@ export function apply(ctx, config) {
       const stamped = `${new Date().toISOString().slice(0, 10)} ${new Date().toTimeString().slice(0, 8)} · ${line}`
       appendMemory(stamped)
       return { ok: true, file: memFileOf(), line: stamped, lines: readMemory(1000).length }
+    },
+  })
+
+  tool({
+    name: 'dy_feed',
+    description: '刷抖音推荐流（不搜索）：打开首页推荐、往下滚几屏，把露出的视频收下来。这就是「直接刷」。',
+    parameters: {
+      num: { type: 'number', description: '要几条（默认 10）' },
+      scrolls: { type: 'number', description: '最多滚几屏（默认 6）' },
+    },
+    async execute(args) {
+      const r = await call('douyin_feed', {
+        num: Math.max(1, Math.min(Number(args.num) || 10, 50)),
+        scrolls: Math.max(1, Math.min(Number(args.scrolls) || 6, 30)),
+      }, { timeoutMs: 240_000 })
+      return r
     },
   })
 
