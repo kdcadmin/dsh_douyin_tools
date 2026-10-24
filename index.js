@@ -1030,6 +1030,18 @@ export function apply(ctx, config) {
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
     ].filter(Boolean)) if (existsSync(g)) return g
+    // ⭐ 2026-10-25：新版把 dsh 打进 app.asar（磁盘上没有 @deepseek-ai/dsh 这个目录了），
+    //    但 Electron 主进程能直接读到 asar 内的路径 ⇒ 直接试这几个。
+    for (const rel of [
+      join('app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join('app.asar.unpacked', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join('app', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    ]) {
+      const base = process.resourcesPath || (() => { try { return join(dirname(process.execPath), 'resources') } catch { return '' } })()
+      if (!base) continue
+      const full = join(base, rel)
+      try { if (existsSync(full)) return full } catch { /* 读不到就跳过 */ }
+    }
     const roots = []
     if (process.resourcesPath) roots.push(process.resourcesPath)
     try { roots.push(join(dirname(process.execPath), 'resources')) } catch { /* 没有就算了 */ }
@@ -1091,7 +1103,7 @@ export function apply(ctx, config) {
   const resolveDsh = () => {
     const cli = dshCliCached()
     if (cli) return { command: process.execPath, args: [cli], shell: false }
-    const hint = '已经把常见位置和应用目录都翻过一遍了。可以手动把「dsh 路径」填成 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js，或改用 npm 装的 dsh'
+    const hint = '新版把 dsh 打进 app.asar 了，理论上应该能自动找到；实在找不到就把「dsh 路径」填成 D:\\DeepSeekHarness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
     if (!hasDshOnPath()) {
       log('⚠️ 找不到 dsh（常见位置、应用目录、PATH 里都没有）⇒ ' + hint)
       return { missing: true, hint }
