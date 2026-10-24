@@ -117,6 +117,10 @@ export const Config = !z ? undefined : z.object({
   localRound: z.boolean().default(true).extra('volatile', true),
   /** 每天最多转发几条（和「评论@」互斥：同一条视频不会被既@又转发） */
   sharePerDay: z.natural().default(10).extra('volatile', true),
+  /** 超过这个分钟数直接划走（不看、不评、不转） */
+  skipOverMin: z.natural().default(60).extra('volatile', true),
+  /** 超过这个分钟数就算「跳着看」（挑重点段落，评论措辞也要体现） */
+  skimOverMin: z.natural().default(5).extra('volatile', true),
   /** 一轮最多挑几条（别一口气刷完） */
   pickPerRound: z.natural().default(2).extra('volatile', true),
   /** 自动评论（**不@人**，就是普通评论一句） */
@@ -216,7 +220,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareNote: '', sharePerDay: 10, pickPerRound: 2, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareNote: '', sharePerDay: 10, pickPerRound: 2, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -277,6 +281,8 @@ export function apply(ctx, config) {
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
     if ('pickPerRound' in p) p.pickPerRound = Math.max(1, Math.min(Number(p.pickPerRound) || 1, 5))
+    if ('skipOverMin' in p) p.skipOverMin = Math.max(1, Math.min(Number(p.skipOverMin) || 60, 600))
+    if ('skimOverMin' in p) p.skimOverMin = Math.max(1, Math.min(Number(p.skimOverMin) || 5, 120))
     if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
     if ('plainCommentPerDay' in p) p.plainCommentPerDay = Math.max(0, Math.min(Number(p.plainCommentPerDay) || 0, 30))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
@@ -619,6 +625,7 @@ export function apply(ctx, config) {
 
   /** 看完再评论：拿标题 +（有的话）热评，说清这条讲了啥，比「说得对」像人 */
   const makePlainComment = (video, topComment) => {
+    const skim = Boolean(video?.skim)
     const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
     const short = raw.length > 20 ? raw.slice(0, 20) + '…' : raw
     const tag = String(topComment || '').replace(/\s+/g, ' ').slice(0, 14)
@@ -629,7 +636,12 @@ export function apply(ctx, config) {
       if (tag) pool.push(`「${short}」看完最有感的是评论区那句「${tag}」[憨笑]`)
       pool.push(`「${short}」这个我还真看完了一遍，挺值[赞]`)
     }
-    pool.push('这条我一路看完了，比标题写得好[笑哭]', '笑死我了，看到一半就忍不住了[捂脸]')
+    if (skim) {
+      pool.push(`这条 ${Math.round(Number(video?.mins) || 0)} 分钟，我跳着看了几段，重点都在后半段[比心]`)
+      pool.push(`太长了，跳着看完了「${short}」，中间那段最值[憨笑]`)
+    } else {
+      pool.push('这条我一路看完了，比标题写得好[笑哭]', '笑死我了，看到一半就忍不住了[捂脸]')
+    }
     return pool[Math.floor(Math.random() * pool.length)]
   }
 
@@ -790,6 +802,7 @@ export function apply(ctx, config) {
    *  设置里填了 shareNote 就按你写的发。
    */
   const makeShareNote = (video) => {
+    const skim = Boolean(video?.skim)
     const fixed = String(cfg.shareNote || '').trim()
     if (fixed) return fixed
     const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
@@ -803,6 +816,10 @@ export function apply(ctx, config) {
     const fun = ['搞笑', '沙雕', '整活', '段子', '笑死', '沙雕', '游戏', '王者', '三角洲', '萌宠', '猫', '狗']
       .some(kw)
 
+    if (skim && short) {
+      return [`这条 ${Math.round(Number(video?.mins) || 0)} 分钟，我跳着看了，重点在「${short}」这段[比心]`,
+        `太长没细看，跳着扫了一遍：${short}，你可以挑着看[憨笑]`][Math.floor(Math.random() * 2)]
+    }
     if (know) {
       const pool = short
         ? [`这期讲「${short}」，感觉挺有用的[比心]`,
@@ -2272,10 +2289,12 @@ export function apply(ctx, config) {
       .map((x) => {
         const d = Number(x.digg) || 0
         const dur = Number(x.duration) || 0
+        const mins = dur / 60000
         let s = Math.log10(d + 10) * 10
         if (dur > 20000 && dur < 600000) s += 3      // 20s~10min 更像"看完"的
-        return { ...x, score: s }
+        return { ...x, score: s, mins, skim: mins > Number(cfg.skimOverMin || 5) }
       })
+      .filter((x) => x.mins <= Number(cfg.skipOverMin || 60))   // ⭐ 超 1 小时直接划走
       .sort((a, b) => b.score - a.score)
 
     // 一轮最多挑 2 条：像人一样零零散散地看，不是一口气刷完
