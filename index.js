@@ -1180,6 +1180,10 @@ export function apply(ctx, config) {
         ...args,
         '        env:',
         `          DOUYIN_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
+        `          TEMP: '${posix(join(stateDir, '.tmp'))}'`,
+        `          TMP: '${posix(join(stateDir, '.tmp'))}'`,
+        `          TMPDIR: '${posix(join(stateDir, '.tmp'))}'`,
+        ...(String(cfg.cdpUrl || '').trim() ? [`          DOUYIN_CDP_URL: '${String(cfg.cdpUrl).trim()}'`] : []),
         '',
       )
     }
@@ -1258,6 +1262,8 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
     try {
       refreshCfg()
+      const tmpDir = join(stateDir, '.tmp')
+      try { mkdirSync(tmpDir, { recursive: true }) } catch { /* 建不了就让 Playwright 报 */ }
       const dsh = resolveDsh()
       if (dsh.missing) {
         const msg = '这一轮没跑：找不到 dsh。' + dsh.hint
@@ -1266,6 +1272,15 @@ export function apply(ctx, config) {
         return { started: false, why, error: msg }
       }
       refreshCfg()
+      // cdpUrl 填了但端口不通 ⇒ 那一轮的 MCP 会退回自己启动（还要过验证码）。这里先探一下，通不了就明确记一笔。
+      const cdp = String(cfg.cdpUrl || '').trim()
+      if (cdp) {
+        try {
+          const port = Number((cdp.match(/:(\d+)/) || [])[1] || 0)
+          const ok = port ? awaitablePortOpen(port) : false
+          if (!ok) log(`⚠️ cdpUrl=${cdp} 端口不通：那一轮会用插件自己的浏览器（可能要过验证码）`)
+        } catch { /* 探不到就算了 */ }
+      }
       const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
       if (overlay) args.push('--patch', overlay)
@@ -1281,6 +1296,12 @@ export function apply(ctx, config) {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: uvEnv({
           DOUYIN_DUTY_HOME: stateDir,
+          // ⭐ 2026-10-25：headless 那轮被宿主的文件沙箱挡住写系统 Temp，
+          //    Playwright 的 mkdtemp 直接 EPERM。把 TMP/TEMP/TMPDIR 指到家目录下就绕开了。
+          TEMP: tmpDir,
+          TMP: tmpDir,
+          TMPDIR: tmpDir,
+          ...(String(cfg.cdpUrl || '').trim() ? { DOUYIN_CDP_URL: String(cfg.cdpUrl).trim() } : {}),
           ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         }),
       })
