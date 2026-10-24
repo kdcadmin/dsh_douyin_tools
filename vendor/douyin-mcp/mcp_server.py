@@ -1534,8 +1534,18 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         if "@" in text:
             notes.append("正文里的 @ 是纯文本（抖音桌面端不自动转成 @提醒）")
 
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(400)
         sent = False
+        # ⭐ 2026-10-25：抖音桌面端**没有发送按钮**，打完字按回车就发（实测编辑器会清空）
+        try:
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(2200)
+            left = await box.inner_text() if hasattr(box, "inner_text") else ""
+            if not str(left or "").strip():
+                sent = True
+                notes.append("回车提交，编辑器已清空")
+        except Exception as exc:
+            notes.append(f"回车提交失败：{type(exc).__name__}")
         # ① 点「工具条最右边那个 36px 图标」——实测这就是发送钮（无文字、红色圆/箭头）
         try:
             btn = await page.evaluate(
@@ -2298,7 +2308,7 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
     async def _on_resp(resp):
         try:
             u = resp.url or ""
-            if "/aweme/v1/web/tab/feed/" not in u and "/aweme/v1/web/module/feed/" not in u:
+            if "tab/feed" not in u and "module/feed" not in u:
                 return
             data = await resp.json()
             for a in (data or {}).get("aweme_list") or []:
@@ -2316,7 +2326,16 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
 
     page.on("response", _on_resp)
     try:
-        await _goto(page, "https://www.douyin.com/?recommend=1", settle=5.0)
+        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
+        # 精选页默认不拉推荐流 ⇒ 点一下「推荐」
+        try:
+            await page.evaluate("""() => {
+                const n = Array.from(document.querySelectorAll('div,span,a')).find((e) => (e.innerText || '').trim() === '推荐');
+                if (n) n.click();
+            }""")
+        except Exception:
+            pass
+        await page.wait_for_timeout(4000)
         st = await _login_state(page, ctx)
         if not st["loggedIn"]:
             notes.append("没登录：推荐流会更窄，仍然能刷")
@@ -2521,8 +2540,9 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
 
 
 async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
-    """转发：打开视频 → 点分享 → 面板里找到那个人 → 点他这行的「分享」。
-    选择器来自实测：分享按钮 = [data-e2e="video-player-share"] / [aria-label="video-share-icon-container"]。
+    """转发：视频页 → **鼠标悬停**分享图标 → 面板「分享给朋友」→ 点那个人右边的「分享」。
+
+    2026-10-25 实测：这个面板是 **hover 打开**的（click 不弹）。面板里每行是「头像+昵称 … [分享]」。
     """
     notes = []
     aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
@@ -2531,32 +2551,37 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
     if not st["loggedIn"]:
         return _need_login("转发要登录", aweme_id=aid)
 
+    icon = page.locator('[data-e2e="video-share-icon-container"]').first
+    if not await icon.count():
+        return _err("没找到分享图标（[data-e2e=video-share-icon-container]）", aweme_id=aid, url=page.url)
+    try:
+        await icon.hover(force=True)
+    except Exception:
+        box = await icon.bounding_box()
+        if box:
+            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    # 等面板出现
     opened = False
-    for sel in ['[data-e2e="video-player-share"]', '[aria-label="video-share-icon-container"]']:
-        loc = page.locator(sel).first
-        if await loc.count():
-            try:
-                await loc.click(timeout=6000, force=True)
-                opened = True
-                break
-            except Exception:
-                continue
+    for _ in range(12):
+        await page.wait_for_timeout(500)
+        opened = await page.evaluate("() => (document.body.innerText || '').indexOf('分享给朋友') >= 0")
+        if opened:
+            break
     if not opened:
-        return _err("没找到分享按钮（页面可能改版）", aweme_id=aid, url=page.url)
-    await page.wait_for_timeout(2000)
+        await page.screenshot(path=str(_thumb_dir() / "_share.png"))
+        return _err("悬停后没弹出「分享给朋友」面板", aweme_id=aid, url=page.url, notes=notes)
 
+    # 找到那个人那一行的「分享」按钮（红色）
     hit = await page.evaluate(
         """(nick) => {
-            const rows = Array.from(document.querySelectorAll('div, li'));
+            const rows = Array.from(document.querySelectorAll('div,li'));
             for (const row of rows) {
                 const t = (row.innerText || '');
-                if (!t.includes(nick)) continue;
-                const btns = Array.from(row.querySelectorAll('div, span, button'))
+                if (!t || t.indexOf(nick) < 0) continue;
+                if (t.replace(/\s+/g, '').length > 60) continue;   // 太长的不是一行
+                const btns = Array.from(row.querySelectorAll('div,span,button'))
                     .filter((b) => (b.innerText || '').trim() === '分享');
-                for (const b of btns) {
-                    b.click();
-                    return { ok: true, row: t.replace(/\s+/g, ' ').slice(0, 40) };
-                }
+                for (const b of btns) { b.click(); return { ok: true, row: t.replace(/\s+/g, ' ').slice(0, 40) }; }
             }
             return { ok: false };
         }""",
@@ -2564,8 +2589,8 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
     )
     await page.wait_for_timeout(2500)
     if hit.get("ok"):
-        return _ok(shared_to=nickname, aweme_id=aid, matched=hit.get("row"), notes=notes or None)
-    return _err(f"分享面板里没找到「{nickname}」（面板里可能没有这个人）", aweme_id=aid, notes=notes or None)
+        return _ok(shared_to=nickname, aweme_id=aid, matched=hit.get("row"), how="hover-panel", notes=notes or None)
+    return _err(f"面板里没有「{nickname}」这一行", aweme_id=aid, notes=notes)
 
 
 async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
