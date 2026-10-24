@@ -208,6 +208,7 @@ export function apply(ctx, config) {
     personaPrompt: '',
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
+    shareNote: '', sharePerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
