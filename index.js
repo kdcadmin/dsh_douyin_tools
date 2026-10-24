@@ -114,6 +114,8 @@ export const Config = !z ? undefined : z.object({
   replyOncePerUser: z.boolean().default(false).extra('volatile', true),
   /** 「跑一轮」直接用宿主自己跑（不 spawn headless）：沙箱不让子进程开管道时也能刷 */
   localRound: z.boolean().default(true).extra('volatile', true),
+  /** 每天最多转发几条（和「评论@」互斥：同一条视频不会被既@又转发） */
+  sharePerDay: z.natural().default(3).extra('volatile', true),
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
   msgAllowTo: z.string().default('').extra('volatile', true),
   /** 自动回复私信（别人发来消息就回一条） */
@@ -264,6 +266,7 @@ export function apply(ctx, config) {
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
+    if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 20))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
     if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
@@ -570,6 +573,15 @@ export function apply(ctx, config) {
     '病', '癌', '药', '治疗', '诊断', '自杀', '抑郁', '起诉', '律师', '判', '违法', '坐牢', '报案',
     '身份证', '住址', '手机号', '人肉', '开盒', '社工', '裸', '色情', '约炮', '包养', '赌博', '博彩',
     '洗钱', '跑分', '股票', '荐股', '基金', '炒币', '贷款', '套现', '返利', '破解', '外挂', '盗号', '黑产', '刷单', '代考']
+  const sharesToday = (now = new Date()) => Object.values(readLedger().shares || {})
+    .filter((r) => r && r.day === dayKey(now)).length
+  const noteShare = (awemeId, rec) => {
+    const l = readLedger()
+    l.shares = l.shares || {}
+    l.shares[String(awemeId)] = { day: dayKey(), at: new Date().toISOString(), ...rec }
+    writeLedger(l)
+  }
+
   const repliesToday = (now = new Date()) => Object.values(readLedger().replies || {})
     .filter((r) => r && r.day === dayKey(now)).length
   /** 回过的 cid 索引（一行一个，只有宿主导入；不进模型上下文，所以不费 token） */
@@ -2195,25 +2207,54 @@ export function apply(ctx, config) {
     }
 
     // 动手（闸门各自判定；失败只记录不抛）
+    // ⭐ 2026-10-25：**评论@ 与 转发 互斥** —— 一天 10 条、5 条@、5 条转发，则这 10 条各干一件事，不会重复。
     const acts = []
     try {
-      if (take[0]) {
+      const perDayCfg = Math.max(0, Number(cfg.perDay) || 0)
+      const mentionCap = cfg.autoComment ? Math.max(0, Number(cfg.commentPerDay) || 0) : 0
+      const shareCapCfg = Math.max(0, Number(cfg.sharePerDay) || 0)
+      const mentionLeft = Math.max(0, mentionCap - commentsToday())
+      const shareLeft = Math.max(0, shareCapCfg - sharesToday())
+      const plan = []
+      let mi = 0
+      let si = 0
+      for (const v of take) {
+        if (mi < mentionLeft && cfg.autoComment) { plan.push({ v, act: 'mention' }); mi += 1; continue }
+        if (si < shareLeft && String(cfg.shareToNick || '').trim()) { plan.push({ v, act: 'share' }); si += 1; continue }
+        plan.push({ v, act: 'like' })
+      }
+      for (const item of plan) {
+        const v = item.v
         if (cfg.autoLike) {
-          const r = await call('douyin_like', { aweme_id: take[0].aweme_id }, { timeoutMs: 120_000 })
-          acts.push('点赞：' + (r?.ok !== false ? '已点' : (r?.error || '没点上')))
+          const r = await call('douyin_like', { aweme_id: v.aweme_id }, { timeoutMs: 120_000 })
+          acts.push(`点赞 ${String(v.title || '').slice(0, 12)}：` + (r?.ok !== false ? '已点' : (r?.error || '没点上')))
         }
-        const mention = String(cfg.mentionName || '').trim()
-        if (cfg.autoComment && mention) {
+        if (item.act === 'mention') {
+          const mention = String(cfg.mentionName || '').trim()
           const text = `这条我服了 ${mention} 你也看看`
-          const r = await call('douyin_comment', { aweme_id: take[0].aweme_id, text, mention }, { timeoutMs: 180_000 })
+          const r = await call('douyin_comment', { aweme_id: v.aweme_id, text, mention }, { timeoutMs: 180_000 })
           const okk = r && r.ok !== false
           acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
-          if (okk) noteComment({ aweme_id: take[0].aweme_id, text })
-        }
-        const shareTo = String(cfg.shareToNick || '').trim()
-        if (shareTo) {
-          const r = await call('douyin_share_video', { aweme_id: take[0].aweme_id, nickname: shareTo }, { timeoutMs: 180_000 })
-          acts.push('转发给' + shareTo + '：' + (r?.ok !== false ? '已转发' : (r?.error || '没发出去')))
+          if (okk) noteComment({ aweme_id: v.aweme_id, text })
+        } else if (item.act === 'share') {
+          const to = String(cfg.shareToNick || '').trim()
+          const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
+          const okk = r && r.ok !== false
+          acts.push('转发给' + to + '：' + (okk ? '已转发' : (r?.error || '没发出去')))
+          if (okk) {
+            noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
+            // 转发后附一句带表情的话 + 一个表情包（都失败也不影响转发本身）
+            const note = String(cfg.shareNote || '').trim()
+              || ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '刚刷到这条，给你[比心]'][Math.floor(Math.random() * 2)]
+            try {
+              const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
+              acts.push('转发附言：' + ((r2 && r2.ok !== false) ? '已发' : (r2?.error || '没发出去')))
+            } catch (e) { acts.push('转发附言失败：' + String(e?.message ?? e)) }
+            try {
+              const r3 = await call('douyin_chat_sticker', { nickname: to, keyword: '大肥鱼', pick: Math.floor(Math.random() * 4) }, { timeoutMs: 240_000 })
+              acts.push('表情包：' + ((r3 && r3.ok !== false) ? '已发' : (r3?.error || '没发出去')))
+            } catch (e) { acts.push('表情包失败：' + String(e?.message ?? e)) }
+          }
         }
       }
     } catch (e) { acts.push('动手出错：' + String(e?.message ?? e)) }
