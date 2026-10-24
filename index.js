@@ -1606,6 +1606,26 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'dy_chat_sticker',
+    description: '在私信里发表情包：给某个人发一个「大肥鱼」相关的表情（输入关键词 → 联想面板 → 点一个发出去）。',
+    parameters: {
+      nickname: { type: 'string', description: '发给谁' },
+      keyword: { type: 'string', description: '搜什么关键词（默认「大肥鱼」）' },
+      pick: { type: 'number', description: '挑第几个（从 0 开始，默认 0）' },
+    },
+    async execute(args) {
+      const nick = String(args.nickname ?? '').trim()
+      if (!nick) return { ok: false, error: 'nickname 必填' }
+      const r = await call('douyin_chat_sticker', {
+        nickname: nick,
+        keyword: String(args.keyword || '大肥鱼'),
+        pick: Number(args.pick) || 0,
+      }, { timeoutMs: 240_000 })
+      return r
+    },
+  })
+
+  tool({
     name: 'dy_share',
     description: '把一个视频转发给指定的人（发一条私信，正文是视频链接）。',
     parameters: {

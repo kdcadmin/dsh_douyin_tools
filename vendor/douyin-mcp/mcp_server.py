@@ -2607,83 +2607,102 @@ async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
     if not st["loggedIn"]:
         return _need_login("私信要登录", nickname=nickname)
 
-    # 1) 打开消息抽屉
-    opened = await page.evaluate(
-        """() => {
-            const e = document.querySelector('[data-e2e="im-entry"]')
-                || Array.from(document.querySelectorAll('div,span')).find((x) => (x.innerText || '').trim() === '消息');
-            if (!e) return false;
-            e.click();
-            return true;
-        }"""
-    )
+    # 1) 打开消息抽屉 —— 必须真实鼠标点击（JS .click() 不触发，2026-10-25 实测）
+    icon = page.locator('[data-e2e="im-entry"]').first
+    if not await icon.count():
+        return _err("没找到「消息」图标（data-e2e=im-entry）", url=page.url, notes=notes)
+    box = await icon.bounding_box()
+    if not box:
+        return _err("「消息」图标没有尺寸", url=page.url, notes=notes)
+    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    await page.wait_for_timeout(400)
+    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    opened = False
+    for _ in range(12):
+        await page.wait_for_timeout(500)
+        body = await page.inner_text("body")
+        if "陌生人消息" in body or "分享[视频]" in body or "发送消息" in body:
+            opened = True
+            break
+    notes.append("抽屉已打开" if opened else "抽屉没打开")
     if not opened:
-        return _err("没找到「消息」入口", url=page.url, notes=notes)
-    await page.wait_for_timeout(3000)
-
-    # 2) 抽屉里点那个人（先在抽屉内搜，找不到就直接点列表行）
-    def in_drawer_js(action: str) -> str:
-        return action
+        return _err("点「消息」后抽屉没打开", url=page.url, notes=notes)
 
     nickKey = "".join(ch for ch in str(nickname) if ch.strip())[:4]
     openedInfo = await page.evaluate(
         "() => { const t = document.body.innerText || ''; return { drawer: t.indexOf('陌生人消息') >= 0 || t.indexOf('分享[视频]') >= 0, tail: t.slice(-60) }; }"
     )
     notes.append("抽屉状态：" + str(openedInfo.get("drawer")))
-    hit = await page.evaluate(
-        """(nick) => {
-            const W = window.innerWidth;
-            const inDrawer = (e) => {
-                const r = e.getBoundingClientRect();
-                return r.x > W * 0.65 && r.width > 80 && r.height > 20;
-            };
-            // 先找抽屉里的搜索框（x 靠右那个），输入昵称
-            const ins = Array.from(document.querySelectorAll('input')).filter((e) => {
-                const r = e.getBoundingClientRect();
-                return (e.placeholder || '').indexOf('搜索') >= 0 && r.x > W * 0.5 && r.width > 80;
-            });
-            if (ins.length) {
-                ins[0].focus();
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                setter.call(ins[0], nick);
-                ins[0].dispatchEvent(new Event('input', { bubbles: true }));
-            }
-            return ins.length;
-        }""",
-        nickname,
-    )
+    hit = 0
     notes.append(f"抽屉搜索框 {hit} 个")
     await page.wait_for_timeout(2500)
 
-    clicked = await page.evaluate(
+    rowBox = await page.evaluate(
         """(nick) => {
             const W = window.innerWidth;
+            const key = nick.replace(/\s+/g, '').slice(0, 4);
             const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
                 const r = e.getBoundingClientRect();
                 const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-                const key = nick.replace(/\s+/g, '').slice(0, 4);
                 return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.replace(/\s+/g, '').indexOf(key) >= 0;
             });
             if (!rows.length) return null;
             rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
-            rows[0].click();
-            return (rows[0].innerText || '').replace(/\s+/g, ' ').slice(0, 30);
+            const r = rows[0].getBoundingClientRect();
+            return { x: r.x + 30, y: r.y + r.height / 2, t: (rows[0].innerText || '').replace(/\s+/g, ' ').slice(0, 30) };
         }""",
         nickname,
     )
-    notes.append(("点开会话：" + clicked) if clicked else "抽屉里没找到这个人")
-    if not clicked:
-        await page.screenshot(path=str(HOME / "thumbs" / "_chat.png"))
-        return _err(f"消息抽屉里没有「{nickname}」", url=page.url, notes=notes)
-
+    clicked = (rowBox or {}).get("t")
+    if rowBox:
+        await page.mouse.click(rowBox["x"], rowBox["y"])
+        await page.wait_for_timeout(2000)
+        # 有「发消息」按钮就再点一次它（真实鼠标）
+        btnBox = await page.evaluate(
+            """() => {
+                const W = window.innerWidth;
+                const b = Array.from(document.querySelectorAll('div,span,button')).find((e) => {
+                    const r = e.getBoundingClientRect();
+                    return (e.innerText || '').trim() === '发消息' && r.x > W * 0.5 && r.width > 20;
+                });
+                if (!b) return null;
+                const r = b.getBoundingClientRect();
+                return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            }"""
+        )
+        if btnBox:
+            await page.mouse.click(btnBox["x"], btnBox["y"])
+            await page.wait_for_timeout(2000)
+            notes.append("点了「发消息」")
     # 3) 等输入框（placeholder=发送消息）
     ed = None
     for _ in range(20):
         await page.wait_for_timeout(600)
-        ed = await _first_of(page, ["div[contenteditable='true']", "textarea", "input[placeholder*='发送消息']"], 1500)
+        # 实测：聊天输入框是 **contenteditable 的 DIV**（属性可能是空值），且在抽屉区域（x > 屏宽 50%）
+        ed = await page.evaluate_handle(
+            """() => {
+                const W = window.innerWidth, H = window.innerHeight;
+                const list = Array.from(document.querySelectorAll('div[contenteditable], textarea, input'));
+                const hit = list.find((e) => {
+                    const r = e.getBoundingClientRect();
+                    const ph = e.placeholder || '';
+                    const isSend = ph.indexOf('发送消息') >= 0;
+                    return (isSend || e.getAttribute('contenteditable') !== null) &&
+                           r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45;
+                });
+                return hit || null;
+            }"""
+        )
+        ed = ed.as_element() if ed else None
         if ed is not None:
             break
     if ed is None:
+        cands = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('input,textarea,div[contenteditable]')).map((e) => ({
+                   tag: e.tagName, ce: e.getAttribute('contenteditable'), ph: e.placeholder || '',
+                   w: e.getBoundingClientRect().width | 0, h: e.getBoundingClientRect().height | 0 })).slice(0, 10)"""
+        )
+        notes.append("候选输入框：" + str(cands)[:300])
         await page.screenshot(path=str(HOME / "thumbs" / "_chat.png"))
         return _err("没等到「发送消息」输入框", url=page.url, notes=notes)
 
@@ -2710,6 +2729,92 @@ async def douyin_chat_send(nickname: str, text: str) -> str:
         return await _chat_send_core(page, ctx, nickname, text)
 
     return j(await _guard(_impl, 90))
+
+
+@mcp.tool()
+async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0) -> str:
+    """在私信里发表情包：打开抽屉 → 点那个人 → 输入关键词（默认「大肥鱼」）→ 联想表情面板 → 点其中一个发出去。
+
+    2026-10-25 实测：输入「大肥鱼」会在输入框上方弹出一排表情包，点一下就发。
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
+        notes = []
+        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
+        st = await _login_state(page, ctx)
+        if not st["loggedIn"]:
+            return _need_login("发表情要登录", nickname=nickname)
+
+        icon = page.locator('[data-e2e="im-entry"]').first
+        if not await icon.count():
+            return _err("没找到「消息」图标")
+        box = await icon.bounding_box()
+        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        await page.wait_for_timeout(3000)
+
+        key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
+        rowBox = await page.evaluate(
+            """(key) => {
+                const W = innerWidth;
+                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
+                    const r = e.getBoundingClientRect();
+                    const t = (e.innerText || '').replace(/\s+/g, '');
+                    return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.indexOf(key) >= 0;
+                });
+                if (!rows.length) return null;
+                rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+                const r = rows[0].getBoundingClientRect();
+                return { x: r.x + 30, y: r.y + r.height / 2 };
+            }""",
+            key,
+        )
+        if not rowBox:
+            return _err(f"抽屉里没有「{nickname}」", notes=notes)
+        await page.mouse.click(rowBox["x"], rowBox["y"])
+        await page.wait_for_timeout(3500)
+
+        ed = await page.evaluate_handle(
+            """() => {
+                const W = innerWidth, H = innerHeight;
+                return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
+                    .find((e) => { const r = e.getBoundingClientRect();
+                        return r.width > 100 && r.y > H * 0.45 && r.x > W * 0.4; }) || null;
+            }"""
+        )
+        el = ed.as_element()
+        if el is None:
+            return _err("没找到输入框", notes=notes)
+        await el.click()
+        await page.keyboard.type(keyword, delay=60)
+        await page.wait_for_timeout(3000)
+
+        sticks = await page.evaluate(
+            """() => {
+                const W = innerWidth, H = innerHeight;
+                return Array.from(document.querySelectorAll('img')).map((e) => {
+                    const r = e.getBoundingClientRect();
+                    return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
+                }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65);
+            }"""
+        )
+        if not sticks:
+            await page.screenshot(path=str(HOME / "thumbs" / "_sticker.png"))
+            return _err("没等到表情面板", notes=notes)
+        idx = max(0, min(int(pick or 0), len(sticks) - 1))
+        s = sticks[idx]
+        await page.mouse.click(s["x"] + s["w"] / 2, s["y"] + s["h"] / 2)
+        await page.wait_for_timeout(2500)
+        # 清掉输入框里剩下的关键词，避免跟着发出去
+        try:
+            for _ in range(len(keyword) + 2):
+                await page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        return _ok(to=nickname, sticker_index=idx, candidates=len(sticks), keyword=keyword, notes=notes)
+
+    return j(await _guard(_impl, 120))
 
 
 @mcp.tool()
