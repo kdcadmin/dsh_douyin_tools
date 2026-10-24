@@ -1136,17 +1136,24 @@ export function apply(ctx, config) {
       yml.push('- id: ' + id, '  disabled: false', '')
     }
     // 跟随使用者当前选的模型（拿不到就不写，保持原行为）
+    // ⚠️ 2026-10-25 实测：桌面端用的 provider（比如 qwen-token-plan-cn）是**桌面 profile 里装的插件**，
+    //    headless profile 没有那个 adapter ⇒ 直接报 `NO_ADAPTER: no adapter registered for provider "…"`，那一轮根本跑不起来。
+    //    所以默认**不写** provider/model：让 headless 用它自己的默认模型；真要指定就填设置里的「headless 模型」。
+    const forced = String(cfg.headlessModel || '').trim()
     try {
-      const sel = ctx.get?.('agentDefaultModel')?.currentSelection?.() ?? null
-      const selProvider = sel?.provider ?? sel?.providerId
-      const selModel = sel?.model ?? sel?.modelId
+      let selProvider = ''
+      let selModel = ''
+      if (forced) {
+        const [fp, fm] = forced.includes('/') ? forced.split('/') : ['', forced]
+        selProvider = fp.trim()
+        selModel = fm.trim()
+      }
       if (selProvider && selModel) {
         yml.push(
           '- id: agent-default-model',
           '  config:',
           '    provider: ' + String(selProvider),
           '    model: ' + String(selModel),
-          ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
           '',
         )
       }
