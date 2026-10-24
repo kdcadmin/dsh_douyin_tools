@@ -97,7 +97,7 @@ export const Config = !z ? undefined : z.object({
   /** 投稿默认存草稿（`draft=True`）—— 等本人过一眼 */
   publishDraft: z.boolean().default(true).extra('volatile', true),
   /** 它自己发评论：每天最多几条（0 = 不发） */
-  commentPerDay: z.natural().default(3).extra('volatile', true),
+  commentPerDay: z.natural().default(10).extra('volatile', true),
   /* ── 回我自己视频下的评论（随机读、限量回） ── */
   /** 开关：自动回自己视频下的评论（默认关：这是拿号动手） */
   autoReply: z.boolean().default(false).extra('volatile', true),
@@ -117,10 +117,12 @@ export const Config = !z ? undefined : z.object({
   localRound: z.boolean().default(true).extra('volatile', true),
   /** 每天最多转发几条（和「评论@」互斥：同一条视频不会被既@又转发） */
   sharePerDay: z.natural().default(10).extra('volatile', true),
+  /** 一轮最多挑几条（别一口气刷完） */
+  pickPerRound: z.natural().default(2).extra('volatile', true),
   /** 自动评论（**不@人**，就是普通评论一句） */
   autoCommentPlain: z.boolean().default(true).extra('volatile', true),
   /** 每天最多发几条普通评论 */
-  plainCommentPerDay: z.natural().default(3).extra('volatile', true),
+  plainCommentPerDay: z.natural().default(10).extra('volatile', true),
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
   msgAllowTo: z.string().default('').extra('volatile', true),
   /** 自动回复私信（别人发来消息就回一条） */
@@ -214,11 +216,11 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareNote: '', sharePerDay: 10, autoCommentPlain: true, plainCommentPerDay: 3, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareNote: '', sharePerDay: 10, pickPerRound: 2, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
-    commentPerDay: 3, publishPerDay: 1, publishTitle: '', publishTags: '',
+    commentPerDay: 10, publishPerDay: 1, publishTitle: '', publishTags: '',
     cdpUrl: 'http://127.0.0.1:9222', cdpPort: 9222, chromePath: '',
   }
 
@@ -274,6 +276,7 @@ export function apply(ctx, config) {
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
+    if ('pickPerRound' in p) p.pickPerRound = Math.max(1, Math.min(Number(p.pickPerRound) || 1, 5))
     if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
     if ('plainCommentPerDay' in p) p.plainCommentPerDay = Math.max(0, Math.min(Number(p.plainCommentPerDay) || 0, 30))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
@@ -591,6 +594,45 @@ export function apply(ctx, config) {
     l.plainComments[String(awemeId)] = { day: dayKey(), at: new Date().toISOString(), text: String(text).slice(0, 40) }
     writeLedger(l)
   }
+  /** 表情包关键词：什么话配什么表情（只有「大肥鱼」系列是现成的） */
+  const pickStickerKeyword = (note) => {
+    const s = String(note || '')
+    if (/好看|颜值|太好看了/.test(s)) return '大肥鱼'
+    if (/总结|讲|收获|有用/.test(s)) return '大肥鱼'
+    if (/笑|哈哈|笑死/.test(s)) return '大肥鱼'
+    return '大肥鱼'
+  }
+  const sentBrief = (r) => {
+    const arr = Array.isArray(r?.sent) ? r.sent : []
+    return arr.join(' / ').slice(0, 40) || 'ok'
+  }
+  const makeMentionComment = (video, mention) => {
+    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
+    const short = raw.length > 18 ? raw.slice(0, 18) + '…' : raw
+    const pool = [
+      `这条「${short}」好看，${mention} 你也看看[比心]`,
+      `刚看完「${short}」，${mention} 你应该会喜欢[笑哭]`,
+      `「${short}」这个真的可以，${mention} 你来看看[赞]`,
+    ]
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+
+  /** 看完再评论：拿标题 +（有的话）热评，说清这条讲了啥，比「说得对」像人 */
+  const makePlainComment = (video, topComment) => {
+    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
+    const short = raw.length > 20 ? raw.slice(0, 20) + '…' : raw
+    const tag = String(topComment || '').replace(/\s+/g, ' ').slice(0, 14)
+    const pool = []
+    if (short) {
+      pool.push(`这条讲「${short}」，看完比想象中讲得清楚[比心]`)
+      pool.push(`刚看完「${short}」，中间那段确实有意思[笑哭]`)
+      if (tag) pool.push(`「${short}」看完最有感的是评论区那句「${tag}」[憨笑]`)
+      pool.push(`「${short}」这个我还真看完了一遍，挺值[赞]`)
+    }
+    pool.push('这条我一路看完了，比标题写得好[笑哭]', '笑死我了，看到一半就忍不住了[捂脸]')
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+
   /** 普通评论（不@人）用的短句 */
   const PLAIN_COMMENTS = [
     '这条我笑了[笑哭]', '讲得挺好[比心]', '学到了[憨笑]', '这个真不错[赞]',
@@ -2236,7 +2278,9 @@ export function apply(ctx, config) {
       })
       .sort((a, b) => b.score - a.score)
 
-    const take = scored.slice(0, Math.max(1, Math.min(left, 5)))
+    // 一轮最多挑 2 条：像人一样零零散散地看，不是一口气刷完
+    const perRound = Math.max(1, Math.min(Number(cfg.pickPerRound) || 2, 5))
+    const take = scored.slice(0, Math.max(1, Math.min(left, perRound)))
     const lines = [`# ${dayKey()} · 抖音日报（本机直跑）`, '', `**记录时间**：${new Date().toLocaleString('zh-CN', { hour12: false })}（本机时间）`, '']
     if (notes.length) lines.push(...notes.map((n) => '- ' + n), '')
     for (const v of take) {
@@ -2245,6 +2289,7 @@ export function apply(ctx, config) {
         const c = await call('douyin_comments', { aweme_id: v.aweme_id, num: 8, compact: true }, { timeoutMs: 120_000 })
         const it = (c?.items || [])[0]
         if (it) top = String(it.text || '').slice(0, 40)
+        topOf[v.aweme_id] = top
       } catch { /* 读不到评论不影响挑片 */ }
       lines.push(
         `### ${v.aweme_id}`,
@@ -2269,6 +2314,7 @@ export function apply(ctx, config) {
     // 动手（闸门各自判定；失败只记录不抛）
     // ⭐ 2026-10-25：**评论@ 与 转发 互斥** —— 一天 10 条、5 条@、5 条转发，则这 10 条各干一件事，不会重复。
     const acts = []
+    const topOf = {}
     try {
       const perDayCfg = Math.max(0, Number(cfg.perDay) || 0)
       const mentionCap = cfg.autoComment ? Math.max(0, Number(cfg.commentPerDay) || 0) : 0
@@ -2295,13 +2341,13 @@ export function apply(ctx, config) {
         }
         if (item.act === 'mention') {
           const mention = String(cfg.mentionName || '').trim()
-          const text = `这条我服了 ${mention} 你也看看`
+          const text = makeMentionComment(v, mention)
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text, mention }, { timeoutMs: 180_000 })
           const okk = r && r.ok !== false
           acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
           if (okk) noteComment({ aweme_id: v.aweme_id, text })
         } else if (item.act === 'plain') {
-          const text = PLAIN_COMMENTS[Math.floor(Math.random() * PLAIN_COMMENTS.length)]
+          const text = makePlainComment(v, topOf[v.aweme_id])
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text }, { timeoutMs: 180_000 })
           const okk = r && r.ok !== false
           acts.push(`评论「${text}」：` + (okk ? '已发' : (r?.error || '没发出去')))
@@ -2315,14 +2361,16 @@ export function apply(ctx, config) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             // 转发后附一句带表情的话 + 一个表情包（都失败也不影响转发本身）
             const note = makeShareNote(v)
+            // ⭐ 一次会话里把「话 + 表情包」发完（不再开两次抽屉、不重复搜索）
+            const mood = pickStickerKeyword(note)
             try {
-              const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
-              acts.push('转发附言：' + ((r2 && r2.ok !== false) ? '已发' : (r2?.error || '没发出去')))
-            } catch (e) { acts.push('转发附言失败：' + String(e?.message ?? e)) }
-            try {
-              const r3 = await call('douyin_chat_sticker', { nickname: to, keyword: '大肥鱼', pick: Math.floor(Math.random() * 4) }, { timeoutMs: 240_000 })
-              acts.push('表情包：' + ((r3 && r3.ok !== false) ? '已发' : (r3?.error || '没发出去')))
-            } catch (e) { acts.push('表情包失败：' + String(e?.message ?? e)) }
+              const r2 = await call('douyin_chat_batch', {
+                nickname: to,
+                messages: `${note}|sticker:${mood}`,
+              }, { timeoutMs: 240_000 })
+              const okk2 = r2 && r2.ok !== false
+              acts.push('附言+表情包：' + (okk2 ? `已发（${sentBrief(r2)}）` : (r2?.error || '没发出去')))
+            } catch (e) { acts.push('附言+表情包失败：' + String(e?.message ?? e)) }
           }
         }
       }

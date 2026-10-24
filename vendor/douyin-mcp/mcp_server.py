@@ -2791,6 +2791,108 @@ async def douyin_inbox(limit: int = 12) -> str:
 
 
 @mcp.tool()
+async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
+    """一次会话里把话和表情包都发完（不再反复打开抽屉/重复搜索）。
+
+    messages: 用 `|` 分隔的片段，`sticker:关键词` 表示发表情包，其它按文字发。
+    例：`这个视频好好笑[笑哭]|sticker:大肥鱼`
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
+        notes = []
+        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
+        st = await _login_state(page, ctx)
+        if not st["loggedIn"]:
+            return _need_login("发私信要登录", nickname=nickname)
+
+        icon = page.locator('[data-e2e="im-entry"]').first
+        if not await icon.count():
+            return _err("没找到「消息」图标")
+        box = await icon.bounding_box()
+        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        opened = False
+        for _ in range(12):
+            await page.wait_for_timeout(500)
+            opened = await page.evaluate(
+                """() => { const W = innerWidth;
+                    return Array.from(document.querySelectorAll('input')).some((e) =>
+                        (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.55); }"""
+            )
+            if opened:
+                break
+        if not opened:
+            return _err("消息抽屉没打开", notes=notes)
+
+        key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
+        rowBox = await page.evaluate(
+            """(key) => {
+                const W = innerWidth;
+                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
+                    const r = e.getBoundingClientRect();
+                    const t = (e.innerText || '').replace(/\s+/g, '');
+                    return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.indexOf(key) >= 0;
+                });
+                if (!rows.length) return null;
+                rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+                const r = rows[0].getBoundingClientRect();
+                return { x: r.x + 30, y: r.y + r.height / 2 };
+            }""",
+            key,
+        )
+        if not rowBox:
+            return _err(f"抽屉里没有「{nickname}」", notes=notes)
+        await page.mouse.click(rowBox["x"], rowBox["y"])
+        await page.wait_for_timeout(3500)
+
+        sent = []
+        parts = [x.strip() for x in str(messages or "").split("|") if x.strip()]
+        for part in parts:
+            ed = await page.evaluate_handle(
+                """() => { const W = innerWidth, H = innerHeight;
+                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
+                        .find((e) => { const r = e.getBoundingClientRect();
+                            const ph = e.placeholder || '';
+                            return (ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) &&
+                                   r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }) || null; }"""
+            )
+            el = ed.as_element()
+            if el is None:
+                return _err("没找到输入框", sent=sent, notes=notes)
+            if part.startswith("sticker:"):
+                kw = part.split(":", 1)[1].strip() or "大肥鱼"
+                await el.click()
+                await page.keyboard.type(kw, delay=50)
+                await page.wait_for_timeout(2600)
+                sticks = await page.evaluate(
+                    """() => { const W = innerWidth, H = innerHeight;
+                        return Array.from(document.querySelectorAll('img')).map((e) => {
+                            const r = e.getBoundingClientRect();
+                            return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
+                        }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65); }"""
+                )
+                if sticks:
+                    s = sticks[0]
+                    await page.mouse.click(s["x"] + s["w"] / 2, s["y"] + s["h"] / 2)
+                    await page.wait_for_timeout(1800)
+                    sent.append("sticker:" + kw)
+                else:
+                    sent.append("sticker-miss:" + kw)
+                for _ in range(len(kw) + 2):
+                    await page.keyboard.press("Backspace")
+            else:
+                await el.click()
+                await page.keyboard.type(part, delay=30)
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(1200)
+                sent.append(part)
+        return _ok(to=nickname, sent=sent, notes=notes)
+
+    return j(await _guard(_impl, 150))
+
+
+@mcp.tool()
 async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0) -> str:
     """在私信里发表情包：打开抽屉 → 点那个人 → 输入关键词（默认「大肥鱼」）→ 联想表情面板 → 点其中一个发出去。
 
