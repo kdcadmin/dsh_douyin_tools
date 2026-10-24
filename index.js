@@ -117,6 +117,10 @@ export const Config = !z ? undefined : z.object({
   localRound: z.boolean().default(true).extra('volatile', true),
   /** 每天最多转发几条（和「评论@」互斥：同一条视频不会被既@又转发） */
   sharePerDay: z.natural().default(10).extra('volatile', true),
+  /** 自动评论（**不@人**，就是普通评论一句） */
+  autoCommentPlain: z.boolean().default(true).extra('volatile', true),
+  /** 每天最多发几条普通评论 */
+  plainCommentPerDay: z.natural().default(3).extra('volatile', true),
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
   msgAllowTo: z.string().default('').extra('volatile', true),
   /** 自动回复私信（别人发来消息就回一条） */
@@ -210,7 +214,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareNote: '', sharePerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareNote: '', sharePerDay: 10, autoCommentPlain: true, plainCommentPerDay: 3, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -270,6 +274,8 @@ export function apply(ctx, config) {
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
+    if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
+    if ('plainCommentPerDay' in p) p.plainCommentPerDay = Math.max(0, Math.min(Number(p.plainCommentPerDay) || 0, 30))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
     if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
@@ -577,6 +583,20 @@ export function apply(ctx, config) {
     '病', '癌', '药', '治疗', '诊断', '自杀', '抑郁', '起诉', '律师', '判', '违法', '坐牢', '报案',
     '身份证', '住址', '手机号', '人肉', '开盒', '社工', '裸', '色情', '约炮', '包养', '赌博', '博彩',
     '洗钱', '跑分', '股票', '荐股', '基金', '炒币', '贷款', '套现', '返利', '破解', '外挂', '盗号', '黑产', '刷单', '代考']
+  const plainCommentsToday = (now = new Date()) => Object.values(readLedger().plainComments || {})
+    .filter((r) => r && r.day === dayKey(now)).length
+  const notePlainComment = (awemeId, text) => {
+    const l = readLedger()
+    l.plainComments = l.plainComments || {}
+    l.plainComments[String(awemeId)] = { day: dayKey(), at: new Date().toISOString(), text: String(text).slice(0, 40) }
+    writeLedger(l)
+  }
+  /** 普通评论（不@人）用的短句 */
+  const PLAIN_COMMENTS = [
+    '这条我笑了[笑哭]', '讲得挺好[比心]', '学到了[憨笑]', '这个真不错[赞]',
+    '看完心情好了[微笑]', '有点东西[比心]', '刚刷到就看完了[笑哭]', '说得对[赞]',
+  ]
+
   const sharesToday = (now = new Date()) => Object.values(readLedger().shares || {})
     .filter((r) => r && r.day === dayKey(now)).length
   const noteShare = (awemeId, rec) => {
@@ -2255,11 +2275,15 @@ export function apply(ctx, config) {
       const shareCapCfg = Math.max(0, Number(cfg.sharePerDay) || 0)
       const mentionLeft = Math.max(0, mentionCap - commentsToday())
       const shareLeft = Math.max(0, shareCapCfg - sharesToday())
+      const plainCap = cfg.autoCommentPlain ? Math.max(0, Number(cfg.plainCommentPerDay) || 0) : 0
+      const plainLeft = Math.max(0, plainCap - plainCommentsToday())
       const plan = []
       let mi = 0
       let si = 0
+      let pi = 0
       for (const v of take) {
         if (mi < mentionLeft && cfg.autoComment) { plan.push({ v, act: 'mention' }); mi += 1; continue }
+        if (pi < plainLeft && cfg.autoCommentPlain) { plan.push({ v, act: 'plain' }); pi += 1; continue }
         if (si < shareLeft && String(cfg.shareToNick || '').trim()) { plan.push({ v, act: 'share' }); si += 1; continue }
         plan.push({ v, act: 'like' })
       }
@@ -2276,6 +2300,12 @@ export function apply(ctx, config) {
           const okk = r && r.ok !== false
           acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
           if (okk) noteComment({ aweme_id: v.aweme_id, text })
+        } else if (item.act === 'plain') {
+          const text = PLAIN_COMMENTS[Math.floor(Math.random() * PLAIN_COMMENTS.length)]
+          const r = await call('douyin_comment', { aweme_id: v.aweme_id, text }, { timeoutMs: 180_000 })
+          const okk = r && r.ok !== false
+          acts.push(`评论「${text}」：` + (okk ? '已发' : (r?.error || '没发出去')))
+          if (okk) notePlainComment(v.aweme_id, text)
         } else if (item.act === 'share') {
           const to = String(cfg.shareToNick || '').trim()
           const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
