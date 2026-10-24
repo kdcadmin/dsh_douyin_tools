@@ -2545,6 +2545,7 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
     2026-10-25 实测：这个面板是 **hover 打开**的（click 不弹）。面板里每行是「头像+昵称 … [分享]」。
     """
     notes = []
+    (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
     aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
     await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=4.0)
     st = await _login_state(page, ctx)
@@ -2568,7 +2569,7 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
         if opened:
             break
     if not opened:
-        await page.screenshot(path=str(_thumb_dir() / "_share.png"))
+        await page.screenshot(path=str(HOME / "thumbs" / "_share.png"))
         return _err("悬停后没弹出「分享给朋友」面板", aweme_id=aid, url=page.url, notes=notes)
 
     # 找到那个人那一行的「分享」按钮（红色）
@@ -2594,66 +2595,108 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
 
 
 async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
-    """私信：首页右上「消息」→ 右侧抽屉 → 搜索昵称 → 点会话 → 输入 → 回车。
-    续火花 / 发表情包 / 发链接都走这一条。
+    """私信：首页点右上「消息」图标（data-e2e=im-entry）→ 右侧抽屉 → 点那个人 → 「发送消息」框 → 回车。
+
+    2026-10-25 使用者截图 + 实测：抽屉里的会话列表直接有好友；输入框 placeholder 是「发送消息」。
+    之前失败的原因是把昵称打进了页面顶部那个大搜索框。
     """
     notes = []
-    await _goto(page, "https://www.douyin.com/", settle=4.0)
+    (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
+    await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
     st = await _login_state(page, ctx)
     if not st["loggedIn"]:
         return _need_login("私信要登录", nickname=nickname)
 
-    # 打开「消息」抽屉
+    # 1) 打开消息抽屉
     opened = await page.evaluate(
         """() => {
-            const nodes = Array.from(document.querySelectorAll('div, span, button, a'));
-            const hit = nodes.find((e) => (e.innerText || '').trim() === '消息' && e.getClientRects().length);
-            if (hit) { hit.click(); return true; }
-            return false;
+            const e = document.querySelector('[data-e2e="im-entry"]')
+                || Array.from(document.querySelectorAll('div,span')).find((x) => (x.innerText || '').trim() === '消息');
+            if (!e) return false;
+            e.click();
+            return true;
         }"""
     )
     if not opened:
-        notes.append("没点到「消息」按钮")
+        return _err("没找到「消息」入口", url=page.url, notes=notes)
+    await page.wait_for_timeout(3000)
+
+    # 2) 抽屉里点那个人（先在抽屉内搜，找不到就直接点列表行）
+    def in_drawer_js(action: str) -> str:
+        return action
+
+    nickKey = "".join(ch for ch in str(nickname) if ch.strip())[:4]
+    openedInfo = await page.evaluate(
+        "() => { const t = document.body.innerText || ''; return { drawer: t.indexOf('陌生人消息') >= 0 || t.indexOf('分享[视频]') >= 0, tail: t.slice(-60) }; }"
+    )
+    notes.append("抽屉状态：" + str(openedInfo.get("drawer")))
+    hit = await page.evaluate(
+        """(nick) => {
+            const W = window.innerWidth;
+            const inDrawer = (e) => {
+                const r = e.getBoundingClientRect();
+                return r.x > W * 0.65 && r.width > 80 && r.height > 20;
+            };
+            // 先找抽屉里的搜索框（x 靠右那个），输入昵称
+            const ins = Array.from(document.querySelectorAll('input')).filter((e) => {
+                const r = e.getBoundingClientRect();
+                return (e.placeholder || '').indexOf('搜索') >= 0 && r.x > W * 0.5 && r.width > 80;
+            });
+            if (ins.length) {
+                ins[0].focus();
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(ins[0], nick);
+                ins[0].dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            return ins.length;
+        }""",
+        nickname,
+    )
+    notes.append(f"抽屉搜索框 {hit} 个")
     await page.wait_for_timeout(2500)
 
-    # 抽屉里的搜索框
-    box = await _first_of(page, [
-        "input[placeholder*='搜索']",
-        "div[contenteditable='true']",
-        "input[type='text']",
-    ], 5000)
-    if box is None:
-        return _err("消息抽屉里没找到搜索框", url=page.url, notes=notes)
+    clicked = await page.evaluate(
+        """(nick) => {
+            const W = window.innerWidth;
+            const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
+                const r = e.getBoundingClientRect();
+                const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+                const key = nick.replace(/\s+/g, '').slice(0, 4);
+                return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.replace(/\s+/g, '').indexOf(key) >= 0;
+            });
+            if (!rows.length) return null;
+            rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+            rows[0].click();
+            return (rows[0].innerText || '').replace(/\s+/g, ' ').slice(0, 30);
+        }""",
+        nickname,
+    )
+    notes.append(("点开会话：" + clicked) if clicked else "抽屉里没找到这个人")
+    if not clicked:
+        await page.screenshot(path=str(HOME / "thumbs" / "_chat.png"))
+        return _err(f"消息抽屉里没有「{nickname}」", url=page.url, notes=notes)
+
+    # 3) 等输入框（placeholder=发送消息）
+    ed = None
+    for _ in range(20):
+        await page.wait_for_timeout(600)
+        ed = await _first_of(page, ["div[contenteditable='true']", "textarea", "input[placeholder*='发送消息']"], 1500)
+        if ed is not None:
+            break
+    if ed is None:
+        await page.screenshot(path=str(HOME / "thumbs" / "_chat.png"))
+        return _err("没等到「发送消息」输入框", url=page.url, notes=notes)
+
     try:
-        await box.click()
-        await page.keyboard.type(nickname, delay=40)
-        await page.wait_for_timeout(2200)
-        # 点搜索结果里的会话
-        picked = await page.evaluate(
-            """(nick) => {
-                const nodes = Array.from(document.querySelectorAll('div, li'));
-                const hit = nodes.find((e) => {
-                    const t = (e.innerText || '');
-                    return t.includes(nick) && t.length < 120 && e.getClientRects().length;
-                });
-                if (hit) { hit.click(); return true; }
-                return false;
-            }""",
-            nickname,
-        )
-        notes.append("选中会话" if picked else "没点到会话，尝试直接发")
-        await page.wait_for_timeout(2000)
-        ed = await _first_of(page, ["div[contenteditable='true']", "textarea"], 5000)
-        if ed is None:
-            return _err("没找到输入框", url=page.url, notes=notes)
         await ed.click()
         await page.keyboard.type(text, delay=30)
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(500)
         await page.keyboard.press("Enter")
-        await page.wait_for_timeout(1800)
+        await page.wait_for_timeout(1500)
         return _ok(to=nickname, sent=text, notes=notes)
     except Exception as exc:
-        return _err(f"发私信失败：{type(exc).__name__}: {exc}", url=page.url, notes=notes)
+        return _err(f"发送失败：{type(exc).__name__}: {exc}", notes=notes)
+
 
 @mcp.tool()
 async def douyin_chat_send(nickname: str, text: str) -> str:
