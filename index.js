@@ -1301,6 +1301,10 @@ export function apply(ctx, config) {
           TEMP: tmpDir,
           TMP: tmpDir,
           TMPDIR: tmpDir,
+          // ⭐ 2026-10-25：headless 子进程默认在受限沙箱里跑，Playwright 给 driver 开命名管道
+          //    （\\.\\pipe\\…）被拒 ⇒ EPERM。这两行把它放开到完整访问，实测 douyin_whoami 能通。
+          DSH_SANDBOX: 'danger-full-access',
+          DSH_FILE_POLICY: 'danger-full-access',
           ...(String(cfg.cdpUrl || '').trim() ? { DOUYIN_CDP_URL: String(cfg.cdpUrl).trim() } : {}),
           ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         }),
