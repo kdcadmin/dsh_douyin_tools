@@ -901,6 +901,24 @@ async def _video_core(page, aweme_id: str) -> dict:
         net.close()
 
 
+def _detail_comment_count(net) -> int | None:
+    """详情 XHR 里的 statistics.comment_count —— 这是一级评论数。
+
+    ⭐ 2026-10-24 实测：评论列表 XHR 的 `total` 把楼中楼回复也算进去了
+    （某条视频 total=3，一级评论只有 1 条），DOM 上的 feed-comment-icon 同样是 3。
+    所以"只拿到 1 条"到底是不是加载失败，只能跟这里的数字比。
+    """
+    try:
+        for item in list(net.items):
+            aw = (item.get("data") or {}).get("aweme_detail") or {}
+            stats = aw.get("statistics") or {}
+            if stats.get("comment_count") is not None:
+                return int(stats.get("comment_count") or 0)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 async def _comments_core(page, aweme_id: str, num: int) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
@@ -908,6 +926,7 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
     num = max(1, min(int(num or 30), 100))
 
     net = Net(page, _is_comment_list_url)
+    detail_net = Net(page, _is_detail_url)   # 顺手取一级评论数（statistics.comment_count）
     notes: list[str] = []
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
@@ -958,13 +977,21 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
             return _ok(aweme_id=aid, count=0, items=[], notes=notes, source="none")
 
         if len(comments) < num:
-            notes.append(
-                f"只拿到 {len(comments)} 条（要 {num} 条）：抖音评论区的「点击加载更多」"
-                "没继续出数据，通常是未登录/风控限制；不编数据。"
-            )
+            total = _detail_comment_count(detail_net)
+            if total is not None and total <= len(comments):
+                notes.append(
+                    f"这条视频一共就 {len(comments)} 条一级评论（已全部取到），不是加载失败；不编数据。"
+                )
+            else:
+                shown = f"这条视频共 {total} 条" if total is not None else "没核到总数"
+                notes.append(
+                    f"只拿到 {len(comments)} 条（要 {num} 条；{shown}）："
+                    "「点击加载更多」没继续出数据，可能被风控/需要登录；不编数据。"
+                )
         return _ok(aweme_id=aid, count=len(comments[:num]), items=comments[:num],
                    source="xhr", **({"notes": notes} if notes else {}))
     finally:
+        detail_net.close()
         net.close()
 
 
@@ -1240,6 +1267,42 @@ def _digged(state: str) -> bool:
     return "digged" in s or "digg" in s
 
 
+async def _digg_state(page, aweme_id: str) -> dict:
+    """读页面里点赞按钮的真实状态（不靠点赞数）。
+
+    ⭐ 2026-10-24 实测：桌面端详情页经常把整条右侧互动栏 `display:none`，
+       `[data-e2e='video-player-digg']` 节点还在、`data-e2e-state` 也读得到，
+       但 rect = 0×0 ⇒ Playwright 的可见性点击必然超时。
+       所以状态判定一律走 DOM 属性；点赞数是被所有人推动的全局计数，
+       既会把"假成功"变成真，也会把"真成功"判成失败。
+    """
+    try:
+        info = await page.evaluate(
+            """() => {
+                const el = document.querySelector("[data-e2e='video-player-digg']");
+                if (!el) return {present: false};
+                const r = el.getBoundingClientRect();
+                return {
+                    present: true,
+                    state: el.getAttribute('data-e2e-state') || '',
+                    nw: Math.round(r.width),
+                    nh: Math.round(r.height),
+                };
+            }"""
+        )
+    except Exception:
+        return {"present": False}
+    if not info or not info.get("present"):
+        return {"present": False}
+    state = str(info.get("state") or "")
+    return {
+        "present": True,
+        "state": state,
+        "liked": _digged(state),
+        "visible": int(info.get("nw") or 0) > 4 and int(info.get("nh") or 0) > 4,
+    }
+
+
 async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
@@ -1249,74 +1312,79 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
     if not st["loggedIn"]:
         return _need_login("点赞要登录：先 douyin_login_qr → 扫码 → douyin_login_poll", aweme_id=aid)
 
-    loc = await _first_of(page, ["[data-e2e='video-player-digg']", "[data-e2e='video-like']"], 6000)
-    if loc is None:
-        # ⭐ 2026-10-23 实测：登录后视频页的点赞按钮不一定带 data-e2e / aria-label。
-        #    依次退：① 带「赞/like/digg」的可点元素 ② 双击视频画面（抖音桌面端支持双击点赞）
-        clicked = await page.evaluate(
-            """() => {
-                const cand = Array.from(document.querySelectorAll('[aria-label],[data-e2e],button,div'))
-                    .filter((el) => {
-                        const a = (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('data-e2e') || '');
-                        return /赞|like|digg/i.test(a) && el.getBoundingClientRect().width > 8;
-                    });
-                if (!cand.length) return false;
-                cand[0].click();
-                return true;
-            }"""
-        )
-        if not clicked:
-            # 双击兜底：先记下点赞数，双击后再读一次 —— **数字没变就不许报成功**
-            # （2026-10-23 踩过：dblclick 报 ok 但 digg 从 29981 到 29981 没动，等于假报成功）
-            base = await _video_core(page, aid)
-            d0 = int(base.get("digg") or 0)
-            note = "data-e2e 没有，改用双击视频（抖音桌面端支持双击点赞）"
+    target = not undo          # 目标状态：点赞 = True，取消 = False
+    dom = await _digg_state(page, aid)
+    for _ in range(3):         # 首屏偶尔要等一帧才把按钮挂上
+        if dom["present"]:
+            break
+        await page.wait_for_timeout(800)
+        dom = await _digg_state(page, aid)
+
+    if dom["present"]:
+        if dom["liked"] == target:
+            return _ok(aweme_id=aid, liked=dom["liked"], changed=False,
+                       state=dom["state"], verified=True,
+                       note="本来就是目标状态，没动")
+
+        note = ""
+        if dom["visible"]:
             try:
-                vid = page.locator("video").first
-                if await vid.count() == 0:
-                    return _err("页面里没有 video 元素，点赞按钮也找不到", aweme_id=aid)
-                await vid.scroll_into_view_if_needed(timeout=3000)
-                await vid.dblclick(timeout=5000, force=True)
-            except Exception as exc:
-                return _err(f"找不到点赞按钮，双击兜底也失败：{type(exc).__name__}: {exc}", aweme_id=aid)
-            await page.wait_for_timeout(1800)
-            after = await _video_core(page, aid)
-            d1 = int(after.get("digg") or 0)
-            if d1 == d0:
-                return _err("点了但点赞数没变（douyin 桌面端这条视频的点赞按钮没找到，双击也没生效）",
-                            aweme_id=aid, diggBefore=d0, diggAfter=d1, verified=False)
-            return _ok(aweme_id=aid, liked=d1 > d0, changed=True,
-                       diggBefore=d0, diggAfter=d1, verified=True, note=note)
-        await page.wait_for_timeout(1200)
-        # 兜底点击也要验：读一次点赞数（点前没记，就只报"点了"，不谎报 ok:true 的成功语义）
-        return _ok(aweme_id=aid, liked=not undo, changed=True, verified=False,
-                   note="用兜底选择器点的（页面没有 data-e2e），没做数字校验")
+                await page.locator("[data-e2e='video-player-digg']").first.click(timeout=5000)
+                note = "点了页面上的点赞按钮"
+            except Exception as exc:  # noqa: BLE001
+                note = f"按钮点击失败（{type(exc).__name__}），改 JS 直点"
+        else:
+            note = "点赞按钮 rect=0×0（互动栏 display:none），改用 JS 直点"
 
-    state = await loc.get_attribute("data-e2e-state") or ""
-    current = _digged(state)
-    if current == (not undo):
-        return _ok(aweme_id=aid, liked=current, changed=False,
-                   note="本来就是目标状态，没动")
+        if not note.startswith("点了页面"):
+            # JS 派发 click 不受 display:none 影响：事件照走，抖音照样发请求
+            await page.evaluate(
+                """() => {
+                    const el = document.querySelector("[data-e2e='video-player-digg']");
+                    if (el) el.click();
+                }"""
+            )
 
-    await loc.click(timeout=5000)
-    final = current
-    for _ in range(20):
-        await page.wait_for_timeout(300)
-        try:
-            state = await loc.get_attribute("data-e2e-state") or ""
-            final = _digged(state)
-        except Exception:
-            break
-        if final != current:
-            break
+        final = dom
+        for _ in range(20):
+            await page.wait_for_timeout(300)
+            final = await _digg_state(page, aid)
+            if final["present"] and final["liked"] != dom["liked"]:
+                break
 
-    if final == current:
-        qr = await _first_of(page, QR_SELS, 300)
+        if final["present"] and final["liked"] == target:
+            return _ok(aweme_id=aid, liked=final["liked"], changed=True,
+                       state=final["state"], verified=True, note=note)
+
+        qr = await _first_of(page, QR_SELS, 300)   # 登录态失效会弹扫码框
         if qr is not None:
             return _need_login("点了点赞但弹出登录框：登录态失效了，重新扫码", aweme_id=aid)
-        return _err("点了点赞但按钮状态没变（可能被风控/结构变了）", aweme_id=aid, liked=current)
+        return _err("点了但 data-e2e-state 没翻转（可能被风控/页面结构变了）",
+                    aweme_id=aid, liked=final.get("liked"),
+                    before=dom["state"], after=final.get("state"), note=note)
 
-    return _ok(aweme_id=aid, liked=final, changed=True)
+    # 页面上压根没有这个节点
+    if undo:
+        return _err("这条视频页没有可用的点赞按钮（互动栏未渲染），双击只能点赞、无法取消；"
+                    "要取消请换一条视频页重试，或到「我 → 喜欢」里手动取消", aweme_id=aid)
+    try:
+        vid = page.locator("video").first
+        if await vid.count() == 0:
+            return _err("页面里没有 video 元素，点赞按钮也找不到", aweme_id=aid)
+        await vid.scroll_into_view_if_needed(timeout=3000)
+        await vid.dblclick(timeout=5000, force=True)
+    except Exception as exc:  # noqa: BLE001
+        return _err(f"找不到点赞按钮，双击兜底也失败：{type(exc).__name__}: {exc}", aweme_id=aid)
+
+    await page.wait_for_timeout(1800)
+    after = await _digg_state(page, aid)
+    if after["present"] and after["liked"]:
+        return _ok(aweme_id=aid, liked=True, changed=True, state=after["state"],
+                   verified=True, note="没有按钮节点，双击视频点赞（状态已核对）")
+    if after["present"]:
+        return _err("双击了但状态仍是未点赞（这条视频可能不支持双击点赞）",
+                    aweme_id=aid, state=after["state"])
+    return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", aweme_id=aid)
 
 
 async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, mention: str = "") -> dict:
@@ -2194,6 +2262,30 @@ async def douyin_login_poll() -> str:
     return j(await _guard(_impl, 30))
 
 
+
+def _drop_live(items):
+    """直播不进候选：抖音的直播间没有时长/是 live 类型，标题常带「直播中」「正在直播」。
+    这里按几种特征一起判断，宁可多滤掉也不让直播混进挑片列表。"""
+    keep = []
+    dropped = 0
+    for it in items or []:
+        title = str(it.get("title") or "")
+        url = str(it.get("url") or "")
+        dur = it.get("duration")
+        is_live = (
+            "/live/" in url
+            or "直播" in title
+            or "正在直播" in title
+            or (it.get("is_live") is True)
+            or (it.get("live") is True)
+            or (dur in (0, None, "") and it.get("source") == "live")
+        )
+        if is_live:
+            dropped += 1
+            continue
+        keep.append(it)
+    return keep, dropped
+
 @mcp.tool()
 async def douyin_search(keyword: str, num: int = 10, order: str = "general") -> str:
     """搜索抖音视频（需登录）。
@@ -2207,9 +2299,15 @@ async def douyin_search(keyword: str, num: int = 10, order: str = "general") -> 
     """
     async def _impl():
         page = await _browser.page()
-        return await _search_core(page, keyword, num, order)
+        res = await _search_core(page, keyword, num, order)
+        items, dropped = _drop_live(res.get("items") or [])
+        if dropped:
+            res["items"] = items
+            res["count"] = len(items)
+            res.setdefault("notes", []).append(f"跳过 {dropped} 条直播")
+        return res
 
-    return j(await _guard(_impl, 50))
+    return j(await _guard(_impl, 55))
 
 
 @mcp.tool()
@@ -2340,6 +2438,72 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
         return await _comment_core(page, ctx, aweme_id, text, reply_cid, mention)
 
     return j(await _guard(_impl, 70))
+
+
+@mcp.tool()
+async def douyin_chat_send(nickname: str, text: str) -> str:
+    """给某个好友发一条私信（抖音聊天页）。
+
+    一个原语干三件事：
+      · 转发视频：text 里放视频链接（https://www.douyin.com/video/<id>）
+      · 续火花：随便发一句（比如「今天也在哦」）
+      · 发表情包：text 里写抖音表情文本码（如 [憨笑]），聊天里会渲染成表情
+
+    Args:
+        nickname: 对方昵称（会先在聊天页搜索）
+        text: 发送内容（可含链接 / 表情文本码）
+
+    返回 {ok, to, sent, notes?}
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        notes = []
+        await _goto(page, "https://www.douyin.com/chat", settle=4.0)
+        st = await _login_state(page, ctx)
+        if not st["loggedIn"]:
+            return _need_login("私信要登录", nickname=nickname)
+        # 搜索框：找人
+        box = await _first_of(page, [
+            "input[placeholder*='搜索']",
+            "input[type='text']",
+        ], 6000)
+        if box is None:
+            await page.screenshot(path=str(_thumb_dir() / "_chat.png"))
+            return _err("聊天页没找到搜索框（可能改版）", url=page.url, notes=notes)
+        try:
+            await box.click()
+            await box.fill(nickname)
+            await page.wait_for_timeout(2500)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(2500)
+        except Exception as exc:
+            notes.append(f"搜索失败：{type(exc).__name__}")
+        # 点第一个会话
+        hit = page.get_by_text(nickname, exact=False).first
+        if await hit.count():
+            try:
+                await hit.click(timeout=5000)
+                await page.wait_for_timeout(2000)
+            except Exception:
+                notes.append("点会话失败")
+        # 输入框：contenteditable 或 textarea
+        ed = await _first_of(page, ["div[contenteditable='true']", "textarea", "input[type='text']"], 5000)
+        if ed is None:
+            await page.screenshot(path=str(_thumb_dir() / "_chat.png"))
+            return _err("没找到消息输入框", url=page.url, notes=notes)
+        try:
+            await ed.click()
+            await page.keyboard.type(text, delay=25)
+            await page.wait_for_timeout(600)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(1800)
+            notes.append("已按 Enter 发送")
+        except Exception as exc:
+            return _err(f"发送失败：{type(exc).__name__}: {exc}", notes=notes)
+        return _ok(to=nickname, sent=text, notes=notes)
+
+    return j(await _guard(_impl, 80))
 
 
 @mcp.tool()

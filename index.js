@@ -112,6 +112,16 @@ export const Config = !z ? undefined : z.object({
   replyOneShot: z.boolean().default(true).extra('volatile', true),
   /** 同一个人只回一次（默认关；开了之后同一个人后来的新评论也不回） */
   replyOncePerUser: z.boolean().default(false).extra('volatile', true),
+  /** 遇到直播就跳过（默认开） */
+  skipLive: z.boolean().default(true).extra('volatile', true),
+  /** 转发视频给谁（昵称；留空=不转发） */
+  shareToNick: z.string().default('').extra('volatile', true),
+  /** 续火花：每天给谁发一句（昵称；留空=不续） */
+  streakNick: z.string().default('').extra('volatile', true),
+  /** 续火花每天最多几次 */
+  streakPerDay: z.natural().default(1).extra('volatile', true),
+  /** 遇到不会的视频，评论里 @ 豆包 求解答（默认关） */
+  askDoubao: z.boolean().default(false).extra('volatile', true),
   /** 隔多少分钟看一次评论区（默认 30；会自动 ±20% 抖动，像人在看） */
   replyIntervalMin: z.natural().default(30).extra('volatile', true),
   /** 我自己在抖音的昵称（跳过自己的评论/回复；留空自动认「大白鲸」那几个） */
@@ -183,7 +193,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -240,6 +250,11 @@ export function apply(ctx, config) {
     if ('myNickname' in p) p.myNickname = String(p.myNickname || '').slice(0, 40)
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
+    if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
+    if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
+    if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
+    if ('streakNick' in p) p.streakNick = String(p.streakNick || '').slice(0, 40)
+    if ('streakPerDay' in p) p.streakPerDay = Math.max(0, Math.min(Number(p.streakPerDay) || 0, 20))
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
     if ('publishTitle' in p) p.publishTitle = String(p.publishTitle || '').slice(0, 120)
     if ('publishTags' in p) p.publishTags = String(p.publishTags || '').slice(0, 200)
@@ -1505,6 +1520,40 @@ export function apply(ctx, config) {
     async execute(args) { return replyRound({ count: args.count, random: args.random }) },
   })
   tool({
+    name: 'dy_chat_send',
+    description: '给某个好友发一条私信。一个原语干三件事：转发视频（正文放视频链接）、续火花（随便一句）、发表情包（用 [憨笑] 这类文本码）。',
+    parameters: {
+      nickname: { type: 'string', description: '对方昵称' },
+      text: { type: 'string', description: '要发的内容（可含 https://www.douyin.com/video/<id> 或 [憨笑] 这类表情码）' },
+    },
+    async execute(args) {
+      const nick = String(args.nickname ?? '').trim()
+      const text = String(args.text ?? '').trim()
+      if (!nick || !text) return { ok: false, error: 'nickname 和 text 都要给' }
+      const r = await call('douyin_chat_send', { nickname: nick, text }, { timeoutMs: 180_000 })
+      log(`私信 → ${nick}：${text.slice(0, 40)}`)
+      return r
+    },
+  })
+
+  tool({
+    name: 'dy_share',
+    description: '把一个视频转发给指定的人（发一条私信，正文是视频链接）。',
+    parameters: {
+      aweme_id: { type: 'string', description: '视频 id 或链接' },
+      to: { type: 'string', description: '发给谁（昵称；留空用设置里的「转发给谁」）' },
+    },
+    async execute(args) {
+      const id = String(args.aweme_id ?? '').trim()
+      const to = String(args.to ?? '').trim() || String(cfg.shareToNick || '').trim()
+      if (!id || !to) return { ok: false, error: '要么给 aweme_id 和 to，要么先在设置里填「转发给谁」' }
+      const url = `https://www.douyin.com/video/${id}`
+      const r = await call('douyin_chat_send', { nickname: to, text: `这个好看，给你：${url}` }, { timeoutMs: 180_000 })
+      return { ...(r || {}), shared_to: to, url }
+    },
+  })
+
+  tool({
     name: 'dy_thumb',
     description: '给一条视频截一张缩略图（存 <家>/thumbs/<id>.jpg，供「刷过的视频」卡片用）。\n'
       + '写日报之后对今天每条调一次，页面就有图；不调也行，页面第一次打开时会自己补（慢一点）。',
@@ -1954,6 +2003,24 @@ export function apply(ctx, config) {
    * · 只有 autoReply 开着才跑；跟谷时窗口无关（评论是随时有人来的）
    * · 回调自己兜异常，绝不往上抛（宿主进程不能被它带走）
    */
+  /* ── 续火花：每天给指定好友发一句（0 点后第一次检查时做，写进 state 防重复） ── */
+  const streakKey = () => `streak:${dayKey()}`
+  const maybeKeepStreak = async () => {
+    try {
+      refreshCfg()
+      const nick = String(cfg.streakNick || '').trim()
+      const cap = Math.max(0, Number(cfg.streakPerDay) || 0)
+      if (!nick || !cap) return
+      const st = readState()
+      if (Number(st[streakKey()] || 0) >= cap) return
+      const r = await call('douyin_chat_send', { nickname: nick, text: '今天也在哦[憨笑]' }, { timeoutMs: 180_000 })
+      const ok = r && r.ok !== false
+      bumpState({ [streakKey()]: Number(st[streakKey()] || 0) + 1, lastStreakAt: new Date().toISOString(), lastStreakOk: ok })
+      log(`续火花 → ${nick}：${ok ? '已发送' : (r?.error || '没发出去')}`)
+      appendMemory(`续火花 · ${nick} · ${ok ? '已发送' : '失败'}`)
+    } catch (e) { log('续火花出错（已兜住）：' + String(e?.message ?? e)) }
+  }
+
   let replyTimer = null
   let replyBusy = false
   let lastReplyCheckAt = null
@@ -1967,6 +2034,7 @@ export function apply(ctx, config) {
     replyTimer = setTimeout(async () => {
       try {
         refreshCfg()
+        await maybeKeepStreak()
         if (cfg.autoReply && !replyBusy) {
           replyBusy = true
           lastReplyCheckAt = new Date().toISOString()
