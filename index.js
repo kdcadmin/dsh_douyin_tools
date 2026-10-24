@@ -72,6 +72,7 @@ export const Config = !z ? undefined : z.object({
   /** dsh 的 bin.js（不填就自动探测，再退化成 PATH 里的 dsh） */
   dshBin: z.string().default('').extra('volatile', true),
   /** headless 那一轮用哪个 profile */
+  headlessModel: z.string().default('').extra('volatile', true),
   headlessProfile: z.string().default('headless').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把抖音 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
@@ -208,6 +209,7 @@ export function apply(ctx, config) {
     personaPrompt: '',
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
+    headlessModel: '',
     shareNote: '', sharePerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
@@ -283,6 +285,7 @@ export function apply(ctx, config) {
     if ('cdpPort' in p) p.cdpPort = Math.max(1024, Math.min(Number(p.cdpPort) || 9222, 65535))
     if ('chromePath' in p) p.chromePath = String(p.chromePath || '').trim()
     if ('dshBin' in p) p.dshBin = String(p.dshBin || '').trim()
+    if ('headlessModel' in p) p.headlessModel = String(p.headlessModel || '').slice(0, 80)
     if ('headlessProfile' in p) p.headlessProfile = String(p.headlessProfile || 'headless').trim()
     if ('workspace' in p) p.workspace = String(p.workspace || '').trim()
     return p
