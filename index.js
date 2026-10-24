@@ -400,13 +400,22 @@ export function apply(ctx, config) {
       throw new Error(`家里没有 mcp_server.py（应有 ${scriptPath}）—— 把 vendor/douyin-mcp/mcp_server.py 放好再重启一次 dsh；或者用 --force 让插件重铺`)
     }
     mcpKey = mcpKeyNow()
+    try { mkdirSync(join(stateDir, '.tmp'), { recursive: true }) } catch { /* 建不了就让 Playwright 报 */ }
     const p = pythonNow()
     mcp = new McpClient({
       command: p.command,
       args: [...p.args, scriptPath],
       cwd: stateDir,      // 凭证 / 浏览器 profile 落在家里 ✓
       // ⭐ 家目录钉死（宿主与 Python 必须同一个）；CDP 给了就走「已登录的 Chrome」
-      env: uvEnv({ DSH_DOUYIN_HOME: stateDir, DOUYIN_CDP_URL: String(cfg.cdpUrl || '') }),
+      // ⭐ 2026-10-25：这台机器上系统 Temp 对子进程不放行，Playwright 的 mkdtemp 直接 EPERM。
+      //    MCP 子进程也必须把 TEMP 指到家目录下，否则每个浏览器工具都起不来。
+      env: uvEnv({
+        DSH_DOUYIN_HOME: stateDir,
+        DOUYIN_CDP_URL: String(cfg.cdpUrl || ''),
+        TEMP: join(stateDir, '.tmp'),
+        TMP: join(stateDir, '.tmp'),
+        TMPDIR: join(stateDir, '.tmp'),
+      }),
       log,
     })
     return mcp
