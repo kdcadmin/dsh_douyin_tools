@@ -2608,9 +2608,9 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
                     return out;
                 }"""
             )
-            # ⭐ 只认 CDN 直链（douyinvod / .mp4）；/aweme/v1/play/ 是接口，ffmpeg 读不了
+            # 任何 http(s) 地址都先用（blob: 才排除）；能不能流式读交给后面的兜底判断
             for c in cands or []:
-                if ("douyinvod.com" in c) or c.split("?")[0].endswith(".mp4"):
+                if c.startswith("http"):
                     url = c
                     break
             if url:
@@ -3304,6 +3304,14 @@ async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
             )
             if ready:
                 break
+        if not ready:
+            # 先刷新页面（有时候面板就是挂了），刷新后再进抽屉
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
+                notes.append("刷新过一次页面")
+            except Exception:
+                pass
         if not ready:
             # 再试一次：重新点「消息」图标打开抽屉
             try:
