@@ -615,9 +615,10 @@ export function apply(ctx, config) {
   /** 表情包关键词：什么话配什么表情（只有「大肥鱼」系列是现成的） */
   const pickStickerKeyword = (note) => {
     const s = String(note || '')
-    if (/好看|颜值|太好看了/.test(s)) return '大肥鱼'
-    if (/总结|讲|收获|有用/.test(s)) return '大肥鱼'
+    // 现在素材库只有「大肥鱼」一套；可爱/搞笑的都往这套里挑，语气上再配
+    if (/可爱|好看|颜值|买/.test(s)) return '大肥鱼'
     if (/笑|哈哈|笑死/.test(s)) return '大肥鱼'
+    if (/总结|讲|收获|有用/.test(s)) return '大肥鱼'
     return '大肥鱼'
   }
   const sentBrief = (r) => {
@@ -840,9 +841,15 @@ export function apply(ctx, config) {
         : ['这条挺干货的，感觉有用[比心]']
       return pool[Math.floor(Math.random() * pool.length)]
     }
-    if (pretty || fun) {
+    if (pretty) {
+      const pool = ['这个好可爱啊，你不给我买我就找一群大肥鱼弄你[捂脸]',
+        '好好看，给我看[比心]', '这个太可爱了，你不买我就找大肥鱼来[笑哭]',
+        '刷到这个就想到你，好看[害羞]']
+      return pool[Math.floor(Math.random() * pool.length)]
+    }
+    if (fun) {
       const pool = ['好好看，给我看[比心]', '这个太好看了，你也看看[笑哭]',
-        '刷到这个就想到你，好看[害羞]', '好看！这个必须给你看[比心]']
+        '笑死我了[捂脸]你也来看看', '这条我一路看完了，比标题写得好[笑哭]']
       return pool[Math.floor(Math.random() * pool.length)]
     }
     const other = ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '笑死我了[捂脸]你也来看看',
@@ -2438,12 +2445,22 @@ export function apply(ctx, config) {
       const plan = []
       let mi = 0
       let si = 0
+      // ⭐ 轮转分配：mention → share → plain 轮流来，保证一轮里既有转发也有评论
       let pi = 0
+      let turn = 0
+      const canMention = () => mi < mentionLeft && cfg.autoComment
+      const canShare = () => si < shareLeft && String(cfg.shareToNick || '').trim()
+      const canPlain = () => pi < plainLeft && cfg.autoCommentPlain
       for (const v of take) {
-        if (mi < mentionLeft && cfg.autoComment) { plan.push({ v, act: 'mention' }); mi += 1; continue }
-        if (pi < plainLeft && cfg.autoCommentPlain) { plan.push({ v, act: 'plain' }); pi += 1; continue }
-        if (si < shareLeft && String(cfg.shareToNick || '').trim()) { plan.push({ v, act: 'share' }); si += 1; continue }
-        plan.push({ v, act: 'like' })
+        let act = 'like'
+        for (let k = 0; k < 3; k += 1) {
+          const t2 = (turn + k) % 3
+          if (t2 === 0 && canMention()) { act = 'mention'; mi += 1; break }
+          if (t2 === 1 && canShare()) { act = 'share'; si += 1; break }
+          if (t2 === 2 && canPlain()) { act = 'plain'; pi += 1; break }
+        }
+        turn += 1
+        plan.push({ v, act })
       }
       for (const item of plan) {
         const v = item.v
