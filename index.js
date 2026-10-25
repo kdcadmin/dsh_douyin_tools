@@ -142,6 +142,8 @@ export const Config = !z ? undefined : z.object({
   /** 每天最多回几条私信（所有人合计） */
   dmReplyPerDay: z.natural().default(5).extra('volatile', true),
   /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
+  /** 转发后是否顺带发一条消息 + 一个表情包（同一个开关） */
+  shareWithNote: z.boolean().default(true).extra('volatile', true),
   shareNote: z.string().default('').extra('volatile', true),
   /** 回评论时看多久以内的作品（1=只回今天发的；30=连老作品的新评论一起回） */
   replyWorksDays: z.natural().default(3).extra('volatile', true),
@@ -232,7 +234,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -1911,7 +1913,7 @@ export function apply(ctx, config) {
       const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
       if (r && r.ok !== false) {
         // 分享完再补一句「人话」——不然对方只收到一张卡片，很冷
-        const note = makeShareNote({ title: args.title || '' })
+        const note = cfg.shareWithNote === false ? '' : makeShareNote({ title: args.title || '' })
         let noteOk = false
         let stickerOk = false
         try {
@@ -2640,7 +2642,7 @@ export function apply(ctx, config) {
           if (okk) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             // 转发后附一句带表情的话 + 一个表情包（都失败也不影响转发本身）
-            const note = makeShareNote(v)
+            const note = cfg.shareWithNote === false ? '' : makeShareNote(v)
             // ⭐ 一次会话里把「话 + 表情包」发完（不再开两次抽屉、不重复搜索）
             const mood = pickStickerKeyword(note)
             try {
