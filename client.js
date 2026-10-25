@@ -858,7 +858,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'connection'],
       apply(ctx) {
         const style = document.createElement('style')
         style.setAttribute('data-plugin-css', 'dsh-douyin-life')
@@ -874,36 +874,119 @@ window.__ModuleLoader__.load({
         ))
 
         // ⭐ 2026-10-26 使用者：「记忆塞到设置左侧列表里，之前那个一重启就没了」
-        //   这个面板不依赖 memory 插件的客户端，直接读 <家>/memory/*.md
+        //   + 「之前的那些 UI 也放进来」→ 直接调记忆插件的 memory.* RPC：
+        //   角色卡 / 时间线 / 图谱 / 原始记忆（读 <家>/memory/*.md）
+        const memCall = async (method, params) => {
+          const conn = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) || ctx.connection
+          if (!conn?.rpc?.call) throw new Error('没有 connection.rpc')
+          const raw = await conn.rpc.call('/api', 'memory.' + method, params || {})
+          // 宿主会把结果包成 {ok, value}
+          if (raw && typeof raw === 'object' && 'ok' in raw) return raw.value !== undefined ? raw.value : raw
+          return raw
+        }
+
+        const MemTabs = [
+          { id: 'character', label: '角色卡' },
+          { id: 'timeline', label: '时间线' },
+          { id: 'graph', label: '图谱' },
+          { id: 'raw', label: '原始记录' },
+        ]
+
+        const MemBox = ({ children }) => h('div', {
+          style: { fontSize: '12.5px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px',
+            border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '10px', whiteSpace: 'pre-wrap' },
+        }, children)
+
         const MemoryPage = () => {
-          const [data, setData] = React.useState(null)
+          const [tab, setTab] = React.useState('character')
+          const [char, setChar] = React.useState(null)
+          const [tl, setTl] = React.useState(null)
+          const [g, setG] = React.useState(null)
+          const [raw, setRaw] = React.useState(null)
           const [err, setErr] = React.useState('')
-          React.useEffect(() => {
-            let alive = true
-            fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
-              .then((r) => r.json())
-              .then((j) => { if (alive) setData(j) })
-              .catch((e) => { if (alive) setErr(String(e && e.message || e)) })
-            return () => { alive = false }
-          }, [])
-          const row = (k, v) => h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, k)),
-            h('span', { style: { opacity: 0.75, fontSize: '12px' } }, String(v ?? '')))
+          const [busy, setBusy] = React.useState(false)
+
+          const load = React.useCallback(async () => {
+            setBusy(true); setErr('')
+            try {
+              if (tab === 'character' && char === null) setChar(await memCall('character', { action: 'read' }))
+              if (tab === 'timeline' && tl === null) setTl(await memCall('recall', { limit: 80 }))
+              if (tab === 'graph' && g === null) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
+              if (tab === 'raw' && raw === null) {
+                const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+                setRaw(await r.json())
+              }
+            } catch (e) { setErr(String((e && e.message) || e)) } finally { setBusy(false) }
+          }, [tab, char, tl, g, raw])
+          React.useEffect(() => { load() }, [load])
+
+          const kv = (k, v) => h('div', { style: { display: 'flex', gap: '8px', marginBottom: '4px' } },
+            h('span', { style: { opacity: 0.65, minWidth: '86px' } }, k),
+            h('span', null, String(v ?? '—')))
+
+          const charBody = () => {
+            if (!char) return h(MemBox, null, busy ? '读取中…' : '（没有角色卡数据）')
+            const c = char.character || char
+            const fields = Object.keys(c || {}).filter((k) => !['updated_at', 'id', 'name'].includes(k))
+            return h('div', null,
+              h(MemBox, null,
+                kv('名字', c.name || '（未命名）'),
+                kv('更新时间', c.updated_at || '—')),
+              h(MemBox, null, fields.length
+                ? fields.map((k) => kv(k, typeof c[k] === 'object' ? JSON.stringify(c[k], null, 0) : c[k]))
+                : '（角色卡是空的）'))
+          }
+
+          const tlBody = () => {
+            const items = (tl && (tl.results || tl)) || []
+            if (!items.length) return h(MemBox, null, busy ? '读取中…' : '（还没有回忆条目）')
+            return h('div', null, items.slice(0, 40).map((it, i) => h(MemBox, { key: i },
+              h('div', { style: { opacity: 0.6, fontSize: '11.5px' } },
+                [it.created_at || it.at || '', it.kind || it.type || '', it.importance != null ? '重要度 ' + it.importance : ''].filter(Boolean).join(' · ')),
+              h('div', null, String(it.text || it.summary || it.content || '').slice(0, 400)))))
+          }
+
+          const gBody = () => {
+            const nodes = (g && (g.nodes || g.results)) || []
+            const edges = (g && g.edges) || []
+            if (!nodes.length) return h(MemBox, null, busy ? '读取中…' : '（图谱为空）')
+            return h('div', null,
+              h(MemBox, null, '节点 ' + nodes.length + ' 个 · 关系 ' + edges.length + ' 条'),
+              h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
+                nodes.slice(0, 60).map((n, i) => h('span', {
+                  key: i,
+                  style: { fontSize: '12px', padding: '4px 9px', borderRadius: '999px',
+                    border: '1px solid var(--dsh-border, rgba(128,128,128,.3))' },
+                }, String(n.label || n.name || n.id || '').slice(0, 18)))))
+          }
+
+          const rawBody = () => {
+            if (!raw) return h(MemBox, null, busy ? '读取中…' : '（读不到）')
+            return h('div', null,
+              h(MemBox, null,
+                kv('记忆目录', raw.mdDir || '—'),
+                kv('数据库', raw.dbPath ? raw.dbPath + '（' + raw.dbMb + ' MB）' : '（没找到）'),
+                kv('文件', (raw.files || []).join(' / ') || '—')),
+              (raw.lines || []).length
+                ? h('div', null, raw.lines.map((ln, i) => h(MemBox, { key: i }, ln)))
+                : h(MemBox, null, raw.hint || '还没有记录'))
+          }
+
           return h('div', { 'data-dy-panel': '' },
-            h('div', { 'data-dy-h': '' }, '记忆（刷抖音记的 + 记忆系统的库）'),
-            row('记忆文件目录', data?.mdDir || '（读不到）'),
-            row('记忆数据库', data?.dbPath ? data.dbPath + '（' + data.dbMb + ' MB）' : '（没找到 memory.db）'),
-            row('最近文件', (data?.files || []).join(' / ') || '—'),
-            err ? h('div', { 'data-dy-note': '' }, '读取失败：' + err) : null,
-            data?.hint ? h('div', { 'data-dy-note': '' }, data.hint) : null,
-            h('div', { 'data-dy-h': '' }, '最近记下的事'),
-            (data?.lines || []).length
-              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-                  data.lines.map((ln, i) => h('div', {
-                    key: i, style: { fontSize: '12.5px', lineHeight: 1.55, padding: '6px 10px',
-                      border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '8px' },
-                  }, ln)))
-              : h('div', { 'data-dy-note': '' }, '还没有记录'),
+            h('div', { 'data-dy-h': '' }, '记忆'),
+            h('div', { style: { display: 'flex', gap: '6px', margin: '6px 0 12px' } },
+              MemTabs.map((t2) => h('button', {
+                key: t2.id,
+                'data-dy-btn': '',
+                style: tab === t2.id ? { background: 'var(--dsh-accent, #4b6bfb)', color: '#fff', borderColor: 'transparent' } : undefined,
+                onClick: () => setTab(t2.id),
+              }, t2.label)),
+              h('button', { 'data-dy-btn': '', onClick: () => { setChar(null); setTl(null); setG(null); setRaw(null); load() } }, '刷新')),
+            err ? h(MemBox, { style: { borderColor: '#e0a' } }, '读取失败：' + err) : null,
+            tab === 'character' ? charBody() : null,
+            tab === 'timeline' ? tlBody() : null,
+            tab === 'graph' ? gBody() : null,
+            tab === 'raw' ? rawBody() : null,
           )
         }
 
