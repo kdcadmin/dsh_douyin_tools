@@ -199,7 +199,8 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `shareToNick` / `sharePerDay` | `''` / 10 | 转发给谁 / 每天最多转发几条（与评论互斥） |
 | `shareNote` | `''` | 转发时附带的一句话（空 = 按看片内容/类型自动生成） |
 | `msgAllowTo` | `''` | **可以主动发消息的人**（昵称逗号分隔；空 = 谁都不主动发） |
-| `dmReply` | true | 自动回私信（含陌生人） |
+| `dmReplyOnlyTo` | `''` | **只回谁的私信**（昵称，逗号分隔，可多人；空 = 谁发来都回） |
+| `dmReply` | true | 自动回私信 |
 | `dmReplyPerContact` / `dmReplyPerDay` | 1 / 5 | 每个联系人每天回几条 / 每天合计 |
 | `streakNick` / `streakPerDay` | `''` / 1 | 续火花发给谁 / 每天几次 |
 | `askDoubao` | false | 遇到不会的视频在评论里 @ 豆包 求解答 |
