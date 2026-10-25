@@ -2583,51 +2583,115 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
     if not url:
         return _err("没拿到视频流地址（未登录或被风控）", aweme_id=aid, duration=dur, notes=notes or None)
 
-    # ⭐ 两条路：能拿到 CDN 直链就流式抽（1.2s）；拿不到就把流下下来（1.9s）+ 抽音轨（0.07s）
-    wav = media_dir / f"{aid}.{int(seconds)}.wav"
+    # ⭐ 2026-10-25：**从不整条下载**。按取样片段用 ffmpeg 带 Range 直接取那几十秒。
+    #   · ≤90 秒的视频：取开头
+    #   · 长视频：取「开头 + 中间 + 结尾」各 30 秒（跳着看）
+    segs_plan: list[tuple[float, int]] = []
+    total = float(dur or 0)
+    if total and total > 150:
+        mid = max(0.0, total / 2 - 15)
+        end = max(0.0, total - 45)
+        segs_plan = [(0.0, 30), (mid, 30), (end, 30)]
+    else:
+        segs_plan = [(0.0, max(15, min(int(seconds), 120)))]
+
+    # 拿浏览器 cookie，ffmpeg 才能读 play 接口
+    cookie_hdr = ""
+    try:
+        cks = await page.context.cookies()
+        parts = [f"{c.get('name')}={c.get('value')}" for c in cks if c.get("name") and c.get("value")]
+        if parts:
+            cookie_hdr = "Cookie: " + "; ".join(parts) + "\r\n"
+    except Exception:
+        pass
+
+    # play 接口读不了 ⇒ 先在页面里 fetch 一次（只取前 1KB），把 302 之后的 CDN 直链拿出来
+    try:
+        final_url = await page.evaluate(
+            """async (u) => {
+                try {
+                    const r = await fetch(u, { method: 'GET', headers: { Range: 'bytes=0-1024' }, credentials: 'include' });
+                    return r.url || '';
+                } catch (e) { return ''; }
+            }""",
+            url,
+        )
+        if final_url and "douyinvod.com" in final_url:
+            notes.append("已解析到 CDN 直链")
+            url = final_url
+    except Exception:
+        pass
+
     ff = _ffmpeg_path()
     ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
-    hdr = "Referer: https://www.douyin.com/\r\n"
-    ok_stream = False
-    if "douyinvod.com" in url:
+    hdr = "Referer: https://www.douyin.com/\r\n" + cookie_hdr
+
+    wav_parts: list[Path] = []
+    import subprocess
+    for i, (start_at, dur_s) in enumerate(segs_plan):
+        part = media_dir / f"{aid}.{int(seconds)}.{i}.wav"
+        cmd = [ff, "-y", "-user_agent", ua, "-headers", hdr,
+               "-ss", f"{start_at:.1f}", "-t", str(dur_s), "-i", url,
+               "-vn", "-ac", "1", "-ar", "16000", str(part)]
         try:
-            import subprocess
-            cmd = [ff, "-y", "-user_agent", ua, "-headers", hdr,
-                   "-t", str(max(10, int(seconds))), "-i", url,
-                   "-vn", "-ac", "1", "-ar", "16000", str(wav)]
             r = subprocess.run(cmd, capture_output=True, timeout=180)
-            ok_stream = r.returncode == 0 and wav.exists()
-            if ok_stream:
-                notes.append(f"流式抽取 {int(seconds)}s（{wav.stat().st_size // 1024} KB）")
-        except Exception:
-            ok_stream = False
-    if not ok_stream:
-        # 兜底：走浏览器会话把流下下来（带 cookie），再抽音轨
-        out_mp4 = media_dir / f"{aid}.mp4"
-        try:
-            resp = await page.request.get(url, timeout=120000)
-            if resp.status != 200:
-                return _err(f"下载视频失败 HTTP {resp.status}", aweme_id=aid, notes=notes)
-            out_mp4.write_bytes(await resp.body())
-            notes.append(f"下载 {out_mp4.stat().st_size // 1024} KB")
+            if r.returncode == 0 and part.exists() and part.stat().st_size > 1000:
+                wav_parts.append(part)
+            else:
+                notes.append(f"片段 {i} 取失败：" + (r.stderr or b"")[-120:].decode("utf-8", "replace"))
         except Exception as exc:
-            return _err(f"下载视频出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
-        try:
-            import subprocess
-            cmd = [ff, "-y", "-i", str(out_mp4), "-t", str(max(10, int(seconds))),
-                   "-vn", "-ac", "1", "-ar", "16000", str(wav)]
-            r = subprocess.run(cmd, capture_output=True, timeout=300)
-            if r.returncode != 0 or not wav.exists():
-                return _err("抽音轨失败", aweme_id=aid, notes=notes)
-            notes.append("下载后抽音轨")
-        except Exception as exc:
-            return _err(f"抽音轨出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
-        try:
-            if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
-                out_mp4.unlink(missing_ok=True)
-        except Exception:
-            pass
+            notes.append(f"片段 {i} 出错：{type(exc).__name__}")
+    if not wav_parts:
+        # 短一点的视频（≤5 分钟）可以整条下下来兜底；长视频绝不整条下，直接放弃看片
+        if (dur or 0) <= 300:
+            try:
+                import subprocess
+                out_mp4 = media_dir / f"{aid}.mp4"
+                resp = await page.request.get(url, timeout=120000)
+                if resp.status == 200:
+                    out_mp4.write_bytes(await resp.body())
+                    wav = media_dir / f"{aid}.{int(seconds)}.wav"
+                    r = subprocess.run([ff, "-y", "-i", str(out_mp4), "-t", str(max(15, int(seconds))),
+                                        "-vn", "-ac", "1", "-ar", "16000", str(wav)],
+                                       capture_output=True, timeout=300)
+                    if r.returncode == 0 and wav.exists():
+                        notes.append(f"兜底：整条下载 {out_mp4.stat().st_size // 1024} KB 后抽音轨")
+                        wav_parts = [wav]
+                        try:
+                            if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
+                                out_mp4.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                notes.append(f"兜底下载失败：{type(exc).__name__}")
+        if not wav_parts:
+            return _err(
+                "拿不到可读的音轨（长视频不整条下载，直接放弃看片）" if (dur or 0) > 300 else "取音轨全失败（可能未登录/风控）",
+                aweme_id=aid, duration=dur, notes=notes or None,
+            )
+    notes.append(f"取样 {len(wav_parts)} 段 / 计划 {len(segs_plan)} 段（不整条下载）")
+
+    # 合成一个 wav（numpy 拼接，别用 ffmpeg concat，省事）
+    wav = media_dir / f"{aid}.{int(seconds)}.wav"
+    try:
+        import wave as _w
+        import numpy as _np
+        frames = []
+        sr = 16000
+        for part in wav_parts:
+            with _w.open(str(part), "rb") as w:
+                sr = w.getframerate()
+                frames.append(_np.frombuffer(w.readframes(w.getnframes()), dtype=_np.int16))
+        merged = _np.concatenate(frames) if frames else _np.zeros(0, dtype=_np.int16)
+        with _w.open(str(wav), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(merged.tobytes())
+        for part in wav_parts:
+            try: part.unlink(missing_ok=True)
+            except Exception: pass
+    except Exception as exc:
+        return _err(f"音轨拼接失败：{type(exc).__name__}", aweme_id=aid, notes=notes)
 
     text = ""
     try:
