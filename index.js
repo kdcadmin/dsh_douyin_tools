@@ -134,6 +134,8 @@ export const Config = !z ? undefined : z.object({
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
   msgAllowTo: z.string().default('').extra('volatile', true),
   /** 自动回复私信（别人发来消息就回一条） */
+  /** 只回谁的私信（昵称，逗号分隔；空 = 谁发来都回） */
+  dmReplyOnlyTo: z.string().default('').extra('volatile', true),
   dmReply: z.boolean().default(true).extra('volatile', true),
   /** 每个联系人每天最多回几条 */
   dmReplyPerContact: z.natural().default(1).extra('volatile', true),
