@@ -10,6 +10,29 @@
 
 ---
 
+## 界面
+
+设置页在 **DSH → 设置 → 刷抖音**，四个 tab：日常 / 偏好 / 互动 / 高级。
+
+### 日常
+![日常](docs/screenshots/01-日常.png)
+
+### 偏好
+![偏好](docs/screenshots/02-偏好.png)
+
+### 互动
+![互动上](docs/screenshots/03-互动-上.png)
+
+![互动下](docs/screenshots/04-互动-下.png)
+
+![投稿](docs/screenshots/05-互动-投稿.png)
+
+### 高级
+![高级](docs/screenshots/06-高级.png)
+
+### 它刷过的视频（按日期分组，卡片可点进原片）
+![刷过的视频](docs/screenshots/07-刷过的视频.png)
+
 ## 1. 装
 
 ```bash
