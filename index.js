@@ -2933,6 +2933,34 @@ export function apply(ctx, config) {
     }
 
     // ⭐ 给设置页用：把日报里的「刷到过的视频」抽成结构化列表（页面用卡片显示，不用开文件）
+    /* ⭐ 2026-10-26 使用者：「记忆塞到设置左侧列表里」——这里给面板提供数据：
+     *   读 <家>/memory/YYYY-MM.md 的最近几条 + 记忆系统数据库路径/大小。
+     */
+    if (method === 'GET' && path === '/api/douyin-duty/memory') {
+      const out = { ok: true, lines: [], files: [], mdDir: join(stateDir, 'memory'), dbPath: '', dbMb: 0, hint: '' }
+      try {
+        const dir = join(stateDir, 'memory')
+        if (existsSync(dir)) {
+          const files = readdirSync(dir).filter((f) => f.endsWith('.md')).sort().reverse()
+          out.files = files.slice(0, 6)
+          const all = []
+          for (const f of files.slice(0, 2)) {
+            try {
+              const txt = readFileSync(join(dir, f), 'utf8')
+              for (const ln of txt.split('\n')) if (ln.trim()) all.push(ln.trim())
+            } catch { /* 单个文件失败不影响 */ }
+          }
+          out.lines = all.slice(-60).reverse()
+        }
+      } catch { /* 读不到就给空 */ }
+      try {
+        const db = '<DSH_HOME>\\memory-system\\memory.db'
+        if (existsSync(db)) { out.dbPath = db; out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10 }
+      } catch { /* 忽略 */ }
+      if (!out.lines.length) out.hint = '还没有记忆（跑几轮或者给它说点事，就会记下来）'
+      return sendJson(res, 200, out)
+    }
+
     if (method === 'GET' && path === '/api/douyin-duty/watched') {
       // ⭐ 按日期分组（使用者 2026-10-23：「要分日期懂了吗」）：读最近 14 份日报，每份带自己的日期
       const days = Math.max(1, Math.min(Number(url.searchParams.get('days')) || 14, 60))

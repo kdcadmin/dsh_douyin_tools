@@ -873,6 +873,45 @@ window.__ModuleLoader__.load({
           () => h(Panel),
         ))
 
+        // ⭐ 2026-10-26 使用者：「记忆塞到设置左侧列表里，之前那个一重启就没了」
+        //   这个面板不依赖 memory 插件的客户端，直接读 <家>/memory/*.md
+        const MemoryPage = () => {
+          const [data, setData] = React.useState(null)
+          const [err, setErr] = React.useState('')
+          React.useEffect(() => {
+            let alive = true
+            fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+              .then((r) => r.json())
+              .then((j) => { if (alive) setData(j) })
+              .catch((e) => { if (alive) setErr(String(e && e.message || e)) })
+            return () => { alive = false }
+          }, [])
+          const row = (k, v) => h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, k)),
+            h('span', { style: { opacity: 0.75, fontSize: '12px' } }, String(v ?? '')))
+          return h('div', { 'data-dy-panel': '' },
+            h('div', { 'data-dy-h': '' }, '记忆（刷抖音记的 + 记忆系统的库）'),
+            row('记忆文件目录', data?.mdDir || '（读不到）'),
+            row('记忆数据库', data?.dbPath ? data.dbPath + '（' + data.dbMb + ' MB）' : '（没找到 memory.db）'),
+            row('最近文件', (data?.files || []).join(' / ') || '—'),
+            err ? h('div', { 'data-dy-note': '' }, '读取失败：' + err) : null,
+            data?.hint ? h('div', { 'data-dy-note': '' }, data.hint) : null,
+            h('div', { 'data-dy-h': '' }, '最近记下的事'),
+            (data?.lines || []).length
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                  data.lines.map((ln, i) => h('div', {
+                    key: i, style: { fontSize: '12.5px', lineHeight: 1.55, padding: '6px 10px',
+                      border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '8px' },
+                  }, ln)))
+              : h('div', { 'data-dy-note': '' }, '还没有记录'),
+          )
+        }
+
+        slots.inject('settings.section', () => slots.register(
+          { name: 'settings.section', id: 'douyin-memory', order: 32, label: '记忆' },
+          () => h(MemoryPage),
+        ))
+
         // ⭐ 会话头第三个 tab：抖音刷过的视频（使用者 2026-10-23 要求跟 B站 那个并排）
         try {
           slots.inject('conversation.view', () => slots.register({
