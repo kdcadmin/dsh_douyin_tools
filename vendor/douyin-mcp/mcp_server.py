@@ -2587,6 +2587,17 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
         if not url_hit and ("/video/tos/" in u or "mime_type=video" in u) and ".mp4" not in u[:20]:
             url_hit.setdefault("url", u)
 
+    # ⭐ 2026-10-25：页面上 currentSrc 是 blob:（MSE）时，从 /aweme/detail/ 里拿 play_addr 直链
+    detail = {}
+
+    def _on_detail(r):
+        try:
+            if "/aweme/detail/" in (r.url or ""):
+                detail.setdefault("pending", r)
+        except Exception:
+            pass
+
+    page.on("response", _on_detail)
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
         await page.wait_for_timeout(1500)
@@ -2627,6 +2638,23 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
         except Exception:
             pass
 
+    if not url or url.startswith("blob:"):
+        try:
+            pend = detail.get("pending")
+            if pend is not None:
+                data = await pend.json()
+                det = (data or {}).get("aweme_detail") or {}
+                vinfo = det.get("video") or {}
+                urls = []
+                for pa in [vinfo.get("play_addr")] + [b.get("play_addr") for b in (vinfo.get("bit_rate") or [])]:
+                    for u in ((pa or {}).get("url_list") or []):
+                        if isinstance(u, str) and u.startswith("http"):
+                            urls.append(u)
+                if urls:
+                    url = urls[0]
+                    notes.append("从 detail 接口拿到 play_addr")
+        except Exception as exc:
+            notes.append(f"读 detail 失败：{type(exc).__name__}")
     if not url:
         return _err("没拿到视频流地址（未登录或被风控）", aweme_id=aid, duration=dur, notes=notes or None)
 
@@ -3061,12 +3089,16 @@ async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
     await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     await page.wait_for_timeout(400)
     await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    # 抽屉是否打开：看右侧有没有那个「搜索」输入框（比数文案可靠）
     opened = False
-    for _ in range(12):
+    for _ in range(14):
         await page.wait_for_timeout(500)
-        body = await page.inner_text("body")
-        if "陌生人消息" in body or "分享[视频]" in body or "发送消息" in body:
-            opened = True
+        opened = await page.evaluate(
+            """() => { const W = innerWidth;
+                return Array.from(document.querySelectorAll('input'))
+                    .some((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.5); }"""
+        )
+        if opened:
             break
     notes.append("抽屉已打开" if opened else "抽屉没打开")
     if not opened:
@@ -3380,7 +3412,7 @@ async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
 
 
 @mcp.tool()
-async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0) -> str:
+async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0, flip: int = 0) -> str:
     """在私信里发表情包：打开抽屉 → 点那个人 → 输入关键词（默认「大肥鱼」）→ 联想表情面板 → 点其中一个发出去。
 
     2026-10-25 实测：输入「大肥鱼」会在输入框上方弹出一排表情包，点一下就发。
@@ -3446,6 +3478,34 @@ async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: i
                     return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
                 }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65);
             }"""
+        )
+        # 翻页：点右侧 ‹ › 换一批（flip 次）
+        for _ in range(max(0, min(int(flip or 0), 6))):
+            try:
+                moved = await page.evaluate(
+                    """() => { const H = innerHeight, W = innerWidth;
+                        const cands = Array.from(document.querySelectorAll('div,span,button'))
+                            .map((e) => ({ e, r: e.getBoundingClientRect() }))
+                            .filter((o) => o.r.width >= 20 && o.r.width <= 60 && o.r.height >= 20 && o.r.height <= 60 && o.r.y > H * 0.55 && o.r.x > W * 0.5)
+                            .sort((a, b) => b.r.x - a.r.x);
+                        if (!cands.length) return false;
+                        const t = cands[0].r;
+                        window.__dy_next = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+                        return true; }"""
+                )
+                if not moved:
+                    break
+                pos2 = await page.evaluate("() => window.__dy_next")
+                await page.mouse.click(pos2["x"], pos2["y"])
+                await page.wait_for_timeout(1200)
+            except Exception:
+                break
+        sticks = await page.evaluate(
+            """() => { const W = innerWidth, H = innerHeight;
+                return Array.from(document.querySelectorAll('img')).map((e) => {
+                    const r = e.getBoundingClientRect();
+                    return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
+                }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65); }"""
         )
         if not sticks:
             await page.screenshot(path=str(HOME / "thumbs" / "_sticker.png"))

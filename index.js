@@ -818,6 +818,28 @@ export function apply(ctx, config) {
     const skim = Boolean(video?.skim)
     const fixed = String(cfg.shareNote || '').trim()
     if (fixed) return fixed
+    // ⭐ 真看过（有转写）就按内容说感受，别再套模板
+    const tr = String(video?.transcript || '').replace(/\s+/g, ' ').trim()
+    if (tr.length > 12) {
+      const scary = /(恐怖|鬼|怕|尸|血|死|怪|阴森|尖叫|追|刀|棺材)/.test(tr)
+      const funny = /(笑|搞笑|沙雕|哈哈哈|乐死)/.test(tr)
+      const learn = /(教程|步骤|方法|原理|讲解|学会|技巧)/.test(tr)
+      const beat = tr.length > 46 ? tr.slice(0, 46) + '…' : tr
+      if (scary) {
+        return [`刚看完这条，开头是「${beat}」，我一边看一边起鸡皮疙瘩[捂脸]你也看看`,
+          `这条有点吓人啊，讲到「${beat}」的时候我后背发凉[恐惧]`,
+          `看完这条我有点怕怕的：「${beat}」，你敢看吗[害羞]`][Math.floor(Math.random() * 3)]
+      }
+      if (funny) {
+        return [`刚看完，笑死我了：「${beat}」[笑哭]你也看看`,
+          `这条太好笑了：「${beat}」[捂脸]`][Math.floor(Math.random() * 2)]
+      }
+      if (learn) {
+        return [`刚看完，讲的是「${beat}」，感觉挺有用[比心]`,
+          `这条把「${beat}」讲清楚了，你可以看看[微笑]`][Math.floor(Math.random() * 2)]
+      }
+      return [`刚看完这条，印象最深的是「${beat}」，做得挺用心[比心]`]
+    }
     const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
     const short = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
     const kw = (s) => raw.includes(s)
