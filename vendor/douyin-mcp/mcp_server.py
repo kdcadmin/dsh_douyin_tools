@@ -2518,6 +2518,16 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
     notes: list[str] = []
     url_hit: dict = {}
 
+    # ① 转写结果的缓存：同一条视频只下一次、只转一次
+    cache = media_dir / f"{aid}.{int(seconds)}.json"
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            data["cached"] = True
+            return data
+        except Exception:
+            pass
+
     def on_resp(r):
         u = r.url or ""
         if not url_hit and ("/video/tos/" in u or "mime_type=video" in u) and ".mp4" not in u[:20]:
@@ -2594,12 +2604,21 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
     except Exception as exc:
         return _err(f"转写出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes, downloaded=str(out_mp4))
 
+    result = _ok(aweme_id=aid, duration=round(dur, 1), transcript=text,
+                 chars=len(text), video_file=str(out_mp4), notes=notes)
     try:
-        wav.unlink(missing_ok=True)
+        cache.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
-    return _ok(aweme_id=aid, duration=round(dur, 1), transcript=text,
-               chars=len(text), video_file=str(out_mp4), notes=notes)
+    # 用完即弃（想留着素材就设 DOUYIN_KEEP_MEDIA=1）
+    if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
+        try:
+            wav.unlink(missing_ok=True)
+            out_mp4.unlink(missing_ok=True)
+            notes.append("媒体已删（DOUYIN_KEEP_MEDIA=1 可保留）")
+        except Exception:
+            pass
+    return result
 
 
 _WHISPER_CACHE: dict = {}

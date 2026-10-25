@@ -121,6 +121,10 @@ export const Config = !z ? undefined : z.object({
   skipOverMin: z.natural().default(60).extra('volatile', true),
   /** 超过这个分钟数就算「跳着看」（挑重点段落，评论措辞也要体现） */
   skimOverMin: z.natural().default(5).extra('volatile', true),
+  /** 动手前先真看片（转写）——只对要评论/转发的视频做，点赞不转写 */
+  watchBeforeAct: z.boolean().default(true).extra('volatile', true),
+  /** 转写最多听前多少秒（跳着看就靠它；默认 90） */
+  watchSeconds: z.natural().default(90).extra('volatile', true),
   /** 一轮最多挑几条（别一口气刷完） */
   pickPerRound: z.natural().default(2).extra('volatile', true),
   /** 自动评论（**不@人**，就是普通评论一句） */
@@ -224,7 +228,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareNote: '', sharePerDay: 10, pickPerRound: 2, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -287,6 +291,8 @@ export function apply(ctx, config) {
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
     if ('pickPerRound' in p) p.pickPerRound = Math.max(1, Math.min(Number(p.pickPerRound) || 1, 5))
+    if ('watchBeforeAct' in p) p.watchBeforeAct = Boolean(p.watchBeforeAct)
+    if ('watchSeconds' in p) p.watchSeconds = Math.max(15, Math.min(Number(p.watchSeconds) || 90, 600))
     if ('skipOverMin' in p) p.skipOverMin = Math.max(1, Math.min(Number(p.skipOverMin) || 60, 600))
     if ('skimOverMin' in p) p.skimOverMin = Math.max(1, Math.min(Number(p.skimOverMin) || 5, 120))
     if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
@@ -2439,6 +2445,23 @@ export function apply(ctx, config) {
       }
       for (const item of plan) {
         const v = item.v
+        // ⭐ 费时的活只对「要动手的那几条」做：点赞不转写
+        if (cfg.watchBeforeAct !== false && item.act !== 'like' && !v.transcript) {
+          try {
+            const w = await call('douyin_watch', {
+              aweme_id: v.aweme_id,
+              seconds: Math.max(15, Math.min(Number(cfg.watchSeconds) || 90, 600)),
+            }, { timeoutMs: 900_000 })
+            if (w && w.ok !== false && w.transcript) {
+              v.transcript = String(w.transcript).slice(0, 300)
+              acts.push(`看片（${w.cached ? '缓存' : '新转写'}）${String(v.transcript).slice(0, 18)}…`)
+            } else {
+              acts.push('看片没成：' + (w?.error || '没拿到转写'))
+            }
+          } catch (e) {
+            acts.push('看片出错：' + String(e?.message ?? e).slice(0, 60))
+          }
+        }
         if (cfg.autoLike) {
           const r = await call('douyin_like', { aweme_id: v.aweme_id }, { timeoutMs: 120_000 })
           acts.push(`点赞 ${String(v.title || '').slice(0, 12)}：` + (r?.ok !== false ? '已点' : (r?.error || '没点上')))
