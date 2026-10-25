@@ -173,7 +173,7 @@ window.__ModuleLoader__.load({
             reportLevel: String(c.reportLevel || 'full'),
             personaPrompt: String(c.personaPrompt || ''),
             autoReply: Boolean(c.autoReply), replyPerRun: c.replyPerRun ?? 3, replyPerDay: c.replyPerDay ?? 10,
-            replyRandom: c.replyRandom !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmReply: c.dmReply !== false, dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: c.autoCommentPlain !== false, plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
+            replyRandom: c.replyRandom !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmReply: c.dmReply !== false, dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: c.autoCommentPlain !== false, plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakSticker: String(c.streakSticker || '大肥鱼'), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
             autoLike: Boolean(c.autoLike), autoComment: Boolean(c.autoComment),
             autoPublish: Boolean(c.autoPublish), publishDraft: Boolean(c.publishDraft),
             commentPerDay: Number(c.commentPerDay) || 0, publishPerDay: Number(c.publishPerDay) || 0,
@@ -227,7 +227,7 @@ window.__ModuleLoader__.load({
             autoLike: draft.autoLike, autoComment: draft.autoComment,
             autoReply: draft.autoReply, replyPerRun: Number(draft.replyPerRun) || 0,
             replyPerDay: Number(draft.replyPerDay) || 0, replyRandom: draft.replyRandom !== false,
-            replyVideoIds: String(draft.replyVideoIds || ''), replyIntervalMin: Number(draft.replyIntervalMin) || 30, replyOncePerUser: Boolean(draft.replyOncePerUser), skipLive: draft.skipLive !== false, shareToNick: String(draft.shareToNick || ''), replyWorksDays: Number(draft.replyWorksDays) || 3, autoClean: draft.autoClean !== false, shareNote: String(draft.shareNote || ''), msgAllowTo: String(draft.msgAllowTo || ''), dmReply: draft.dmReply !== false, dmReplyOnlyTo: String(draft.dmReplyOnlyTo || ''), dmReplyPerContact: Number(draft.dmReplyPerContact) || 1, dmReplyPerDay: Number(draft.dmReplyPerDay) || 0, sharePerDay: Number(draft.sharePerDay) || 0, autoCommentPlain: draft.autoCommentPlain !== false, plainCommentPerDay: Number(draft.plainCommentPerDay) || 0, pickPerRound: Number(draft.pickPerRound) || 2, skipOverMin: Number(draft.skipOverMin) || 60, skimOverMin: Number(draft.skimOverMin) || 5, streakNick: String(draft.streakNick || ''), streakPerDay: Number(draft.streakPerDay) || 0, askDoubao: Boolean(draft.askDoubao),
+            replyVideoIds: String(draft.replyVideoIds || ''), replyIntervalMin: Number(draft.replyIntervalMin) || 30, replyOncePerUser: Boolean(draft.replyOncePerUser), skipLive: draft.skipLive !== false, shareToNick: String(draft.shareToNick || ''), replyWorksDays: Number(draft.replyWorksDays) || 3, autoClean: draft.autoClean !== false, shareNote: String(draft.shareNote || ''), msgAllowTo: String(draft.msgAllowTo || ''), dmReply: draft.dmReply !== false, dmReplyOnlyTo: String(draft.dmReplyOnlyTo || ''), dmReplyPerContact: Number(draft.dmReplyPerContact) || 1, dmReplyPerDay: Number(draft.dmReplyPerDay) || 0, sharePerDay: Number(draft.sharePerDay) || 0, autoCommentPlain: draft.autoCommentPlain !== false, plainCommentPerDay: Number(draft.plainCommentPerDay) || 0, pickPerRound: Number(draft.pickPerRound) || 2, skipOverMin: Number(draft.skipOverMin) || 60, skimOverMin: Number(draft.skimOverMin) || 5, streakNick: String(draft.streakNick || ''), streakSticker: String(draft.streakSticker || '大肥鱼'), streakPerDay: Number(draft.streakPerDay) || 0, askDoubao: Boolean(draft.askDoubao),
             autoPublish: draft.autoPublish, publishDraft: draft.publishDraft,
             commentPerDay: Number(draft.commentPerDay) || 0, publishPerDay: Number(draft.publishPerDay) || 0,
             publishTitle: draft.publishTitle, publishTags: draft.publishTags,
@@ -668,7 +668,7 @@ window.__ModuleLoader__.load({
                 placeholder: '这个视频好好笑，主人你也看看，哈哈哈[笑哭]',
                 onChange: (e) => set('shareNote', e.target.value) })),
             h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '续火花：每天给谁发一句'),
+              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '续火花：每天给谁发一个表情包'),
                 Note('留空=不续；表情包用 [憨笑] 这类文本码一起发')),
               h('input', { 'data-dy-input': '', style: { width: '150px' }, value: draft.streakNick ?? '',
                 placeholder: '对方昵称', onChange: (e) => set('streakNick', e.target.value) }),
@@ -940,6 +940,23 @@ window.__ModuleLoader__.load({
         const KV = (k, v) => h('div', { className: 'dym-kv' },
           h('span', { className: 'dym-k' }, k), h('span', null, String(v ?? '—')))
 
+        // 真正兜住渲染异常：Comp 在 React 里被调用时才会执行，所以必须在组件内部 try
+        const Guard = ({ Comp, props, label }) => {
+          try {
+            return h(Comp, props || {})
+          } catch (e) {
+            try {
+              fetch('/api/douyin-duty/log', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ msg: 'memory render failed @' + (label || '?') + ': ' + String(e && e.message), stack: String((e && e.stack) || '') }),
+              }).catch(() => {})
+            } catch { /* 忽略 */ }
+            return h('div', { className: 'dym-card', style: { color: '#e06', whiteSpace: 'pre-wrap' } },
+              '【' + (label || '组件') + '】渲染出错：' + String((e && e.message) || e) + '\n' + String((e && e.stack) || '').split('\n').slice(0, 4).join('\n'))
+          }
+        }
+
         const MemGraph = ({ data, busy }) => {
           const wrapRef = React.useRef(null)
           const [size, setSize] = React.useState({ w: 640, h: 380 })
@@ -1101,7 +1118,158 @@ window.__ModuleLoader__.load({
           )
         }
 
-        const MemoryPage = () => {
+        // 人设（persona.md）：能看能改；每天还会按记忆自动补一段
+        const PersonaBox = () => {
+          const [text, setText] = React.useState(null)
+          const [at, setAt] = React.useState('')
+          const [msg, setMsg] = React.useState('')
+          const [busy2, setBusy2] = React.useState(false)
+          React.useEffect(() => {
+            let alive = true
+            fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+              .then((r) => r.json())
+              .then((j) => { if (alive) { setText(j.persona || ''); setAt(j.personaAt || '') } })
+              .catch(() => { if (alive) setText('') })
+            return () => { alive = false }
+          }, [])
+          const save = async () => {
+            setBusy2(true); setMsg('')
+            try {
+              const r = await fetch('/api/douyin-duty/persona', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text }),
+              })
+              const j = await r.json()
+              setMsg(j.ok ? '人设已保存（备份 persona.md.bak）' : '保存失败：' + (j.error || ''))
+            } catch (e) { setMsg('保存失败：' + String((e && e.message) || e)) } finally { setBusy2(false) }
+          }
+          if (text === null) return h('div', { className: 'dym-card' }, '人设读取中…')
+          return h('div', { className: 'dym-card', style: { marginTop: '10px' } },
+            h('div', { className: 'dym-k', style: { marginBottom: '6px' } },
+              '人设（persona.md）· 每天按记忆自动更新',
+              at ? h('span', { style: { opacity: 0.5, marginLeft: '8px', fontSize: '11px' } }, '上次写入 ' + String(at).slice(0, 16).replace('T', ' ')) : null),
+            h('textarea', {
+              value: text, rows: 12, onChange: (e) => setText(e.target.value),
+              style: { width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '12.5px', lineHeight: 1.6,
+                padding: '10px 12px', borderRadius: '8px', border: '1px solid rgba(128,128,128,.3)',
+                background: 'transparent', color: 'inherit' },
+            }),
+            h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '8px' } },
+              h('button', { className: 'dym-tab on', disabled: busy2 ? '' : undefined, onClick: save }, busy2 ? '保存中…' : '保存人设'),
+              msg ? h('span', { style: { fontSize: '12px', opacity: 0.8 } }, msg) : null))
+        }
+
+        const CharEditor = ({ data, onSaved }) => {
+          const base = (data && (data.character || data)) || {}
+          const id = base.identity || {}
+          const prefs = base.preferences || {}
+          const cons = Array.isArray(base.constraints) ? base.constraints : []
+          const refName = React.useRef(null)
+          const refTz = React.useRef(null)
+          const refStyle = React.useRef(null)
+          const refLen = React.useRef(null)
+          const refCons = React.useRef(null)
+          const [saving, setSaving] = React.useState(false)
+          const [msg, setMsg] = React.useState('')
+          const [bad, setBad] = React.useState(false)
+
+          React.useEffect(() => {
+            if (refName.current) refName.current.value = id.name || ''
+            if (refTz.current) refTz.current.value = id.timezone || 'Asia/Shanghai'
+            if (refStyle.current) refStyle.current.value = prefs.communication_style || ''
+            if (refLen.current) refLen.current.value = prefs.response_length || 'short'
+            if (refCons.current) refCons.current.value = cons.join('\n')
+          }, [data])
+
+          const inputStyle = { width: '100%', fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
+            border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' }
+          const field = (label, ref2, ph, multi) => h('div', { style: { marginBottom: '10px' } },
+            h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, label),
+            multi
+              ? h('textarea', { ref: ref2, defaultValue: '', rows: 3, placeholder: ph, style: { ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.55 } })
+              : h('input', { ref: ref2, type: 'text', defaultValue: '', placeholder: ph, style: inputStyle, autoComplete: 'off', spellCheck: false }))
+
+          const save = async () => {
+            const val = (r) => ((r.current && r.current.value) || '').trim()
+            setSaving(true); setMsg(''); setBad(false)
+            try {
+              const updates = {
+                identity: { ...(id || {}), name: val(refName) || id.name || '', timezone: val(refTz) || id.timezone || 'Asia/Shanghai' },
+                preferences: { ...(prefs || {}), communication_style: val(refStyle) || prefs.communication_style || '',
+                  response_length: val(refLen) || prefs.response_length || 'short' },
+                constraints: String(val(refCons) || '').split('\n').map((s) => s.trim()).filter(Boolean),
+              }
+              await memCall('character', { action: 'update', updates })
+              setMsg('已保存（已回读核对）')
+              if (onSaved) onSaved()
+            } catch (e) { setBad(true); setMsg('保存失败：' + String((e && e.message) || e)) } finally { setSaving(false) }
+          }
+
+          return h('div', null,
+            h(Card, null,
+              h('div', { className: 'dym-k', style: { marginBottom: '10px' } },
+                '改完点「保存角色卡」；这些值会进记忆库，影响它说话的样子。'),
+              field('称呼（identity.name）', refName, 'YG'),
+              field('时区（identity.timezone）', refTz, 'Asia/Shanghai'),
+              field('沟通风格（preferences.communication_style）', refStyle, '傲娇, 可爱, 撒娇'),
+              field('回复长度（preferences.response_length）', refLen, 'short / medium / long'),
+              field('约束（constraints，一行一条）', refCons, '不聊政治\n不编数据', true)),
+            h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' } },
+              h('button', { className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save },
+                saving ? '保存中…' : '保存角色卡'),
+              msg ? h('span', { style: { fontSize: '12px', opacity: 0.8, color: bad ? '#e06' : undefined } }, msg) : null),
+            (base.expertise || base.persona || base.habits)
+              ? h(Card, { style: { marginTop: '10px' } },
+                  h('div', { className: 'dym-k', style: { marginBottom: '6px' } }, '其它字段（只读）'),
+                  base.persona ? KV('人设（persona）', flatText(base.persona)) : null,
+                  base.expertise ? KV('专长（expertise）', flatText(base.expertise)) : null,
+                  base.habits ? KV('习惯（habits）', flatText(base.habits)) : null)
+              : null,
+            h(PersonaBox, null),
+            h('div', { style: { fontSize: '11.5px', opacity: 0.55 } },
+              '更新时间：' + (base.updated_at || base._last_updated || '—')))
+        }
+
+        const Timelines = ({ items, busy }) => {
+          const [q, setQ] = React.useState('')
+          const list = (items || []).filter((it) => {
+            if (!q.trim()) return true
+            const s = (it.text || it.summary || it.content || '') + ' ' + (it.kind || '') + ' ' + (it.type || '')
+            return s.toLowerCase().includes(q.trim().toLowerCase())
+          })
+          const KIND_COLOR = { preference: '#f0a35e', fact: '#5b8def', lesson: '#e0705e', event: '#4bb6a8',
+            person: '#7c6ff7', task: '#9aa3b2', note: '#9aa3b2' }
+          const fmt = (s) => {
+            const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
+            return m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : String(s || '')
+          }
+          return h('div', null,
+            h('div', { style: { display: 'flex', gap: '8px', marginBottom: '10px' } },
+              h('input', {
+                value: q, placeholder: '搜索记忆内容 / 类型…',
+                onChange: (e) => setQ(e.target.value),
+                style: { flex: 1, fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
+                  border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
+              }),
+              h('span', { className: 'dym-chip' }, '共 ', h('b', null, (items || []).length), ' 条，显示 ', h('b', null, list.length))),
+            list.length
+              ? list.slice(0, 60).map((it, i) => {
+                  const kind = it.kind || it.type || ''
+                  return h('div', { key: i, className: 'dym-card', style: { padding: '9px 12px' } },
+                    h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '4px' } },
+                      kind ? h('span', {
+                        style: { fontSize: '10.5px', padding: '1px 7px', borderRadius: '999px',
+                          border: '1px solid ' + (KIND_COLOR[kind] || '#9aa3b2'), color: KIND_COLOR[kind] || '#9aa3b2' },
+                      }, kind) : null,
+                      h('span', { style: { fontSize: '11px', opacity: 0.55 } }, fmt(it.created_at || it.at || '')),
+                      it.importance != null ? h('span', { style: { fontSize: '11px', opacity: 0.55 } }, '· 重要度 ' + it.importance) : null),
+                    String(it.text || it.summary || it.content || '').slice(0, 500))
+                })
+              : h(Card, null, busy ? '读取中…' : (q ? '没有匹配的记忆' : '（还没有回忆条目）')))
+        }
+
+        const MemoryPage = () => { try {
           const [tab, setTab] = React.useState('graph')
           const [char, setChar] = React.useState(null)
           const [tl, setTl] = React.useState(null)
@@ -1127,114 +1295,7 @@ window.__ModuleLoader__.load({
           React.useEffect(() => { load(false) }, [tab])
 
           // ⭐ 角色卡：照记忆插件那套——**一直可编辑的表单**（称呼/时区/沟通风格/回复长度/约束 + 保存）
-          const CharEditor = ({ data, onSaved }) => {
-            const base = (data && (data.character || data)) || {}
-            const id = base.identity || {}
-            const prefs = base.preferences || {}
-            const cons = Array.isArray(base.constraints) ? base.constraints : []
-            const refName = React.useRef(null)
-            const refTz = React.useRef(null)
-            const refStyle = React.useRef(null)
-            const refLen = React.useRef(null)
-            const refCons = React.useRef(null)
-            const [saving, setSaving] = React.useState(false)
-            const [msg, setMsg] = React.useState('')
-            const [bad, setBad] = React.useState(false)
 
-            React.useEffect(() => {
-              if (refName.current) refName.current.value = id.name || ''
-              if (refTz.current) refTz.current.value = id.timezone || 'Asia/Shanghai'
-              if (refStyle.current) refStyle.current.value = prefs.communication_style || ''
-              if (refLen.current) refLen.current.value = prefs.response_length || 'short'
-              if (refCons.current) refCons.current.value = cons.join('\n')
-            }, [data])
-
-            const inputStyle = { width: '100%', fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
-              border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' }
-            const field = (label, ref2, ph, multi) => h('div', { style: { marginBottom: '10px' } },
-              h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, label),
-              multi
-                ? h('textarea', { ref: ref2, defaultValue: '', rows: 3, placeholder: ph, style: { ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.55 } })
-                : h('input', { ref: ref2, type: 'text', defaultValue: '', placeholder: ph, style: inputStyle, autoComplete: 'off', spellCheck: false }))
-
-            const save = async () => {
-              const val = (r) => ((r.current && r.current.value) || '').trim()
-              setSaving(true); setMsg(''); setBad(false)
-              try {
-                const updates = {
-                  identity: { ...(id || {}), name: val(refName) || id.name || '', timezone: val(refTz) || id.timezone || 'Asia/Shanghai' },
-                  preferences: { ...(prefs || {}), communication_style: val(refStyle) || prefs.communication_style || '',
-                    response_length: val(refLen) || prefs.response_length || 'short' },
-                  constraints: String(val(refCons) || '').split('\n').map((s) => s.trim()).filter(Boolean),
-                }
-                await memCall('character', { action: 'update', updates })
-                setMsg('已保存（已回读核对）')
-                if (onSaved) onSaved()
-              } catch (e) { setBad(true); setMsg('保存失败：' + String((e && e.message) || e)) } finally { setSaving(false) }
-            }
-
-            return h('div', null,
-              h(Card, null,
-                h('div', { className: 'dym-k', style: { marginBottom: '10px' } },
-                  '改完点「保存角色卡」；这些值会进记忆库，影响它说话的样子。'),
-                field('称呼（identity.name）', refName, 'YG'),
-                field('时区（identity.timezone）', refTz, 'Asia/Shanghai'),
-                field('沟通风格（preferences.communication_style）', refStyle, '傲娇, 可爱, 撒娇'),
-                field('回复长度（preferences.response_length）', refLen, 'short / medium / long'),
-                field('约束（constraints，一行一条）', refCons, '不聊政治\n不编数据', true)),
-              h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' } },
-                h('button', { className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save },
-                  saving ? '保存中…' : '保存角色卡'),
-                msg ? h('span', { style: { fontSize: '12px', opacity: 0.8, color: bad ? '#e06' : undefined } }, msg) : null),
-              (base.expertise || base.persona || base.habits)
-                ? h(Card, { style: { marginTop: '10px' } },
-                    h('div', { className: 'dym-k', style: { marginBottom: '6px' } }, '其它字段（只读）'),
-                    base.persona ? KV('人设（persona）', flatText(base.persona)) : null,
-                    base.expertise ? KV('专长（expertise）', flatText(base.expertise)) : null,
-                    base.habits ? KV('习惯（habits）', flatText(base.habits)) : null)
-                : null,
-              h(PersonaBox, null),
-              h('div', { style: { fontSize: '11.5px', opacity: 0.55 } },
-                '更新时间：' + (base.updated_at || base._last_updated || '—')))
-          }
-
-          const Timelines = ({ items, busy }) => {
-            const [q, setQ] = React.useState('')
-            const list = (items || []).filter((it) => {
-              if (!q.trim()) return true
-              const s = (it.text || it.summary || it.content || '') + ' ' + (it.kind || '') + ' ' + (it.type || '')
-              return s.toLowerCase().includes(q.trim().toLowerCase())
-            })
-            const KIND_COLOR = { preference: '#f0a35e', fact: '#5b8def', lesson: '#e0705e', event: '#4bb6a8',
-              person: '#7c6ff7', task: '#9aa3b2', note: '#9aa3b2' }
-            const fmt = (s) => {
-              const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
-              return m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : String(s || '')
-            }
-            return h('div', null,
-              h('div', { style: { display: 'flex', gap: '8px', marginBottom: '10px' } },
-                h('input', {
-                  value: q, placeholder: '搜索记忆内容 / 类型…',
-                  onChange: (e) => setQ(e.target.value),
-                  style: { flex: 1, fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
-                    border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
-                }),
-                h('span', { className: 'dym-chip' }, '共 ', h('b', null, (items || []).length), ' 条，显示 ', h('b', null, list.length))),
-              list.length
-                ? list.slice(0, 60).map((it, i) => {
-                    const kind = it.kind || it.type || ''
-                    return h('div', { key: i, className: 'dym-card', style: { padding: '9px 12px' } },
-                      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '4px' } },
-                        kind ? h('span', {
-                          style: { fontSize: '10.5px', padding: '1px 7px', borderRadius: '999px',
-                            border: '1px solid ' + (KIND_COLOR[kind] || '#9aa3b2'), color: KIND_COLOR[kind] || '#9aa3b2' },
-                        }, kind) : null,
-                        h('span', { style: { fontSize: '11px', opacity: 0.55 } }, fmt(it.created_at || it.at || '')),
-                        it.importance != null ? h('span', { style: { fontSize: '11px', opacity: 0.55 } }, '· 重要度 ' + it.importance) : null),
-                      String(it.text || it.summary || it.content || '').slice(0, 500))
-                  })
-                : h(Card, null, busy ? '读取中…' : (q ? '没有匹配的记忆' : '（还没有回忆条目）')))
-          }
 
           const rawBody = () => {
             if (!raw) return h(Card, null, busy ? '读取中…' : '（读不到）')
@@ -1259,12 +1320,25 @@ window.__ModuleLoader__.load({
               }, t2.label)),
               h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
             err ? h(Card, null, '读取失败：' + err) : null,
-            tab === 'graph' ? h(MemGraph, { data: g, busy }) : null,
-            tab === 'character' ? h(CharEditor, { data: char, onSaved: () => load(true) }) : null,
-            tab === 'timeline' ? h(Timelines, { items: (tl && (tl.results || tl)) || [], busy }) : null,
+            tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
+            tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
+            tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
             tab === 'raw' ? rawBody() : null,
           )
+        } catch (e) {
+          try {
+            fetch('/api/douyin-duty/log', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ msg: 'memory page failed: ' + String(e && e.message), stack: String((e && e.stack) || '') }),
+            }).catch(() => {})
+          } catch { /* 忽略 */ }
+          return h('div', { className: 'dym-root', style: { padding: '12px' } },
+            h('div', { className: 'dym-title' }, '记忆页出错'),
+            h('div', { className: 'dym-card', style: { color: '#e06', whiteSpace: 'pre-wrap' } },
+              String((e && e.message) || e) + '\n' + String((e && e.stack) || '').split('\n').slice(0, 5).join('\n')))
         }
+      }
 
         // 兜底：任何渲染异常都画成红字，不再白屏（2026-10-26 使用者连续两次看到空白）
         const MemorySafe = () => {

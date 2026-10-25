@@ -152,6 +152,8 @@ export const Config = !z ? undefined : z.object({
   /** 转发视频给谁（昵称；留空=不转发） */
   shareToNick: z.string().default('').extra('volatile', true),
   /** 续火花：每天给谁发一句（昵称；留空=不续） */
+  /** 续火花发的表情包关键词（默认大肥鱼） */
+  streakSticker: z.string().default('大肥鱼').extra('volatile', true),
   streakNick: z.string().default('').extra('volatile', true),
   /** 续火花每天最多几次 */
   streakPerDay: z.natural().default(1).extra('volatile', true),
@@ -228,7 +230,7 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakNick: '', streakPerDay: 1, askDoubao: false,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
     shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
@@ -307,6 +309,7 @@ export function apply(ctx, config) {
     if ('localRound' in p) p.localRound = Boolean(p.localRound)
     if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
     if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
+    if ('streakSticker' in p) p.streakSticker = String(p.streakSticker || '大肥鱼').slice(0, 20)
     if ('streakNick' in p) p.streakNick = String(p.streakNick || '').slice(0, 40)
     if ('streakPerDay' in p) p.streakPerDay = Math.max(0, Math.min(Number(p.streakPerDay) || 0, 20))
     if ('publishPerDay' in p) p.publishPerDay = Math.max(0, Math.min(Number(p.publishPerDay) || 0, 20))
@@ -2790,10 +2793,18 @@ export function apply(ctx, config) {
       if (!nick || !cap) return
       const st = readState()
       if (Number(st[streakKey()] || 0) >= cap) return
-      const r = await call('douyin_chat_send', { nickname: nick, text: '今天也在哦[憨笑]' }, { timeoutMs: 180_000 })
-      const ok = r && r.ok !== false
+      // ⭐ 2026-10-26 使用者：「只有续火花才会主动发消息，发个续火花的表情包」
+      //   ⇒ 续火花只发表情包，不发文字；文字只在「别人先说话」之后才回
+      const kw = String(cfg.streakSticker || '大肥鱼').trim() || '大肥鱼'
+      let r = await call('douyin_chat_sticker', { nickname: nick, keyword: kw, pick: 0 }, { timeoutMs: 180_000 })
+      let ok = r && r.ok !== false
+      if (!ok) {
+        // 表情包没找到就退一步：发一个纯表情文本（仍然不算长句）
+        r = await call('douyin_chat_send', { nickname: nick, text: '[比心]' }, { timeoutMs: 180_000 })
+        ok = r && r.ok !== false
+      }
       bumpState({ [streakKey()]: Number(st[streakKey()] || 0) + 1, lastStreakAt: new Date().toISOString(), lastStreakOk: ok })
-      log(`续火花 → ${nick}：${ok ? '已发送' : (r?.error || '没发出去')}`)
+      log(`续火花 → ${nick}：${ok ? '已发表情包（' + kw + '）' : (r?.error || '没发出去')}`)
       appendMemory(`续火花 · ${nick} · ${ok ? '已发送' : '失败'}`)
     } catch (e) { log('续火花出错（已兜住）：' + String(e?.message ?? e)) }
   }
