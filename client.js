@@ -1101,24 +1101,35 @@ window.__ModuleLoader__.load({
           }, [tab, char, tl, g, raw, stats])
           React.useEffect(() => { load(false) }, [tab])
 
-          // ⭐ 角色卡：可编辑（原来只能看）。每个字段一个输入框，对象/数组按 JSON 文本编辑
+          // ⭐ 角色卡：默认只读（像原插件那样一项一项列清楚），点「编辑」才进输入框
+          const FIELD_LABEL = {
+            identity: '身份', preferences: '偏好', constraints: '约束', expertise: '专长',
+            persona: '人设', style: '说话风格', likes: '喜欢', dislikes: '不喜欢',
+            habits: '习惯', relations: '关系', goals: '目标', boundaries: '边界',
+          }
+          const flatText = (v) => {
+            if (v == null) return '—'
+            if (typeof v !== 'object') return String(v)
+            if (Array.isArray(v)) {
+              if (!v.length) return '（空）'
+              return v.map((x) => (typeof x === 'object' ? Object.entries(x).map(([k2, v2]) => k2 + '=' + v2).join('、') : String(x))).join('；')
+            }
+            return Object.entries(v).map(([k2, v2]) => k2 + '=' + (typeof v2 === 'object' ? JSON.stringify(v2) : v2)).join('、')
+          }
           const CharEditor = ({ data, onSaved }) => {
             const base = (data && (data.character || data)) || {}
             const skip = ['updated_at', '_last_updated', 'id']
             const keys = Object.keys(base).filter((k) => !skip.includes(k))
             const toText = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v))
-            const [draft, setDraft] = React.useState(() => {
-              const d = {}
-              for (const k of keys) d[k] = toText(base[k])
-              return d
-            })
+            const [editing, setEditing] = React.useState(false)
+            const [draft, setDraft] = React.useState({})
             const [saving, setSaving] = React.useState(false)
             const [msg, setMsg] = React.useState('')
             const [err2, setErr2] = React.useState('')
             React.useEffect(() => {
               const d = {}
               for (const k of keys) d[k] = toText(base[k])
-              setDraft(d); setMsg(''); setErr2('')
+              setDraft(d); setEditing(false); setMsg(''); setErr2('')
             }, [data])
 
             const save = async () => {
@@ -1126,57 +1137,98 @@ window.__ModuleLoader__.load({
               try {
                 const updates = {}
                 for (const k of keys) {
-                  const v = draft[k]
-                  const orig = base[k]
+                  const v = draft[k]; const orig = base[k]
                   if (typeof orig === 'object' && orig !== null) {
                     try { updates[k] = JSON.parse(v) } catch { updates[k] = v }
                   } else if (typeof orig === 'number') {
                     const n = Number(v); updates[k] = Number.isFinite(n) ? n : v
                   } else if (typeof orig === 'boolean') {
                     updates[k] = /^(true|1|是)$/i.test(String(v).trim())
-                  } else {
-                    updates[k] = v
-                  }
+                  } else updates[k] = v
                 }
                 await memCall('character', { action: 'update', updates })
-                setMsg('已保存')
+                setMsg('已保存'); setEditing(false)
                 if (onSaved) onSaved()
               } catch (e) { setErr2(String((e && e.message) || e)) } finally { setSaving(false) }
             }
 
-            if (!keys.length) return h(Card, null, '（角色卡是空的）')
-            return h('div', null,
-              h(Card, null, keys.map((k) => h('div', { key: k, style: { marginBottom: '10px' } },
-                h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, k),
-                h('textarea', {
-                  value: draft[k] ?? '',
-                  rows: String(draft[k] ?? '').length > 60 ? 5 : 2,
-                  onChange: (e) => setDraft({ ...draft, [k]: e.target.value }),
-                  style: { width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '12.5px',
-                    lineHeight: 1.55, padding: '8px 10px', borderRadius: '8px',
-                    border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
-                })))),
-              h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
-                h('button', { className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save },
-                  saving ? '保存中…' : '保存角色卡'),
-                h('button', { className: 'dym-tab', onClick: () => {
-                  const d = {}
-                  for (const k of keys) d[k] = toText(base[k])
-                  setDraft(d); setMsg('已还原'); setErr2('')
-                } }, '还原'),
-                msg ? h('span', { style: { fontSize: '12px', opacity: 0.75 } }, msg) : null,
-                err2 ? h('span', { style: { fontSize: '12px', color: '#e06' } }, '保存失败：' + err2) : null),
-            )
+            const head = h('div', { className: 'dym-head', style: { marginBottom: '8px' } },
+              h('span', { className: 'dym-title', style: { fontSize: '13.5px' } }, String(base.name || '（未命名）')),
+              h('span', { className: 'dym-badge' }, '角色卡'),
+              h('div', { className: 'dym-chips' },
+                editing
+                  ? [
+                      h('button', { key: 's', className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save }, saving ? '保存中…' : '保存'),
+                      h('button', { key: 'c', className: 'dym-tab', onClick: () => {
+                        const d = {}
+                        for (const k of keys) d[k] = toText(base[k])
+                        setDraft(d); setEditing(false); setMsg(''); setErr2('')
+                      } }, '取消'),
+                    ]
+                  : [h('button', { key: 'e', className: 'dym-tab', onClick: () => setEditing(true) }, '编辑')]))
+
+            if (editing) {
+              return h('div', null, head,
+                h(Card, null, keys.map((k) => h('div', { key: k, style: { marginBottom: '10px' } },
+                  h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, FIELD_LABEL[k] || k, ' · ', k),
+                  h('textarea', {
+                    value: draft[k] ?? '',
+                    rows: String(draft[k] ?? '').length > 60 ? 5 : 2,
+                    onChange: (e) => setDraft({ ...draft, [k]: e.target.value }),
+                    style: { width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '12.5px',
+                      lineHeight: 1.55, padding: '8px 10px', borderRadius: '8px',
+                      border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
+                  })))),
+                err2 ? h('div', { style: { fontSize: '12px', color: '#e06' } }, '保存失败：' + err2) : null)
+            }
+
+            return h('div', null, head,
+              h(Card, null,
+                keys.length
+                  ? keys.map((k) => KV((FIELD_LABEL[k] || k) + '（' + k + '）', flatText(base[k])))
+                  : '（角色卡是空的）'),
+              h(Card, null, KV('更新时间', base.updated_at || base._last_updated || '—')),
+              msg ? h('div', { style: { fontSize: '12px', opacity: 0.75 } }, msg) : null)
           }
 
-          const tlBody = () => {
-            const items = (tl && (tl.results || tl)) || []
-            if (!items.length) return h(Card, null, busy ? '读取中…' : '（还没有回忆条目）')
-            return h('div', null, items.slice(0, 40).map((it, i) => h(Card, { key: i },
-              h('div', { style: { opacity: 0.55, fontSize: '11px', marginBottom: '3px' } },
-                [it.created_at || it.at || '', it.kind || it.type || '', it.importance != null ? '重要度 ' + it.importance : ''].filter(Boolean).join(' · ')),
-              String(it.text || it.summary || it.content || '').slice(0, 400))))
+          const Timelines = ({ items, busy }) => {
+            const [q, setQ] = React.useState('')
+            const list = (items || []).filter((it) => {
+              if (!q.trim()) return true
+              const s = (it.text || it.summary || it.content || '') + ' ' + (it.kind || '') + ' ' + (it.type || '')
+              return s.toLowerCase().includes(q.trim().toLowerCase())
+            })
+            const KIND_COLOR = { preference: '#f0a35e', fact: '#5b8def', lesson: '#e0705e', event: '#4bb6a8',
+              person: '#7c6ff7', task: '#9aa3b2', note: '#9aa3b2' }
+            const fmt = (s) => {
+              const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
+              return m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : String(s || '')
+            }
+            return h('div', null,
+              h('div', { style: { display: 'flex', gap: '8px', marginBottom: '10px' } },
+                h('input', {
+                  value: q, placeholder: '搜索记忆内容 / 类型…',
+                  onChange: (e) => setQ(e.target.value),
+                  style: { flex: 1, fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
+                    border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
+                }),
+                h('span', { className: 'dym-chip' }, '共 ', h('b', null, (items || []).length), ' 条，显示 ', h('b', null, list.length))),
+              list.length
+                ? list.slice(0, 60).map((it, i) => {
+                    const kind = it.kind || it.type || ''
+                    return h('div', { key: i, className: 'dym-card', style: { padding: '9px 12px' } },
+                      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '4px' } },
+                        kind ? h('span', {
+                          style: { fontSize: '10.5px', padding: '1px 7px', borderRadius: '999px',
+                            border: '1px solid ' + (KIND_COLOR[kind] || '#9aa3b2'), color: KIND_COLOR[kind] || '#9aa3b2' },
+                        }, kind) : null,
+                        h('span', { style: { fontSize: '11px', opacity: 0.55 } }, fmt(it.created_at || it.at || '')),
+                        it.importance != null ? h('span', { style: { fontSize: '11px', opacity: 0.55 } }, '· 重要度 ' + it.importance) : null),
+                      String(it.text || it.summary || it.content || '').slice(0, 500))
+                  })
+                : h(Card, null, busy ? '读取中…' : (q ? '没有匹配的记忆' : '（还没有回忆条目）')))
           }
+
           const rawBody = () => {
             if (!raw) return h(Card, null, busy ? '读取中…' : '（读不到）')
             return h('div', null,
@@ -1202,7 +1254,7 @@ window.__ModuleLoader__.load({
             err ? h(Card, null, '读取失败：' + err) : null,
             tab === 'graph' ? h(MemGraph, { data: g, busy }) : null,
             tab === 'character' ? h(CharEditor, { data: char, onSaved: () => load(true) }) : null,
-            tab === 'timeline' ? tlBody() : null,
+            tab === 'timeline' ? h(Timelines, { items: (tl && (tl.results || tl)) || [], busy }) : null,
             tab === 'raw' ? rawBody() : null,
           )
         }
