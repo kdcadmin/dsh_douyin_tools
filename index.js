@@ -2298,6 +2298,8 @@ export function apply(ctx, config) {
       } catch { /* 目录读不到就算了 */ }
     }
     drop(join(stateDir, '.tmp'), 0)                       // 临时垃圾全清
+    // ⭐ 使用者 2026-10-25：下载的视频每天清空（转写缓存 .json 留着，省得重复下载）
+    drop(join(stateDir, 'media'), 0, (f) => !f.endsWith('.json'))
     drop(join(stateDir, 'thumbs'), opts.thumbDays ?? 30)   // 老缩略图
     drop(join(stateDir, 'out'), opts.reportDays ?? 120, (f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
     // 日志轮转：超过 2MB 就把旧内容丢掉，只留最后 2000 行
