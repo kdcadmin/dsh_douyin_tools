@@ -613,6 +613,30 @@ export function apply(ctx, config) {
     l.plainComments[String(awemeId)] = { day: dayKey(), at: new Date().toISOString(), text: String(text).slice(0, 40) }
     writeLedger(l)
   }
+  /** 私信回复库：大白鲸口吻——短句、调皮、会撒娇、爱自嘲，不写客服话 */
+  const DM_LINES = {
+    greet: ['在的在的[憨笑]', '诶？我在呢[害羞]', '哟，你找我呀[比心]', '嗯？怎么了嘛[憨笑]'],
+    praise: ['嘿嘿，被夸到了[害羞]', '你再夸我要翘尾巴了[憨笑]', '就这点好，被你看出来了[比心]'],
+    complain: ['我错了嘛[捂脸]', '别凶我，我认错[害羞]', '好好好，我改[憨笑]', '那你教教我呗[捂脸]'],
+    question: ['这个我懂，我说给你听[憨笑]', '问得好，我刚好知道[比心]', '嗯……让我想想再答你[害羞]'],
+    emoji: ['你发表情我就懂了[憨笑]', '哈哈，收到[笑哭]', '这个表情我存了[比心]'],
+    laugh: ['笑死，我也觉得[笑哭]', '哈哈哈你怎么这么逗[捂脸]'],
+    night: ['早点睡哦，别熬[害羞]', '晚安啦，明天见[比心]'],
+    fallback: ['收到啦[憨笑]', '嗯嗯，我在[害羞]', '好，记下了[比心]', '我这会儿有点笨，但我在听[捂脸]'],
+  }
+  const pickDmReply = (text) => {
+    const s = String(text || '')
+    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+    if (/(晚安|睡了|困了)/.test(s)) return pick(DM_LINES.night)
+    if (/(你好|在吗|在不在|hi|hello)/i.test(s)) return pick(DM_LINES.greet)
+    if (/(好看|可爱|厉害|喜欢|棒|牛)/.test(s)) return pick(DM_LINES.praise)
+    if (/(傻|笨|呆|不对|错|气死|烦)/.test(s)) return pick(DM_LINES.complain)
+    if (/(吗|呢|怎么|为啥|为什么|多少|什么|能不能|有没有)/.test(s)) return pick(DM_LINES.question)
+    if (/(哈哈|笑|乐)/.test(s)) return pick(DM_LINES.laugh)
+    if (/\[/.test(s)) return pick(DM_LINES.emoji)
+    return pick(DM_LINES.fallback)
+  }
+
   /** 表情包关键词：什么话配什么表情（只有「大肥鱼」系列是现成的） */
   const pickStickerKeyword = (note) => {
     const s = String(note || '')
@@ -2294,10 +2318,7 @@ export function apply(ctx, config) {
       if (rec.day !== today) { rec.count = 0; rec.day = today }
       if (rec.lastSeen === preview) continue                        // 没有新消息
       if (rec.count >= Math.max(1, Number(cfg.dmReplyPerContact) || 1)) continue
-      const reply = /表情|\[/.test(preview) ? '哈哈哈你也太可爱了[憨笑]'
-        : /你好|在吗|在不在/.test(preview) ? '在的在的[比心]'
-        : /视频|分享/.test(preview) ? '看到了，我去看看[笑哭]'
-        : '收到啦[憨笑]'
+      const reply = pickDmReply(preview)
       try {
         const r = await call('douyin_chat_send', { nickname: name, text: reply }, { timeoutMs: 180_000 })
         const ok = r && r.ok !== false
