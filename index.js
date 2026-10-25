@@ -2663,7 +2663,7 @@ export function apply(ctx, config) {
   /** 谷时窗口到点就刷 —— ⭐ 2026-10-25 修：以前这里调 runDuty()（spawn headless，沙箱里必挂），
    *  而且窗口标记是「跑之前」就写上 ⇒ 一轮没跑成也当天不再试。现在改成跑本机直跑（localRound），
    *  并且**只有真的挑到东西才记窗口**，失败下一分钟还会再试（同一天最多试 6 次，别死循环）。 */
-  const tick = async () => {
+  const windowTick = async () => {
     try {
       refreshCfg()
       if (!cfg.peakValley) return
@@ -2705,11 +2705,11 @@ export function apply(ctx, config) {
     }
   }
 
-  try {
-    const timer = setInterval(tick, 60_000)
-    timer.unref?.()                                    // 别因为这个定时器让进程不肯退出
-    ctx.effect(() => () => clearInterval(timer), 'douyin-duty: 谷时定时器')
-  } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
+  /* ⭐ 2026-10-26 使用者要求：谷时那一轮不再单独 60 秒轮询，
+   *    合并进「每隔 N 分钟巡检一次」的那一跳（同一个参数 replyIntervalMin）：
+   *      到点 → 谷时？刷一轮 → 续火花 → 看私信 → 看评论
+   */
+  // （windowTick 由下面的巡检定时器调用，这里不再起单独定时器）
 
   /* ─────────────── 评论区定时检查（每 N 分钟看一次，带抖动） ───────────────
    * 使用者 2026-10-24：「评论区可以设置每隔多少时间查看一次，这样才像随机回复」
@@ -2749,6 +2749,8 @@ export function apply(ctx, config) {
       try {
         refreshCfg()
         if (typeof maybeClean === 'function') maybeClean()
+        // 谷时到了就刷一轮（跟下面三件事共用这同一个间隔）
+        try { if (typeof windowTick === 'function') await windowTick() } catch (e) { log('谷时那一轮出错（已兜住）：' + String(e?.message ?? e)) }
         await maybeKeepStreak()
         try { if (typeof dmRound === 'function') await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
         if (cfg.autoReply && !replyBusy) {
