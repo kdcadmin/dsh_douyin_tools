@@ -1101,94 +1101,75 @@ window.__ModuleLoader__.load({
           }, [tab, char, tl, g, raw, stats])
           React.useEffect(() => { load(false) }, [tab])
 
-          // ⭐ 角色卡：默认只读（像原插件那样一项一项列清楚），点「编辑」才进输入框
-          const FIELD_LABEL = {
-            identity: '身份', preferences: '偏好', constraints: '约束', expertise: '专长',
-            persona: '人设', style: '说话风格', likes: '喜欢', dislikes: '不喜欢',
-            habits: '习惯', relations: '关系', goals: '目标', boundaries: '边界',
-          }
-          const flatText = (v) => {
-            if (v == null) return '—'
-            if (typeof v !== 'object') return String(v)
-            if (Array.isArray(v)) {
-              if (!v.length) return '（空）'
-              return v.map((x) => (typeof x === 'object' ? Object.entries(x).map(([k2, v2]) => k2 + '=' + v2).join('、') : String(x))).join('；')
-            }
-            return Object.entries(v).map(([k2, v2]) => k2 + '=' + (typeof v2 === 'object' ? JSON.stringify(v2) : v2)).join('、')
-          }
+          // ⭐ 角色卡：照记忆插件那套——**一直可编辑的表单**（称呼/时区/沟通风格/回复长度/约束 + 保存）
           const CharEditor = ({ data, onSaved }) => {
             const base = (data && (data.character || data)) || {}
-            const skip = ['updated_at', '_last_updated', 'id']
-            const keys = Object.keys(base).filter((k) => !skip.includes(k))
-            const toText = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v))
-            const [editing, setEditing] = React.useState(false)
-            const [draft, setDraft] = React.useState({})
+            const id = base.identity || {}
+            const prefs = base.preferences || {}
+            const cons = Array.isArray(base.constraints) ? base.constraints : []
+            const refName = React.useRef(null)
+            const refTz = React.useRef(null)
+            const refStyle = React.useRef(null)
+            const refLen = React.useRef(null)
+            const refCons = React.useRef(null)
             const [saving, setSaving] = React.useState(false)
             const [msg, setMsg] = React.useState('')
-            const [err2, setErr2] = React.useState('')
+            const [bad, setBad] = React.useState(false)
+
             React.useEffect(() => {
-              const d = {}
-              for (const k of keys) d[k] = toText(base[k])
-              setDraft(d); setEditing(false); setMsg(''); setErr2('')
+              if (refName.current) refName.current.value = id.name || ''
+              if (refTz.current) refTz.current.value = id.timezone || 'Asia/Shanghai'
+              if (refStyle.current) refStyle.current.value = prefs.communication_style || ''
+              if (refLen.current) refLen.current.value = prefs.response_length || 'short'
+              if (refCons.current) refCons.current.value = cons.join('\n')
             }, [data])
 
+            const inputStyle = { width: '100%', fontSize: '12.5px', padding: '7px 10px', borderRadius: '8px',
+              border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' }
+            const field = (label, ref2, ph, multi) => h('div', { style: { marginBottom: '10px' } },
+              h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, label),
+              multi
+                ? h('textarea', { ref: ref2, defaultValue: '', rows: 3, placeholder: ph, style: { ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.55 } })
+                : h('input', { ref: ref2, type: 'text', defaultValue: '', placeholder: ph, style: inputStyle, autoComplete: 'off', spellCheck: false }))
+
             const save = async () => {
-              setSaving(true); setErr2(''); setMsg('')
+              const val = (r) => ((r.current && r.current.value) || '').trim()
+              setSaving(true); setMsg(''); setBad(false)
               try {
-                const updates = {}
-                for (const k of keys) {
-                  const v = draft[k]; const orig = base[k]
-                  if (typeof orig === 'object' && orig !== null) {
-                    try { updates[k] = JSON.parse(v) } catch { updates[k] = v }
-                  } else if (typeof orig === 'number') {
-                    const n = Number(v); updates[k] = Number.isFinite(n) ? n : v
-                  } else if (typeof orig === 'boolean') {
-                    updates[k] = /^(true|1|是)$/i.test(String(v).trim())
-                  } else updates[k] = v
+                const updates = {
+                  identity: { ...(id || {}), name: val(refName) || id.name || '', timezone: val(refTz) || id.timezone || 'Asia/Shanghai' },
+                  preferences: { ...(prefs || {}), communication_style: val(refStyle) || prefs.communication_style || '',
+                    response_length: val(refLen) || prefs.response_length || 'short' },
+                  constraints: String(val(refCons) || '').split('\n').map((s) => s.trim()).filter(Boolean),
                 }
                 await memCall('character', { action: 'update', updates })
-                setMsg('已保存'); setEditing(false)
+                setMsg('已保存（已回读核对）')
                 if (onSaved) onSaved()
-              } catch (e) { setErr2(String((e && e.message) || e)) } finally { setSaving(false) }
+              } catch (e) { setBad(true); setMsg('保存失败：' + String((e && e.message) || e)) } finally { setSaving(false) }
             }
 
-            const head = h('div', { className: 'dym-head', style: { marginBottom: '8px' } },
-              h('span', { className: 'dym-title', style: { fontSize: '13.5px' } }, String(base.name || '（未命名）')),
-              h('span', { className: 'dym-badge' }, '角色卡'),
-              h('div', { className: 'dym-chips' },
-                editing
-                  ? [
-                      h('button', { key: 's', className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save }, saving ? '保存中…' : '保存'),
-                      h('button', { key: 'c', className: 'dym-tab', onClick: () => {
-                        const d = {}
-                        for (const k of keys) d[k] = toText(base[k])
-                        setDraft(d); setEditing(false); setMsg(''); setErr2('')
-                      } }, '取消'),
-                    ]
-                  : [h('button', { key: 'e', className: 'dym-tab', onClick: () => setEditing(true) }, '编辑')]))
-
-            if (editing) {
-              return h('div', null, head,
-                h(Card, null, keys.map((k) => h('div', { key: k, style: { marginBottom: '10px' } },
-                  h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, FIELD_LABEL[k] || k, ' · ', k),
-                  h('textarea', {
-                    value: draft[k] ?? '',
-                    rows: String(draft[k] ?? '').length > 60 ? 5 : 2,
-                    onChange: (e) => setDraft({ ...draft, [k]: e.target.value }),
-                    style: { width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '12.5px',
-                      lineHeight: 1.55, padding: '8px 10px', borderRadius: '8px',
-                      border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
-                  })))),
-                err2 ? h('div', { style: { fontSize: '12px', color: '#e06' } }, '保存失败：' + err2) : null)
-            }
-
-            return h('div', null, head,
+            return h('div', null,
               h(Card, null,
-                keys.length
-                  ? keys.map((k) => KV((FIELD_LABEL[k] || k) + '（' + k + '）', flatText(base[k])))
-                  : '（角色卡是空的）'),
-              h(Card, null, KV('更新时间', base.updated_at || base._last_updated || '—')),
-              msg ? h('div', { style: { fontSize: '12px', opacity: 0.75 } }, msg) : null)
+                h('div', { className: 'dym-k', style: { marginBottom: '10px' } },
+                  '改完点「保存角色卡」；这些值会进记忆库，影响它说话的样子。'),
+                field('称呼（identity.name）', refName, 'YG'),
+                field('时区（identity.timezone）', refTz, 'Asia/Shanghai'),
+                field('沟通风格（preferences.communication_style）', refStyle, '傲娇, 可爱, 撒娇'),
+                field('回复长度（preferences.response_length）', refLen, 'short / medium / long'),
+                field('约束（constraints，一行一条）', refCons, '不聊政治\n不编数据', true)),
+              h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' } },
+                h('button', { className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save },
+                  saving ? '保存中…' : '保存角色卡'),
+                msg ? h('span', { style: { fontSize: '12px', opacity: 0.8, color: bad ? '#e06' : undefined } }, msg) : null),
+              (base.expertise || base.persona || base.habits)
+                ? h(Card, { style: { marginTop: '10px' } },
+                    h('div', { className: 'dym-k', style: { marginBottom: '6px' } }, '其它字段（只读）'),
+                    base.persona ? KV('人设（persona）', flatText(base.persona)) : null,
+                    base.expertise ? KV('专长（expertise）', flatText(base.expertise)) : null,
+                    base.habits ? KV('习惯（habits）', flatText(base.habits)) : null)
+                : null,
+              h('div', { style: { fontSize: '11.5px', opacity: 0.55 } },
+                '更新时间：' + (base.updated_at || base._last_updated || '—')))
           }
 
           const Timelines = ({ items, busy }) => {
