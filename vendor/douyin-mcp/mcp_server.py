@@ -1772,16 +1772,63 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
             return _err("没找到「发送」按钮，Ctrl+Enter / Enter 也没触发提交", aweme_id=aid, notes=notes)
 
         hit = await net.wait_for(lambda u, d: True, timeout=10.0)
+
+        async def _confirmed(tail: str, tries: int = 8) -> bool:
+            """回读确认：页面文本或评论列表里真出现这句才算发出去。"""
+            for _ in range(tries):
+                await page.wait_for_timeout(1200)
+                try:
+                    body = await page.inner_text("body")
+                except Exception:
+                    body = ""
+                if tail and tail in body:
+                    return True
+                try:
+                    for item in list(cmt_net.items):
+                        for c in item["data"].get("comments") or []:
+                            if tail and tail in str(c.get("text") or ""):
+                                return True
+                except Exception:
+                    pass
+                try:
+                    await page.evaluate(
+                        "() => { const b=document.querySelector('[data-e2e=\"comment-list\"]'); if(b&&b.parentElement) b.parentElement.scrollTop=0; }"
+                    )
+                except Exception:
+                    pass
+            return False
+
+        tail_txt = (text or "").strip()[-10:]
+
         if hit:
             data = hit["data"]
             comment = data.get("comment") or {}
             cid = str(comment.get("cid") or data.get("cid") or "")
             posted = comment.get("text") or data.get("text") or text
-            out = _ok(aweme_id=aid, cid=cid, text=posted, url=VIDEO_URL.format(aweme_id=aid),
-                      reply_cid=str(reply_cid or ""))
-            if notes:
-                out["notes"] = notes
-            return out
+            if await _confirmed(tail_txt):
+                out = _ok(aweme_id=aid, cid=cid, text=posted, url=VIDEO_URL.format(aweme_id=aid),
+                          reply_cid=str(reply_cid or ""), verified=True)
+                if notes:
+                    out["notes"] = notes
+                return out
+            notes.append("有发布回执，但评论区里查不到这句 ⇒ 可能被限流/秒删；重试一次")
+            # 重试一次：重新点开编辑器 → 输入 → 回车
+            try:
+                box2, notes = await _open_comment_box(page, notes)
+                await box2.click()
+                await page.keyboard.type(text, delay=40)
+                await page.wait_for_timeout(500)
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(2500)
+            except Exception as exc:
+                notes.append(f"重试输入失败：{type(exc).__name__}")
+            if await _confirmed(tail_txt, tries=10):
+                out = _ok(aweme_id=aid, cid=cid, text=posted, url=VIDEO_URL.format(aweme_id=aid),
+                          reply_cid=str(reply_cid or ""), verified=True, retried=True)
+                if notes:
+                    out["notes"] = notes
+                return out
+            return _err("评论没真正发出去（有回执但评论区长不出来）", aweme_id=aid, text=text, notes=notes)
 
         # 没有 XHR 回执时，看评论列表里是否出现这段文本
         await page.wait_for_timeout(1500)
@@ -1792,7 +1839,7 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         if seen:
             notes.append("没抓到 /comment/publish/ 回执，但页面上已经出现评论文本")
             return _ok(aweme_id=aid, cid="", text=text, url=VIDEO_URL.format(aweme_id=aid),
-                       reply_cid=str(reply_cid or ""), notes=notes)
+                       reply_cid=str(reply_cid or ""), verified=True, notes=notes)
         return _err("点了发送但 10s 内没等到发布回执，也没在页面上看到评论",
                     aweme_id=aid, notes=notes)
     finally:

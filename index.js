@@ -2462,8 +2462,14 @@ export function apply(ctx, config) {
         turn += 1
         plan.push({ v, act })
       }
+      let commentFails = Number((readState().commentFails) || 0)
       for (const item of plan) {
         const v = item.v
+        // 连续 2 次评论没发出去 ⇒ 这一轮不再试评论（避免被限流，点赞/转发照做）
+        if (commentFails >= 2 && (item.act === 'mention' || item.act === 'plain')) {
+          acts.push('评论跳过：连续失败 2 次，先歇一轮')
+          continue
+        }
         // ⭐ 费时的活只对「要动手的那几条」做：点赞不转写
         if (cfg.watchBeforeAct !== false && item.act !== 'like' && !v.transcript) {
           try {
@@ -2491,13 +2497,15 @@ export function apply(ctx, config) {
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text, mention }, { timeoutMs: 180_000 })
           const okk = r && r.ok !== false
           acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
-          if (okk) noteComment({ aweme_id: v.aweme_id, text })
+          if (okk) { noteComment({ aweme_id: v.aweme_id, text }); commentFails = 0; bumpState({ commentFails: 0 }) }
+          else { commentFails += 1; bumpState({ commentFails }) }
         } else if (item.act === 'plain') {
           const text = makePlainComment(v, topOf[v.aweme_id])
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text }, { timeoutMs: 180_000 })
           const okk = r && r.ok !== false
-          acts.push(`评论「${text}」：` + (okk ? '已发' : (r?.error || '没发出去')))
-          if (okk) notePlainComment(v.aweme_id, text)
+          acts.push(`评论「${text}」：` + (okk ? '已发（已回读确认）' : (r?.error || '没发出去')))
+          if (okk) { notePlainComment(v.aweme_id, text); commentFails = 0; bumpState({ commentFails: 0 }) }
+          else { commentFails += 1; bumpState({ commentFails }) }
         } else if (item.act === 'share') {
           const to = String(cfg.shareToNick || '').trim()
           const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
