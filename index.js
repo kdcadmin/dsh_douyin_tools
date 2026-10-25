@@ -1481,6 +1481,9 @@ export function apply(ctx, config) {
 
   /** 本机直跑一轮（下面赋值；这里先声明，保证 HTTP 路由一定能看到它） */
   let localRound = null
+  /** 每天清一次 / 回私信（同样先声明后赋值，避免作用域问题） */
+  let maybeClean = null
+  let dmRound = null
 
   const runDuty = (why = 'window') => {
     try {
@@ -2259,7 +2262,7 @@ export function apply(ctx, config) {
    * 代价：日报文字是模板化的（不是模型现写），但**能用、能刷、能挑、能点赞评论**。
    */
   /** 自动回复私信：读消息抽屉 → 找到「别人发来的、还没回过的」→ 回一句（每人每天 limit 条） */
-  const dmRound = async () => {
+  dmRound = async () => {
     refreshCfg()
     if (!cfg.dmReply) return { ok: true, skipped: '自动回私信关着' }
     const perDay = Math.max(0, Number(cfg.dmReplyPerDay) || 0)
@@ -2359,7 +2362,7 @@ export function apply(ctx, config) {
   }
 
   /** 每天只清一次 */
-  const maybeClean = () => {
+  maybeClean = () => {
     try {
       if (cfg.autoClean === false) return
       const st = readState()
@@ -2715,9 +2718,9 @@ export function apply(ctx, config) {
     replyTimer = setTimeout(async () => {
       try {
         refreshCfg()
-        maybeClean()
+        if (typeof maybeClean === 'function') maybeClean()
         await maybeKeepStreak()
-        try { await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
+        try { if (typeof dmRound === 'function') await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
         if (cfg.autoReply && !replyBusy) {
           replyBusy = true
           lastReplyCheckAt = new Date().toISOString()
