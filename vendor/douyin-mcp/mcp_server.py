@@ -67,6 +67,9 @@ QR_PNG = HOME / "login-qr.png"
 HOME_URL = "https://www.douyin.com/"
 VIDEO_URL = "https://www.douyin.com/video/{aweme_id}"
 NOTE_URL = "https://www.douyin.com/note/{aweme_id}"
+
+# aweme_id -> aweme_type（68/211 图文，0/55 视频）；detail XHR 一到就记下来
+_AWEME_TYPE_CACHE: dict[str, int] = {}
 SEARCH_URL = "https://www.douyin.com/search/{kw}?type={type}"
 CREATOR_UPLOAD = "https://creator.douyin.com/creator-micro/content/upload"
 
@@ -1032,9 +1035,21 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
         got = await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=6.0)
-        # ⭐ 2026-10-25：图文（note）作品接口不抛评论 ⇒ **直接走 DOM**，不再等/换 URL
+        # ⭐ 2026-10-26：类型以 aweme_type 为准（68/211/150 = 图文；0/55 = 视频），页面没 <video> 只当辅助信号
         try:
-            is_note_now = await page.evaluate("() => !document.querySelector('video')")
+            det = await detail_net.wait_for(lambda u, d: bool(d.get("aweme_detail")), timeout=3.0)
+            item = (det or {}).get("aweme_detail") or {}
+            if isinstance(item, dict) and item.get("aweme_type") is not None:
+                _AWEME_TYPE_CACHE[aid] = int(item.get("aweme_type"))
+        except Exception:
+            pass
+        try:
+            _det = _AWEME_TYPE_CACHE.get(aid)
+            if _det is not None:
+                is_note_now = _det in (68, 211, 150)
+                notes.append(f"作品类型 aweme_type={_det}（{'图文' if is_note_now else '视频'}）")
+            else:
+                is_note_now = await page.evaluate("() => !document.querySelector('video')")
         except Exception:
             is_note_now = False
         if is_note_now and not got:
@@ -1101,7 +1116,7 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
             if dom_items:
                 notes.append(f"接口没给，改成从页面里抠到 {len(dom_items)} 条")
                 return _ok(aweme_id=aid, count=len(dom_items), items=dom_items, notes=notes, source="dom")
-            notes.append("接口和页面都没拿到评论（这条可能关了评论，或评论还没加载出来）")
+            notes.append("这条还没有评论（接口 total=0）")
             return _ok(aweme_id=aid, count=0, items=[], notes=notes, source="none")
 
         if len(comments) < num:
