@@ -943,7 +943,7 @@ export function apply(ctx, config) {
       }
     }
     // 一次性附加 id 用完即清（只限这一次）
-    if (cfgExtras.length && cfg.replyOneShot === true) {
+    if ((got.extras || []).length && cfg.replyOneShot === true) {
       try {
         cfg.replyVideoIds = ''
         saveCfg({ replyVideoIds: '' })
