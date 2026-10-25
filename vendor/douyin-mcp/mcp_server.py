@@ -945,9 +945,14 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
                     const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
                     if (!txt || txt.length < 2) continue;
                     const cidNode = n.querySelector('[data-cid]');
+                    let user = '';
+                    try {
+                        const userA = n.querySelector('a[href*="/user/"]');
+                        if (userA) user = (userA.innerText || '').trim().split(/\s+/)[0].slice(0, 20);
+                    } catch (e) { user = ''; }
                     out.push({
                         cid: cidNode ? cidNode.getAttribute('data-cid') : "",
-                        user: "",
+                        user: user,
                         text: txt.slice(0, 200),
                     });
                 }
@@ -1463,22 +1468,54 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         st = await _login_state(page, ctx)
         if not st["loggedIn"]:
             return _need_login("发评论要登录：先 douyin_login_qr → 扫码 → douyin_login_poll", aweme_id=aid)
+        # ⭐ 图文作品：/video/<id> 里没有播放器和评论面板 ⇒ 换成 /note/<id>
+        try:
+            is_note = await page.evaluate("() => !document.querySelector('video')")
+        except Exception:
+            is_note = False
+        if is_note:
+            await _goto(page, NOTE_URL.format(aweme_id=aid), settle=3.5)
+            notes.append("这是图文作品，改用 /note/ 页面")
+            # 打开右侧评论面板（图文页默认不展开）
+            try:
+                await _click_text(page, "评论", exact=True)
+                await page.wait_for_timeout(2000)
+            except Exception:
+                pass
 
         if reply_index is not None and int(reply_index) >= 0:
-            # ⭐ 按序号回（图文作品 XHR 不抛评论，拿不到 cid，只能靠序号）
+            # ⭐ 按序号回（图文作品 XHR 不给评论、也没有 data-e2e 容器）
             idx = int(reply_index)
-            items = page.locator("[data-e2e='comment-item']")
-            if await items.count() <= idx:
-                return _err(f"评论序号 {idx} 超出页面已渲染的条数（{await items.count()}）", aweme_id=aid)
-            target = items.nth(idx)
-            try:
-                await target.scroll_into_view_if_needed(timeout=2000)
-                await target.hover(timeout=2000)
-                reply_btn = target.get_by_text("回复", exact=True).first
-                await reply_btn.click(timeout=4000)
-            except Exception as exc:
-                return _err(f"点「回复」失败：{type(exc).__name__}", aweme_id=aid)
-            notes.append(f"按序号回第 {idx} 条")
+            pos = await page.evaluate(
+                """(idx) => {
+                    const W = innerWidth;
+                    const cands = Array.from(document.querySelectorAll('div,span,a,button'))
+                        .filter((e) => {
+                            const t = (e.textContent || '').trim();
+                            const r = e.getBoundingClientRect();
+                            return t === '回复' && r.width > 4 && r.height > 4 && r.x > W * 0.3;
+                        });
+                    if (cands.length <= idx) return { ok: false, n: cands.length };
+                    const r = cands[idx].getBoundingClientRect();
+                    return { ok: true, x: r.x + r.width / 2, y: r.y + r.height / 2, n: cands.length };
+                }""",
+                idx,
+            )
+            if not pos or not pos.get("ok"):
+                diag = await page.evaluate(
+                    """() => {
+                        const all = Array.from(document.querySelectorAll('div,span,a,button'));
+                        const hit = all.filter((e) => (e.textContent || '').indexOf('回复') >= 0)
+                            .map((e) => ((e.textContent || '').trim().slice(0, 12) + ' @' + e.tagName + ' ' + (e.className || '').toString().slice(0, 16)))
+                            .slice(0, 6);
+                        return { n: hit.length, sample: hit, hasComposer: !!document.querySelector('input[placeholder*=\"回复\"], textarea') };
+                    }"""
+                )
+                return _err(f"没找到第 {idx} 个「回复」链接", aweme_id=aid, diag=diag)
+            await page.mouse.move(pos["x"], pos["y"])
+            await page.wait_for_timeout(300)
+            await page.mouse.click(pos["x"], pos["y"])
+            notes.append(f"按「回复」序号 {idx} 回（页面共 {pos.get('n')} 个）")
         elif reply_cid:
             # DOM 里没有 cid 属性；用 /comment/list/ 的顺序把 cid 映射到第几条评论
             await cmt_net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=8.0)
