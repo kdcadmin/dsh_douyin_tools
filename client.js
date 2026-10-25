@@ -1101,17 +1101,74 @@ window.__ModuleLoader__.load({
           }, [tab, char, tl, g, raw, stats])
           React.useEffect(() => { load(false) }, [tab])
 
-          const charBody = () => {
-            if (!char) return h(Card, null, busy ? '读取中…' : '（没有角色卡数据）')
-            const c = char.character || char
-            const skip = ['updated_at', 'id', 'name', '_last_updated']
-            const keys = Object.keys(c || {}).filter((k) => !skip.includes(k))
+          // ⭐ 角色卡：可编辑（原来只能看）。每个字段一个输入框，对象/数组按 JSON 文本编辑
+          const CharEditor = ({ data, onSaved }) => {
+            const base = (data && (data.character || data)) || {}
+            const skip = ['updated_at', '_last_updated', 'id']
+            const keys = Object.keys(base).filter((k) => !skip.includes(k))
+            const toText = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v))
+            const [draft, setDraft] = React.useState(() => {
+              const d = {}
+              for (const k of keys) d[k] = toText(base[k])
+              return d
+            })
+            const [saving, setSaving] = React.useState(false)
+            const [msg, setMsg] = React.useState('')
+            const [err2, setErr2] = React.useState('')
+            React.useEffect(() => {
+              const d = {}
+              for (const k of keys) d[k] = toText(base[k])
+              setDraft(d); setMsg(''); setErr2('')
+            }, [data])
+
+            const save = async () => {
+              setSaving(true); setErr2(''); setMsg('')
+              try {
+                const updates = {}
+                for (const k of keys) {
+                  const v = draft[k]
+                  const orig = base[k]
+                  if (typeof orig === 'object' && orig !== null) {
+                    try { updates[k] = JSON.parse(v) } catch { updates[k] = v }
+                  } else if (typeof orig === 'number') {
+                    const n = Number(v); updates[k] = Number.isFinite(n) ? n : v
+                  } else if (typeof orig === 'boolean') {
+                    updates[k] = /^(true|1|是)$/i.test(String(v).trim())
+                  } else {
+                    updates[k] = v
+                  }
+                }
+                await memCall('character', { action: 'update', updates })
+                setMsg('已保存')
+                if (onSaved) onSaved()
+              } catch (e) { setErr2(String((e && e.message) || e)) } finally { setSaving(false) }
+            }
+
+            if (!keys.length) return h(Card, null, '（角色卡是空的）')
             return h('div', null,
-              h(Card, null, KV('名字', c.name || '（未命名）'), KV('更新时间', c.updated_at || c._last_updated || '—')),
-              h(Card, null, keys.length
-                ? keys.map((k) => KV(k, typeof c[k] === 'object' ? JSON.stringify(c[k]) : c[k]))
-                : '（角色卡是空的）'))
+              h(Card, null, keys.map((k) => h('div', { key: k, style: { marginBottom: '10px' } },
+                h('div', { className: 'dym-k', style: { marginBottom: '4px' } }, k),
+                h('textarea', {
+                  value: draft[k] ?? '',
+                  rows: String(draft[k] ?? '').length > 60 ? 5 : 2,
+                  onChange: (e) => setDraft({ ...draft, [k]: e.target.value }),
+                  style: { width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '12.5px',
+                    lineHeight: 1.55, padding: '8px 10px', borderRadius: '8px',
+                    border: '1px solid rgba(128,128,128,.3)', background: 'transparent', color: 'inherit' },
+                })))),
+              h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+                h('button', { className: 'dym-tab on', disabled: saving ? '' : undefined, onClick: save },
+                  saving ? '保存中…' : '保存角色卡'),
+                h('button', { className: 'dym-tab', onClick: () => {
+                  const d = {}
+                  for (const k of keys) d[k] = toText(base[k])
+                  setDraft(d); setMsg('已还原'); setErr2('')
+                } }, '还原'),
+                msg ? h('span', { style: { fontSize: '12px', opacity: 0.75 } }, msg) : null,
+                err2 ? h('span', { style: { fontSize: '12px', color: '#e06' } }, '保存失败：' + err2) : null),
+            )
           }
+
           const tlBody = () => {
             const items = (tl && (tl.results || tl)) || []
             if (!items.length) return h(Card, null, busy ? '读取中…' : '（还没有回忆条目）')
@@ -1144,7 +1201,7 @@ window.__ModuleLoader__.load({
               h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
             err ? h(Card, null, '读取失败：' + err) : null,
             tab === 'graph' ? h(MemGraph, { data: g, busy }) : null,
-            tab === 'character' ? charBody() : null,
+            tab === 'character' ? h(CharEditor, { data: char, onSaved: () => load(true) }) : null,
             tab === 'timeline' ? tlBody() : null,
             tab === 'raw' ? rawBody() : null,
           )
