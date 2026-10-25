@@ -66,6 +66,7 @@ QR_PNG = HOME / "login-qr.png"
 
 HOME_URL = "https://www.douyin.com/"
 VIDEO_URL = "https://www.douyin.com/video/{aweme_id}"
+NOTE_URL = "https://www.douyin.com/note/{aweme_id}"
 SEARCH_URL = "https://www.douyin.com/search/{kw}?type={type}"
 CREATOR_UPLOAD = "https://creator.douyin.com/creator-micro/content/upload"
 
@@ -919,6 +920,46 @@ def _detail_comment_count(net) -> int | None:
     return None
 
 
+async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
+    """从评论面板里抠评论（XHR 拿不到时的兜底）：cid 用页面上的 data 属性，没有就留空。"""
+    try:
+        for _ in range(4):
+            try:
+                await page.evaluate(
+                    """() => {
+                        const box = document.querySelector('[data-e2e="comment-list"]')
+                            || document.querySelector('[class*="comment"]');
+                        if (box && box.parentElement) box.parentElement.scrollTop = box.parentElement.scrollHeight;
+                        window.scrollBy(0, 1200);
+                    }"""
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(1500)
+        items = await page.evaluate(
+            """(num) => {
+                const out = [];
+                const nodes = Array.from(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="CommentItem"]'));
+                for (const n of nodes) {
+                    if (out.length >= num) break;
+                    const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (!txt || txt.length < 2) continue;
+                    const cidNode = n.querySelector('[data-cid]');
+                    out.push({
+                        cid: cidNode ? cidNode.getAttribute('data-cid') : "",
+                        user: "",
+                        text: txt.slice(0, 200),
+                    });
+                }
+                return out;
+            }""",
+            max(1, int(num or 30)),
+        )
+        return [i for i in (items or []) if i.get("text")]
+    except Exception:
+        return []
+
+
 async def _comments_core(page, aweme_id: str, num: int) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
@@ -930,7 +971,19 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
     notes: list[str] = []
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
-        await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=10.0)
+        got = await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=10.0)
+        # ⭐ 图文（note）/非视频作品：/video/<id> 里没有播放器也不拉评论接口 ⇒ 换 /note/<id> 再试
+        if not got:
+            try:
+                is_note = await page.evaluate("() => !document.querySelector('video')")
+            except Exception:
+                is_note = False
+            if is_note:
+                await _goto(page, NOTE_URL.format(aweme_id=aid), settle=3.5)
+                got = await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=10.0)
+                if got:
+                    notes.append("这是图文作品，用 /note/ 页面取到了评论")
+        await page.wait_for_timeout(1200)
 
         def collect() -> tuple[list[dict], bool]:
             seen: set[str] = set()
@@ -973,7 +1026,12 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
                 break
 
         if not comments:
-            notes.append("没抓到 /comment/list/ XHR，DOM 也没兜底（这条视频可能关闭了评论）")
+            # ⭐ DOM 兜底：有些作品（尤其图文）不抛 /comment/list/，只能从面板里抠
+            dom_items = await _scrape_comments_dom(page, num)
+            if dom_items:
+                notes.append(f"接口没给，改成从页面里抠到 {len(dom_items)} 条")
+                return _ok(aweme_id=aid, count=len(dom_items), items=dom_items, notes=notes, source="dom")
+            notes.append("接口和页面都没拿到评论（这条可能关了评论，或评论还没加载出来）")
             return _ok(aweme_id=aid, count=0, items=[], notes=notes, source="none")
 
         if len(comments) < num:
@@ -1387,7 +1445,7 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
     return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", aweme_id=aid)
 
 
-async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, mention: str = "") -> dict:
+async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, mention: str = "", reply_index: int = -1) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
         return _err("aweme_id 不合法")
@@ -1406,7 +1464,22 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         if not st["loggedIn"]:
             return _need_login("发评论要登录：先 douyin_login_qr → 扫码 → douyin_login_poll", aweme_id=aid)
 
-        if reply_cid:
+        if reply_index is not None and int(reply_index) >= 0:
+            # ⭐ 按序号回（图文作品 XHR 不抛评论，拿不到 cid，只能靠序号）
+            idx = int(reply_index)
+            items = page.locator("[data-e2e='comment-item']")
+            if await items.count() <= idx:
+                return _err(f"评论序号 {idx} 超出页面已渲染的条数（{await items.count()}）", aweme_id=aid)
+            target = items.nth(idx)
+            try:
+                await target.scroll_into_view_if_needed(timeout=2000)
+                await target.hover(timeout=2000)
+                reply_btn = target.get_by_text("回复", exact=True).first
+                await reply_btn.click(timeout=4000)
+            except Exception as exc:
+                return _err(f"点「回复」失败：{type(exc).__name__}", aweme_id=aid)
+            notes.append(f"按序号回第 {idx} 条")
+        elif reply_cid:
             # DOM 里没有 cid 属性；用 /comment/list/ 的顺序把 cid 映射到第几条评论
             await cmt_net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=8.0)
             idx = None
@@ -2525,7 +2598,7 @@ async def douyin_my_posts(days: int = 1) -> str:
 
 
 @mcp.tool()
-async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention: str = "") -> str:
+async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention: str = "", reply_index: int = -1) -> str:
     """发评论或回复某条评论（需登录）。reply_cid 非空时回复该评论；
     mention 非空时走**真人 @ 提醒**（打 @昵称 → 点联想面板那一行），不是纯文本 @。
 
@@ -2534,7 +2607,7 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
     async def _impl():
         ctx = await _browser.context()
         page = await _browser.page()
-        return await _comment_core(page, ctx, aweme_id, text, reply_cid, mention)
+        return await _comment_core(page, ctx, aweme_id, text, reply_cid, mention, reply_index)
 
     return j(await _guard(_impl, 70))
 

@@ -909,7 +909,7 @@ export function apply(ctx, config) {
       let list = []
       try {
         const r = await call('douyin_comments', { aweme_id: v, num: 20, compact: true, exclude_cids: [...doneCids].slice(-300) }, { timeoutMs: 120_000 })
-        list = Array.isArray(r?.items) ? r.items : []
+        list = (Array.isArray(r?.items) ? r.items : []).map((c, i) => ({ ...c, __idx: i }))
       } catch (e) {
         out.push({ aweme_id: v, ok: false, error: String(e?.message ?? e) })
         continue
@@ -918,8 +918,9 @@ export function apply(ctx, config) {
       const repliedUsers = cfg.replyOncePerUser ? readRepliedUsers() : new Set()
       const seenThisRound = new Set()
       let fresh = list.filter((c) => {
-        if (!c || !c.cid) return false
-        const cid = String(c.cid)
+        if (!c) return false
+        // 图文作品的评论从 DOM 抓来，没有 cid：用「序号 + 文本」当身份，照样能回
+        const cid = String(c.cid || ('idx:' + v + ':' + (c.__idx ?? -1)))
         if (doneCids.has(cid) || seenThisRound.has(cid)) return false
         if (isMine(c.user)) return false                       // 我自己发的评论/回复
         if (cfg.replyOncePerUser && repliedUsers.has(normUser(c.user))) return false  // 同一个人只回一次（默认关）
@@ -935,7 +936,10 @@ export function apply(ctx, config) {
       for (const c of fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))) {
         const { text, sensitive } = pickReply(c.text)
         try {
-          const r = await call('douyin_comment', { aweme_id: v, text, reply_cid: String(c.cid), mention: '' }, { timeoutMs: 150_000 })
+          const payload = { aweme_id: v, text, mention: '' }
+          if (String(c.cid || '').trim()) payload.reply_cid = String(c.cid)
+          else payload.reply_index = Number(c.__idx ?? -1)     // 图文作品的评论没有 cid，按序号回
+          const r = await call('douyin_comment', payload, { timeoutMs: 150_000 })
           const okk = r && r.ok !== false && r.needLogin !== true
           const prev = (readLedger().replies || {})[String(c.cid)] || {}
           noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').slice(0, 60) })
