@@ -1,92 +1,240 @@
-<p align="center"><img src="assets/icon-180.png" width="96" alt="刷抖音"></p>
+# dsh-douyin-life（刷抖音）
 
-<h1 align="center">刷抖音 · dsh-douyin-life</h1>
+> DSH 插件。每天替使用者刷抖音：**刷推荐流 → 看片（转写）→ 读评论 → 挑片写日报**，
+> 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
+> 另一头接他自己的 **ComfyUI** 出片，把成片发到抖音。
 
-<p align="center">每天替你刷一轮抖音：挑片、读评论、写日报；值得的点赞、评论并 @ 你；片子那头接你自己的 ComfyUI。</p>
+**装法**：从插件市场 / npm 装，或把源码目录 link 进 profile。设置页有「刷抖音」一页（**日常 / 偏好 / 互动 / 高级** 四个 tab）。
+
+接口契约见 [`SPEC.md`](./SPEC.md)。发布说明见 [`PUBLISH.md`](./PUBLISH.md)。
 
 ---
 
-## 它是干什么的
-
-装进 DeepSeek Harness 之后，设置里多出一个「刷抖音」页面，和一个会自己干活的「值班」：
-
-- **刷一轮**：按你的高峰/谷时窗口挑几条视频，读标题、字幕、评论区，挑出**值得看**的（不是按播放量排）；
-- **写日报**：每条带链接、时长、点赞/评论数、一句话「为什么值得」；按日期分文件，页面里直接看，不用打开文件；
-- **动手（默认关）**：点赞、评论并 @ 你、投稿视频——三个闸门各自独立，你开了它才动，做完在日报里如实写结果（失败也写）；
-- **回自己视频的评论**：**只回当天发布的视频**（过了当天就不碰），随机挑评论，每条不超过 20 字；敏感话题换成委婉拒绝；
-- **出片**：接你本机的 ComfyUI，把输出目录里最新的成片发到抖音（默认只存草稿）。
-
-它不碰你的密码：登录态留在插件自己的浏览器 profile 里，扫码一次就行。
-
-## 界面
-
-### 日常 —— 什么时候跑、跑几条、它刷过什么
-
-<img src="assets/shot-daily.png" width="640">
-
-- 节假日/周末全算谷时；关了自动跑也能「现在跑一轮」；
-- 「它刷过的视频」按日期分组，卡片是**真截图**（抖音封面链接会过期，所以本地截播放器画面），点进去是原片。
-
-### 偏好 —— 关注什么、用什么口吻
-
-<img src="assets/shot-pref.png" width="640">
-
-- **关注关键词**：留空就用章程里的默认几组（AI / 剪辑 / vlog …）；
-- **日报形态**：完整 / 每条一两行 / 不写文件；
-- **人设提示词**：它写日报、挑片的口吻。留空 = 中性；写「自由、调皮、不循规蹈矩」它就真的是那个腔调。
-
-### 互动 —— 拿号动手的三件事 + 回评论
-
-<img src="assets/shot-interact.png" width="640">
-
-- **自动回我自己视频的评论**：随机读，条数可调（每次几条 / 每天最多回几条），回过的不会重复回；
-- **自动点赞 / 自动评论并 @ 你 / 自动发布视频**：默认**全关**，开了才有上限（每天几条）；
-- 评论那条的意义就是那一下 `@`——没填「要 @ 谁」就不会发。
-
-### 高级 —— 依赖、家目录、浏览器、ComfyUI
-
-<img src="assets/shot-advanced.png" width="640">
-
-- **装主依赖**：建独立 venv 装 `mcp` + `playwright`（用系统 Chrome，不下载浏览器）；
-- **它的地盘**：家目录、今天的报告、打开报告文件夹/家目录/复制路径；
-- **账号与浏览器**：扫码登录、我扫完了；要短信验证时点「收验证码登录」；
-- **ComfyUI**：地址、输出目录（取最新的 `.mp4`）、可选工作流 JSON（填了就先生成再发）。
-
-## 安装
-
-从源码目录挂进 profile（开发用）：
+## 1. 装
 
 ```bash
-dsh plugin --profile desktop add link:D:/path/to/dsh-douyin-life
+# ① 插件市场（推荐）：DSH → 插件 → 搜「刷抖音」→ 安装
+# ② npm
+dsh plugin --profile desktop add dsh-douyin-life
+# ③ 源码目录（开发用）
+dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-life
+# 之后重启一次 dsh 才生效
 ```
 
-之后**重启一次 dsh** 才会加载（设置页是启动时组装的）。插件自带 `cordis.patch.yml`，`package.json` 里声明了 `dsh.bundle.patch`，`dsh plugin add` 直接认。
+首次启用后跑一次 `dy_login_start` 扫码登录（或 `dy_login_sms` 验证码登录）。
+登录态只落在插件自己的浏览器 profile 里，不上传任何地方。
 
-首次使用：设置 → 刷抖音 → 高级 → **装主依赖**（几分钟，进度看安装日志）→ 日常 → **扫码登录**。
+**「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright`（用系统 Chrome，不下载浏览器）→ `环境自检`。
 
-## 它在哪、放在哪
+---
 
-| 东西 | 位置 |
+## 2. 家目录
+
+`%USERPROFILE%\.dsh\douyin-duty\`（或 `$DSH_HOME/douyin-duty/`）
+
+| 文件 / 目录 | 说明 |
 |---|---|
-| 家目录 | `%USERPROFILE%\.dsh\douyin-duty` |
-| 配置 | `<家>/config.json`（面板里改就是改这个） |
-| 日报 | `<家>/out/YYYY-MM-DD.md` |
-| 缩略图缓存 | `<家>/thumbs/<视频id>.jpg` |
-| 记忆 | `<家>/memory/YYYY-MM.md` |
-| 登录态 | `<家>/browser/`（Playwright 持久化 profile） |
+| `config.json` | 插件自己那份配置（面板/工具写） |
+| `state.json` | `{day,count,picked,loggedIn,windows,winTries,commentFails,...}` |
+| `duty.log` | 一行一件事（每次工具调用、每轮结果都有一行） |
+| `out/YYYY-MM-DD.md` | 每轮日报（按 `### <视频id>` 记） |
+| `ledger.json` | 账本：回过的评论 cid、发过的评论、转发过的视频、私信次数 |
+| `replied-cids.txt` / `replied-users.txt` | 去重索引（评论 cid / 已回过的用户） |
+| `thumbs/` | 缩略图（卡片用，30 天自动清） |
+| `media/` | 看片时抽的音轨 + 转写缓存 `*.json`（音轨每天清，json 留着省得重下） |
+| `duty.md` | 值班章程（用户改过就保留，新版落 `duty.md.new`） |
+| `persona.md` | 人设（`personaPrompt` 也在这里） |
+| `mcp_server.py` | Python MCP（从 `vendor/` 铺过来） |
+| `browser/` | Playwright 持久化 profile（登录态在这里） |
+| `.venv/` | Python 依赖环境（`pythonPath` 指过来） |
+| `headless-overlay.yml` | 跑一轮时临时叠给 headless 的 patch |
 
-## 工具（25 个 `dy_*`）
+> ⚠️ 凭证 / 登录态 / 报告一律落在家里，绝不写进插件包（装进 `node_modules` 后只读、升级会覆盖）。
 
-读：`dy_status` `dy_whoami` `dy_hot` `dy_hot_videos` `dy_search` `dy_video` `dy_comments` `dy_my_posts`（今天发过哪些）`dy_my_videos` `dy_comfy_list`
-写（有闸门）：`dy_like` `dy_comment` `dy_reply` `dy_reply_round` `dy_publish`
-其它：`dy_config` `dy_login_start` `dy_login_poll` `dy_login_sms` `dy_login_sms_submit` `dy_remember` `dy_thumb` `dy_run` `dy_selfcheck` `dy_chrome_open`
+---
 
-## 说明
+## 3. 工具（30 个 `dy_*`）
 
-- 视频内容默认标注「内容由AI生成」（抖音发布时会自动勾「自主声明」，B站投稿脚本会勾「含AI生成内容」）；
-- 登录态、日报、缩略图都留在**你本机**，不进仓库；
-- 这个仓库只是插件本体；`node_modules` / `.venv` / 日志都在 `.gitignore` 里。
+### 读 / 看
+| 工具 | 干什么 |
+|---|---|
+| `dy_status` | 今天跑没跑、挑了几条、额度、窗口、登录态、CDP、报告路径 |
+| `dy_config` | 读 / 改配置（不给 `patch` 就是读） |
+| `dy_whoami` | 抖音登录的是谁 |
+| `dy_feed` | **刷推荐流**（打开精选→点推荐→拦 `/module/feed/`），不搜索 |
+| `dy_hot` / `dy_hot_videos` | 热榜 / 某热点下的视频（不用登录） |
+| `dy_search` | 关键词搜视频 |
+| `dy_video` | 单条视频信息（标题/作者/时长/点赞） |
+| `dy_comments` | 评论（接口优先，**图文作品直接 DOM 抠**；不编数据） |
+| `dy_my_posts` / `dy_my_videos` | 我自己发的作品（按天过滤）/ 投稿账本 |
+| `dy_thumb` | 给视频截缩略图 |
+| `dy_comfy_list` | 列 ComfyUI 输出目录里最近的 `.mp4` |
+| `dy_remember` | 往 `<家>/memory/YYYY-MM.md` 记一行 |
 
-## License
+### 动手（都有闸门）
+| 工具 | 干什么 | 闸门 |
+|---|---|---|
+| `dy_like` | 点赞 / 取消 | `autoLike` 或 `force: true` |
+| `dy_comment` | 发评论 / 回复（可 `mention` 真人 @；图文作品用 `reply_index` 按序号回） | `autoComment`+`mentionName` / `autoCommentPlain`，或 `force: true` |
+| `dy_share` | **转发视频给某人**（悬停出分享面板→点那行的「分享」），随后同一会话发「一句话 + 一个表情包」 | 名字在「可以主动发消息的人」里，或 `force: true` |
+| `dy_chat_send` | 私信发一句（续火花用） | 同上 |
+| `dy_chat_sticker` | 私信发表情包（关键词联想，可 `flip` 换一批） | 同上 |
+| `dy_dm_round` | 看一遍私信：谁发来新消息就回一句（每人/每天限额） | `dmReply` |
+| `dy_reply_round` | 回我自己视频下的新评论 | `autoReply` |
+| `dy_reply` | 回复某一条指定评论 | `autoReply` |
+| `dy_publish` | 投稿（`video_path` 或 `latest: true`）；自动勾「内容由 AI 生成」，默认存草稿 | `autoPublish` 或 `force: true` |
 
-MIT
+### 维护
+| 工具 | 干什么 |
+|---|---|
+| `dy_run` | 立刻跑一轮（默认**本机直跑**，不 spawn headless；`mode: "headless"` 才起子会话） |
+| `dy_selfcheck` | 真跑一次环境自检（家目录 / Python / MCP / ComfyUI + 一次登录检查） |
+| `dy_cleanup` | 立刻清一次：临时垃圾、老缩略图、老日报、日志轮转、媒体音轨、浏览器 Cache |
+| `dy_chrome_open` | 把「本人已登录的 Chrome」拉起来并开 CDP 端口（之后所有动作都走它） |
+| `dy_login_start` / `dy_login_poll` | 扫码登录 |
+| `dy_login_sms` / `dy_login_sms_submit` | 短信验证码登录 |
+
+---
+
+## 4. 一轮到底做了什么
+
+```
+谷时窗口（或手动「现在跑一轮」）
+└─ dy_feed 刷一屏推荐（不搜索）
+   └─ 按时长筛：> 划走阈值 直接跳过；> 跳着看阈值 标记 skim
+      └─ 打分排序 → 一轮只挑「一次挑几条」
+         └─ 动作轮转（保证一轮里既有转发也有评论，一条视频只做一件事）：
+            · 评论 @ 你        （每天限额 commentPerDay）
+            · 普通评论（不@）   （每天限额 plainCommentPerDay）
+            · 转发给某人        （每天限额 sharePerDay → 分享 + 一句话 + 一个表情包，同一会话）
+            · 只点赞
+         └─ 要「动手」的那几条先真看片：dy_watch 抽音轨 → faster-whisper 转写
+   └─ 写日报 out/YYYY-MM-DD.md（### <视频id> + 标题/作者/数据/为什么）
+   └─ 动作结果（成功/失败原因）也写进日报，不假装成功
+```
+
+**另一个定时器**（`每隔多少分钟看一次评论和私信`，默认 30 分钟、±20% 抖动）到点会：
+
+1. 续火花（每天 1 次）
+2. 看私信 → 谁发来新消息就回一句（每人 1 条/天、合计 5 条/天）
+3. 看评论 → 回我自己视频下的新评论（`回评论看几天内的作品`，默认 3 天）
+
+---
+
+## 5. 看片（真转写）
+
+- 从 `/aweme/detail/` 的 `play_addr` 拿直链（页面 `currentSrc` 常是 `blob:`，MSE 分片读不了）；
+- `ffmpeg` 抽 16k 单声道音轨（默认只取前 `watchSeconds` 秒），`faster-whisper` 本地转写；
+- 转写结果按 `media/<id>.<秒数>.json` 缓存，**同一条永不重复下载/转写**；音轨每天清空；
+- 模型走 HuggingFace 镜像（`HF_ENDPOINT`），缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`。
+
+**已知限制（实测）**
+
+| 情况 | 结果 |
+|---|---|
+| 普通短视频（有 http 直链） | 能看片，一条约 2~3 秒 |
+| 长视频 / MSE（`blob:`） | 拿不到可读流；抓分片也拼不成可播文件 ⇒ 不整条下载，只看标题+热评 |
+| 图文作品（note） | 评论接口不抛数据 ⇒ **直接 DOM 抠**；「回复某条评论」入口点不到，暂不支持回复 |
+| 短视频评论 | 桌面端没有发送按钮，**回车即发**；发完会**回读确认**，确认不到就算失败（不误报成功） |
+
+---
+
+## 6. 设置字段（四个 tab）
+
+### 日常
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `perDay` | 5 | 每天最多挑几条（0 = 不自动刷） |
+| `peakValley` / `noon` / `night` | true | 谷时自动刷总开关 / 中午 12–14 / 夜间 00:30–08:30 |
+| `pickPerRound` | 2 | 一次挑几条（别一口气刷完） |
+| `skipOverMin` | 60 | 超过多少分钟就划走 |
+| `skimOverMin` | 5 | 超过多少分钟就跳着看（评论/附言会写明） |
+
+### 偏好
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `keywords` | `[]` | 关注关键词（空 = 用章程默认） |
+| `reportLevel` | full | `full` / `brief` / `off` |
+| `personaPrompt` | `''` | 人设提示词（决定它怎么说话） |
+| `memory` | true | 是否写记忆 |
+
+### 互动
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `autoReply` | false | 自动回我自己视频下的评论 |
+| `replyPerRun` / `replyPerDay` | 3 / 10 | 每次回几条 / 每天最多 |
+| `replyRandom` | true | 随机挑（关 = 按顺序） |
+| `replyOncePerUser` | false | 同一个人只回一次 |
+| `replyIntervalMin` | 30 | 每隔多少分钟看一次**评论和私信**（±20% 抖动） |
+| `replyVideoIds` | `''` | 要回的自己的视频 id（一次性/长期看 `replyOneShot`） |
+| `replyWorksDays` | 3 | 回评论看几天内的作品 |
+| `skipLive` | true | 遇到直播就跳过 |
+| `autoLike` | false | 自动点赞 |
+| `autoComment` + `mentionName` | false / `''` | 评论并 @ 你 |
+| `commentPerDay` | 10 | 每天最多几条 @ 评论 |
+| `autoCommentPlain` / `plainCommentPerDay` | true / 10 | 自动评论（**不 @ 人**）/ 每天最多几条 |
+| `shareToNick` / `sharePerDay` | `''` / 10 | 转发给谁 / 每天最多转发几条（与评论互斥） |
+| `shareNote` | `''` | 转发时附带的一句话（空 = 按看片内容/类型自动生成） |
+| `msgAllowTo` | `''` | **可以主动发消息的人**（昵称逗号分隔；空 = 谁都不主动发） |
+| `dmReply` | true | 自动回私信（含陌生人） |
+| `dmReplyPerContact` / `dmReplyPerDay` | 1 / 5 | 每个联系人每天回几条 / 每天合计 |
+| `streakNick` / `streakPerDay` | `''` / 1 | 续火花发给谁 / 每天几次 |
+| `askDoubao` | false | 遇到不会的视频在评论里 @ 豆包 求解答 |
+| `autoPublish` / `publishPerDay` | false / 1 | 自动投稿 / 每天最多投几条 |
+| `publishTitle` / `publishTags` | `''` | 标题模板（`{date}` 会替换）/ 默认话题 |
+| `publishDraft` | true | 投稿默认存草稿 |
+
+### 高级
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `localRound` | true | 「跑一轮」用本机直跑（不 spawn headless） |
+| `watchBeforeAct` / `watchSeconds` | true / 90 | 动手前先真看片 / 最多听前多少秒 |
+| `autoClean` | true | 每天自动清理一次 |
+| `pythonPath` | `python` | `pythonPath` → `.venv` → `uv` → `python` |
+| `cdpUrl` / `cdpPort` / `chromePath` | `9222` / 9222 / `''` | 复用「本人已登录的 Chrome」 |
+| `headlessProfile` / `headlessModel` / `overlayMcp` / `workspace` | headless / `''` / true / `''` | 起子会话时的参数 |
+| `dshBin` | `''` | dsh 的 bin.js（空 = 自动探测，含 `app.asar` 路径） |
+| `comfyUrl` / `comfyOutputDir` | `127.0.0.1:8188` / ComfyUI output | ComfyUI 地址 / 成片目录 |
+| `comfyWorkflow` / `comfyWaitSeconds` / `comfyListLimit` | `''` / 900 / 20 | 可选工作流 / 等出片上限 / 列表条数 |
+
+> 每个字段都带 `.extra('volatile', true)`（否则 `settings.update()` 报 `has no volatile fields`）。
+> **新增字段必须同时改四处**：`Config`（schema）、`DEFAULTS`、`clampPatch`、`client.js` 的 load/save，
+> 少一处就是「填了没用」——`selfcheck.mjs` 有断言盯着这件事。
+
+---
+
+## 7. HTTP（设置页用）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/douyin-duty/status` | 状态（config / windows / nextWindow / gates / cdp / doing） |
+| GET / POST | `/api/douyin-duty/config` | 读 / 写配置 |
+| POST | `/api/douyin-duty/run` | 立刻跑一轮（默认本机直跑；返回 `picked` / `actions` / `error`） |
+| GET | `/api/douyin-duty/thumb?id=` | 缩略图（没有就现截） |
+| GET | `/api/douyin-duty/watched` | 刷过的视频（按日期分组，卡片用） |
+| GET | `/api/douyin-duty/report/latest` | 最近一份日报 |
+| POST | `/api/douyin-duty/login/qr` · `/login/poll` | 扫码登录 |
+
+---
+
+## 8. 环境问题怎么降级
+
+| 情况 | 表现 |
+|---|---|
+| headless 子进程写系统 Temp 被拒（`EPERM mkdtemp`） | 插件把 `TEMP/TMP/TMPDIR` 指到 `<家>/.tmp`；MCP 子进程也带同样变量 |
+| 沙箱不让子进程开命名管道（Playwright `WinError 5`） | 跑一轮时给子进程 `DSH_SANDBOX=danger-full-access`；跑不动就退回**本机直跑**（`localRound`） |
+| Chrome 没带调试端口 | `dy_status.cdp.ok=false` + 提示；`dy_chrome_open` 拉起来 |
+| MCP 起不来 / Python 缺 | 工具返回 `{ok:false, error, hint}`，**不抛异常** |
+| 抖音没登录 | `{ok:false, needLogin:true, hint}` |
+| 评论发不出去 | **回读确认**不到就报失败；连续失败 2 次当轮停止评论（点赞/转发照做） |
+| ComfyUI 目录不存在 / 出片超时 | `dy_comfy_list` 给 `exists:false`；`dy_publish` 给 `ok:false` + 怎么改 |
+
+加载路径每一步都包 `try/catch`：**插件加载失败比少个功能糟得多**。
+
+---
+
+## 9. 自检
+
+```bash
+node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（30 个）/ 路由通 / 结构对 / 闸门默认关
+```
