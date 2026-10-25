@@ -664,13 +664,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '转发后跟一条消息 + 表情包'),
                 Note('一个开关管两件事：转发完是否立刻发「一句话 + 一个表情包」（同一条会话，不重复找人）。关掉就只转发不吱声')),
-              h('button', {
-                'data-dy-btn': '',
-                onClick: () => set('shareWithNote', !(draft.shareWithNote !== false)),
-                style: draft.shareWithNote !== false
-                  ? { background: 'var(--dsh-accent, #4b6bfb)', color: '#fff', borderColor: 'transparent', minWidth: '64px' }
-                  : { minWidth: '64px' },
-              }, draft.shareWithNote !== false ? '开' : '关')),
+              Sw({ on: draft.shareWithNote !== false, onChange: (v) => set('shareWithNote', v) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '续火花：每天给谁发一个表情包'),
                 Note('留空 = 不续。只发表情包，不主动发文字')),
