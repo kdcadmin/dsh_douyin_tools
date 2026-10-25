@@ -453,13 +453,68 @@ async def _guard(factory, timeout: float = DEFAULT_TIMEOUT) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _goto(page, url: str, settle: float = 3.0) -> None:
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-    except Exception as exc:
-        log(f"goto {url} -> {type(exc).__name__}: {exc}")
-        raise
+    """跳页面，容忍抖音常见的 ERR_ABORTED / 连接被重置（重试两次，最后用 commit 兜底）。"""
+    last = None
+    for attempt in range(3):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            last = None
+            break
+        except Exception as exc:
+            last = exc
+            msg = f"{type(exc).__name__}: {exc}"
+            # 已经跳到目标页（只是资源没加载完）就算成功
+            try:
+                cur = page.url or ""
+            except Exception:
+                cur = ""
+            if url.split("?")[0].rstrip("/") in cur:
+                log(f"goto {url} 容忍：{msg[:80]}")
+                last = None
+                break
+            log(f"goto {url} 第 {attempt + 1} 次失败：{msg[:100]}")
+            await page.wait_for_timeout(1500)
+            if attempt == 2:
+                try:
+                    await page.goto(url, wait_until="commit", timeout=20000)
+                    last = None
+                except Exception as exc2:
+                    last = exc2
+    if last is not None:
+        raise last
     if settle > 0:
         await page.wait_for_timeout(int(settle * 1000))
+
+
+async def _sweep_tabs(page, keep_max: int = 3) -> None:
+    """把开出来的多余标签页收掉（之前共用 Chrome 时泄漏到 39 个标签，越跑越卡）。"""
+    try:
+        ctx = page.context
+        pages = list(ctx.pages)
+        if len(pages) <= keep_max:
+            return
+        keep = {id(page)}
+        # 保留当前页 + 第一个 douyin 页
+        for pg in pages:
+            try:
+                if "douyin.com" in (pg.url or "") and len(keep) < 2:
+                    keep.add(id(pg))
+                    break
+            except Exception:
+                continue
+        closed = 0
+        for pg in pages:
+            if id(pg) in keep:
+                continue
+            try:
+                await pg.close()
+                closed += 1
+            except Exception:
+                continue
+        if closed:
+            log(f"收掉多余标签 {closed} 个（剩 {len(ctx.pages)}）")
+    except Exception:
+        pass
 
 
 async def _first_of(page, selectors, timeout_ms: int = 1200):
@@ -3077,120 +3132,65 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
 
 
 async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
-    """私信：首页点右上「消息」图标（data-e2e=im-entry）→ 右侧抽屉 → 点那个人 → 「发送消息」框 → 回车。
+    """私信发一句：首页 → 点「消息」图标开抽屉 → 点那个人 → 输入 → 回车。
 
-    2026-10-25 使用者截图 + 实测：抽屉里的会话列表直接有好友；输入框 placeholder 是「发送消息」。
-    之前失败的原因是把昵称打进了页面顶部那个大搜索框。
+    2026-10-26 重写：之前那段内联 JS 里 const 重复声明会抛
+    “Assignment to constant variable.”，这里改成最小实现。
     """
-    notes = []
-    (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
-    await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
+    notes: list[str] = []
+    await _goto(page, "https://www.douyin.com/jingxuan", settle=3.0)
     st = await _login_state(page, ctx)
     if not st["loggedIn"]:
         return _need_login("私信要登录", nickname=nickname)
 
-    # 1) 打开消息抽屉 —— 必须真实鼠标点击（JS .click() 不触发，2026-10-25 实测）
     icon = page.locator('[data-e2e="im-entry"]').first
     if not await icon.count():
-        return _err("没找到「消息」图标（data-e2e=im-entry）", url=page.url, notes=notes)
+        return _err("没找到「消息」图标", url=page.url, notes=notes)
     box = await icon.bounding_box()
     if not box:
         return _err("「消息」图标没有尺寸", url=page.url, notes=notes)
     await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    await page.wait_for_timeout(400)
+    await page.wait_for_timeout(300)
     await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    # 抽屉是否打开：看右侧有没有那个「搜索」输入框（比数文案可靠）
+
     opened = False
     for _ in range(14):
         await page.wait_for_timeout(500)
         opened = await page.evaluate(
-            """() => { const W = innerWidth;
-                return Array.from(document.querySelectorAll('input'))
-                    .some((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.5); }"""
+            "() => { const w = innerWidth; return Array.from(document.querySelectorAll('input')).some(function (e) { var r = e.getBoundingClientRect(); return (e.placeholder || '').indexOf('搜索') >= 0 && r.x > w * 0.5; }); }"
         )
         if opened:
             break
-    notes.append("抽屉已打开" if opened else "抽屉没打开")
     if not opened:
         return _err("点「消息」后抽屉没打开", url=page.url, notes=notes)
 
-    nickKey = "".join(ch for ch in str(nickname) if ch.strip())[:4]
-    openedInfo = await page.evaluate(
-        "() => { const t = document.body.innerText || ''; return { drawer: t.indexOf('陌生人消息') >= 0 || t.indexOf('分享[视频]') >= 0, tail: t.slice(-60) }; }"
+    key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
+    row = await page.evaluate(
+        "function (k) { var w = innerWidth; var all = Array.from(document.querySelectorAll('div,li')); var pick = null;"
+        " for (var i = 0; i < all.length; i++) { var e = all[i]; var r = e.getBoundingClientRect();"
+        " var txt = (e.innerText || '').replace(/\\s+/g, '');"
+        " if (r.x > w * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && txt.indexOf(k) >= 0) { pick = r; break; } }"
+        " if (!pick) return null; return { x: pick.x + 30, y: pick.y + pick.height / 2 }; }",
+        key,
     )
-    notes.append("抽屉状态：" + str(openedInfo.get("drawer")))
-    hit = 0
-    notes.append(f"抽屉搜索框 {hit} 个")
-    await page.wait_for_timeout(2500)
+    if not row:
+        return _err(f"抽屉里没有「{nickname}」", url=page.url, notes=notes)
+    await page.mouse.click(row["x"], row["y"])
+    await page.wait_for_timeout(3000)
 
-    rowBox = await page.evaluate(
-        """(nick) => {
-            const W = window.innerWidth;
-            const key = nick.replace(/\s+/g, '').slice(0, 4);
-            const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
-                const r = e.getBoundingClientRect();
-                const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-                return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.replace(/\s+/g, '').indexOf(key) >= 0;
-            });
-            if (!rows.length) return null;
-            rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
-            const r = rows[0].getBoundingClientRect();
-            return { x: r.x + 30, y: r.y + r.height / 2, t: (rows[0].innerText || '').replace(/\s+/g, ' ').slice(0, 30) };
-        }""",
-        nickname,
-    )
-    clicked = (rowBox or {}).get("t")
-    if rowBox:
-        await page.mouse.click(rowBox["x"], rowBox["y"])
-        await page.wait_for_timeout(2000)
-        # 有「发消息」按钮就再点一次它（真实鼠标）
-        btnBox = await page.evaluate(
-            """() => {
-                const W = window.innerWidth;
-                const b = Array.from(document.querySelectorAll('div,span,button')).find((e) => {
-                    const r = e.getBoundingClientRect();
-                    return (e.innerText || '').trim() === '发消息' && r.x > W * 0.5 && r.width > 20;
-                });
-                if (!b) return null;
-                const r = b.getBoundingClientRect();
-                return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-            }"""
-        )
-        if btnBox:
-            await page.mouse.click(btnBox["x"], btnBox["y"])
-            await page.wait_for_timeout(2000)
-            notes.append("点了「发消息」")
-    # 3) 等输入框（placeholder=发送消息）
     ed = None
     for _ in range(20):
-        await page.wait_for_timeout(600)
-        # 实测：聊天输入框是 **contenteditable 的 DIV**（属性可能是空值），且在抽屉区域（x > 屏宽 50%）
-        ed = await page.evaluate_handle(
-            """() => {
-                const W = window.innerWidth, H = window.innerHeight;
-                const list = Array.from(document.querySelectorAll('div[contenteditable], textarea, input'));
-                const hit = list.find((e) => {
-                    const r = e.getBoundingClientRect();
-                    const ph = e.placeholder || '';
-                    const isSend = ph.indexOf('发送消息') >= 0;
-                    return (isSend || e.getAttribute('contenteditable') !== null) &&
-                           r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45;
-                });
-                return hit || null;
-            }"""
+        await page.wait_for_timeout(700)
+        handle = await page.evaluate_handle(
+            "() => { var w = innerWidth, h = innerHeight; var list = Array.from(document.querySelectorAll('div[contenteditable], textarea, input'));"
+            " for (var i = 0; i < list.length; i++) { var e = list[i]; var r = e.getBoundingClientRect(); var ph = e.placeholder || '';"
+            " if ((ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) && r.width > 100 && r.height > 16 && r.x > w * 0.4 && r.y > h * 0.45) return e; } return null; }"
         )
-        ed = ed.as_element() if ed else None
+        ed = handle.as_element() if handle else None
         if ed is not None:
             break
     if ed is None:
-        cands = await page.evaluate(
-            """() => Array.from(document.querySelectorAll('input,textarea,div[contenteditable]')).map((e) => ({
-                   tag: e.tagName, ce: e.getAttribute('contenteditable'), ph: e.placeholder || '',
-                   w: e.getBoundingClientRect().width | 0, h: e.getBoundingClientRect().height | 0 })).slice(0, 10)"""
-        )
-        notes.append("候选输入框：" + str(cands)[:300])
-        await page.screenshot(path=str(HOME / "thumbs" / "_chat.png"))
-        return _err("没等到「发送消息」输入框", url=page.url, notes=notes)
+        return _err("没找到消息输入框（会话可能没打开）", url=page.url, notes=notes)
 
     try:
         await ed.click()
@@ -3198,7 +3198,7 @@ async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
         await page.wait_for_timeout(500)
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(1500)
-        return _ok(to=nickname, sent=text, notes=notes)
+        return _ok(to=nickname, sent=text, notes=notes or None)
     except Exception as exc:
         return _err(f"发送失败：{type(exc).__name__}: {exc}", notes=notes)
 
@@ -3255,10 +3255,19 @@ async def douyin_inbox(limit: int = 12) -> str:
         items = await page.evaluate(
             """(limit) => {
                 const W = innerWidth;
-                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
+                // 先找到抽屉容器（含右侧那个「搜索」输入框的那个面板），只在它里面找会话行
+                const inp = Array.from(document.querySelectorAll('input'))
+                    .find((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.5);
+                let root = inp || document.body;
+                for (let i = 0; i < 8 && root.parentElement; i++) root = root.parentElement;
+                const TIME = /(刚刚|\d+\s*分钟前|\d+\s*小时前|昨天|前天|\d{2}\/\d{2}|\d{4}-\d{2}-\d{2})/;
+                const rows = Array.from(root.querySelectorAll('div,li')).filter((e) => {
                     const r = e.getBoundingClientRect();
                     const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-                    return r.x > W * 0.5 && r.width > 140 && r.height >= 40 && r.height <= 110 && t.length > 1 && t.length < 80;
+                    if (r.x < W * 0.5 || r.height < 40 || r.height > 110 || t.length < 3 || t.length > 80) return false;
+                    if (!TIME.test(t)) return false;            // 会话行一定带时间
+                    if (/[#＃]/.test(t)) return false;           // 推荐视频标题常带话题
+                    return true;
                 });
                 const out = [];
                 for (const e of rows) {

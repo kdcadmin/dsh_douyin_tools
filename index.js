@@ -298,6 +298,7 @@ export function apply(ctx, config) {
     if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
     if ('plainCommentPerDay' in p) p.plainCommentPerDay = Math.max(0, Math.min(Number(p.plainCommentPerDay) || 0, 30))
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
+    if ('dmReplyOnlyTo' in p) p.dmReplyOnlyTo = String(p.dmReplyOnlyTo || '').slice(0, 120)
     if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 100))
@@ -777,7 +778,7 @@ export function apply(ctx, config) {
     let titles = []
     let source = 'none'
     try {
-      const r = await call('douyin_my_posts', { days: Math.max(1, Number(cfg.replyWorksDays) || 1) }, { timeoutMs: 90_000 })
+      const r = await call('douyin_my_posts', { days: Math.max(1, Math.min(Number(cfg.replyWorksDays) || 3, 90)) }, { timeoutMs: 90_000 })
       const list = Array.isArray(r?.items) ? r.items : []
       ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
       titles = list.map((x) => x.title)
@@ -2282,6 +2283,12 @@ export function apply(ctx, config) {
       const preview = String(row.text || '').replace(name, '').trim()
       if (!name || /^(充钻石|消息|通知)/.test(name)) continue
       if (isMine(name)) continue                                   // 自己的会话不回
+      // ⭐ 只回指定的人（留空 = 谁发来都回）
+      const only = String(cfg.dmReplyOnlyTo || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (only.length) {
+        const k = String(name || '').replace(/\s+/g, '').slice(0, 4)
+        if (!only.some((n) => String(n).replace(/\s+/g, '').slice(0, 4) === k)) continue
+      }
       if (usedToday >= perDay) break
       const rec = led.dm[name] || { count: 0, lastSeen: '' }
       if (rec.day !== today) { rec.count = 0; rec.day = today }
