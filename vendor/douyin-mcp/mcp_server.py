@@ -1476,12 +1476,26 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         if is_note:
             await _goto(page, NOTE_URL.format(aweme_id=aid), settle=3.5)
             notes.append("这是图文作品，改用 /note/ 页面")
-            # 打开右侧评论面板（图文页默认不展开）
-            try:
+            # 打开右侧评论面板：点右侧竖排那个「评论」图标（data-e2e 带 comment 的那个）
+            opened = False
+            for sel in ["[data-e2e*='comment']", "[data-e2e='feed-comment-icon']"]:
+                loc = page.locator(sel).first
+                try:
+                    if await loc.count():
+                        bx = await loc.bounding_box()
+                        if bx:
+                            await page.mouse.click(bx["x"] + bx["width"] / 2, bx["y"] + bx["height"] / 2)
+                            await page.wait_for_timeout(2500)
+                            opened = await page.evaluate("() => (document.body.innerText || '').indexOf('全部评论') >= 0")
+                            if opened:
+                                break
+                except Exception:
+                    continue
+            if not opened:
                 await _click_text(page, "评论", exact=True)
                 await page.wait_for_timeout(2000)
-            except Exception:
-                pass
+                opened = await page.evaluate("() => (document.body.innerText || '').indexOf('全部评论') >= 0 || !!document.querySelector('input[placeholder*=\"留下你的精彩评论\"]')")
+            notes.append("评论面板已打开" if opened else "评论面板没打开")
 
         if reply_index is not None and int(reply_index) >= 0:
             # ⭐ 按序号回（图文作品 XHR 不给评论、也没有 data-e2e 容器）
@@ -2476,6 +2490,147 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
     if dropped:
         notes.append(f"跳过 {dropped} 条直播")
     return _ok(items=items, count=len(items), source="feed", notes=notes or None)
+
+# ---------------------------------------------------------------------------
+# 真·看视频：抓媒体 → 抽音轨 → 转写
+# ---------------------------------------------------------------------------
+
+def _ffmpeg_path() -> str:
+    import shutil
+    for c in ("ffmpeg", "ffmpeg.exe"):
+        hit = shutil.which(c)
+        if hit:
+            return hit
+    cand = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    for p in cand.glob("Gyan.FFmpeg*/**/bin/ffmpeg.exe"):
+        return str(p)
+    return "ffmpeg"
+
+
+async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
+    """把视频真看一遍：下载媒体 → 抽音轨 → faster-whisper 转写。
+
+    seconds: 最多转写前多少秒（默认 300s；跳着看时用这个截断）
+    """
+    aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
+    media_dir = HOME / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    notes: list[str] = []
+    url_hit: dict = {}
+
+    def on_resp(r):
+        u = r.url or ""
+        if not url_hit and ("/video/tos/" in u or "mime_type=video" in u) and ".mp4" not in u[:20]:
+            url_hit.setdefault("url", u)
+
+    page.on("response", on_resp)
+    try:
+        await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
+        await page.wait_for_timeout(2500)
+        # 让 <video> 开始播，浏览器才会去拉媒体流
+        try:
+            await page.evaluate("() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play && v.play(); } }")
+        except Exception:
+            pass
+        for _ in range(20):
+            if url_hit.get("url"):
+                break
+            await page.wait_for_timeout(500)
+    finally:
+        try:
+            page.remove_listener("response", on_resp)
+        except Exception:
+            pass
+
+    dur = 0
+    try:
+        dur = float(await page.evaluate("() => { const v = document.querySelector('video'); return v ? v.duration : 0; }") or 0)
+    except Exception:
+        pass
+    url = url_hit.get("url") or ""
+    if not url:
+        return _err("没抓到视频流地址（可能被风控或未登录）", aweme_id=aid, duration=dur, notes=notes or None)
+
+    out_mp4 = media_dir / f"{aid}.mp4"
+    try:
+        resp = await page.request.get(url, timeout=120000)
+        if resp.status != 200:
+            return _err(f"下载视频失败 HTTP {resp.status}", aweme_id=aid, notes=notes or None)
+        out_mp4.write_bytes(await resp.body())
+    except Exception as exc:
+        return _err(f"下载视频出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes or None)
+    notes.append(f"下载 {out_mp4.stat().st_size // 1024} KB")
+
+    # 抽音轨（单声道 16k，whisper 要的）
+    wav = media_dir / f"{aid}.wav"
+    ff = _ffmpeg_path()
+    try:
+        import subprocess
+        cmd = [ff, "-y", "-i", str(out_mp4), "-t", str(max(10, int(seconds))), "-vn", "-ac", "1", "-ar", "16000", str(wav)]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        if r.returncode != 0 or not wav.exists():
+            return _err("抽音轨失败：" + (r.stderr or b'')[-200:].decode("utf-8", "replace"), aweme_id=aid, notes=notes)
+    except Exception as exc:
+        return _err(f"抽音轨出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
+
+    text = ""
+    try:
+        import wave
+        import numpy as np
+        model_name = os.environ.get("DOUYIN_WHISPER_MODEL", "base")
+        model = _whisper_model(model_name)
+        # ⭐ 不用 av 解码（这台机器上 av ↔ faster-whisper 的 metadata_errors 参数不兼容），
+        #   自己把 16k 单声道 wav 读成 numpy 再喂给模型。
+        with wave.open(str(wav), "rb") as w:
+            sr = w.getframerate()
+            raw = w.readframes(w.getnframes())
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        if sr != 16000:
+            notes.append(f"注意：采样率 {sr}（ffmpeg 已按 16k 输出，正常不该出现）")
+        segs, info = model.transcribe(audio, language="zh", vad_filter=True, beam_size=1)
+        parts = [s.text.strip() for s in segs if s.text and s.text.strip()]
+        text = " ".join(parts)[:2000]
+        notes.append(f"whisper={model_name} 语言={info.language} 片段={len(parts)} 时长={round(len(audio)/max(1,sr),1)}s")
+    except Exception as exc:
+        return _err(f"转写出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes, downloaded=str(out_mp4))
+
+    try:
+        wav.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return _ok(aweme_id=aid, duration=round(dur, 1), transcript=text,
+               chars=len(text), video_file=str(out_mp4), notes=notes)
+
+
+_WHISPER_CACHE: dict = {}
+
+
+def _whisper_model(name: str):
+    # 国内直连 huggingface 常常拉不动 ⇒ 默认走镜像（可用 HF_ENDPOINT 覆盖）
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    # 模型缓存放到插件家里（C:\Users\...\.cache 经常没写权限）
+    os.environ.setdefault("HF_HOME", str(HOME / "models"))
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HOME / "models" / "hub"))
+    if name not in _WHISPER_CACHE:
+        from faster_whisper import WhisperModel
+        _WHISPER_CACHE[name] = WhisperModel(name, device="cpu", compute_type="int8")
+    return _WHISPER_CACHE[name]
+
+
+@mcp.tool()
+async def douyin_watch(aweme_id: str, seconds: int = 300) -> str:
+    """真·看视频：下载这条视频 → 抽音轨 → 本地转写成文字（faster-whisper）。
+
+    用途：评论/转发之前先「看完」，别只看标题。
+    seconds: 最多转写前多少秒（长视频跳着看就用它截断）
+    """
+    async def _impl():
+        ctx = await _browser.context()
+        page = await _browser.page()
+        return await _watch_core(page, aweme_id, seconds)
+
+    return j(await _guard(_impl, 600))
+
 
 @mcp.tool()
 async def douyin_feed(num: int = 10, scrolls: int = 6) -> str:
