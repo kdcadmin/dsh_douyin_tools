@@ -31,6 +31,28 @@ window.__ModuleLoader__.load({
       body: JSON.stringify(body || {}),
     }))
 
+    const MEM_CSS = `
+  .dym-root{display:flex;flex-direction:column;gap:10px}
+  .dym-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .dym-title{font-size:15px;font-weight:600;letter-spacing:.2px}
+  .dym-badge{font-size:11px;opacity:.6;border:1px solid rgba(128,128,128,.35);border-radius:999px;padding:1px 8px}
+  .dym-chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+  .dym-chip{font-size:11.5px;opacity:.85;border:1px solid rgba(128,128,128,.3);border-radius:999px;padding:2px 9px}
+  .dym-chip b{font-weight:600}
+  .dym-tabs{display:flex;gap:6px;flex-wrap:wrap}
+  .dym-tab{font-size:12.5px;padding:5px 12px;border-radius:999px;border:1px solid rgba(128,128,128,.3);background:transparent;color:inherit;cursor:pointer}
+  .dym-tab.on{background:var(--dsh-accent,#4b6bfb);border-color:transparent;color:#fff}
+  .dym-card{border:1px solid rgba(128,128,128,.22);border-radius:12px;padding:10px 12px;font-size:12.5px;line-height:1.6;white-space:pre-wrap;margin-bottom:8px}
+  .dym-kv{display:flex;gap:8px;margin-bottom:3px}
+  .dym-k{opacity:.6;min-width:88px}
+  .dym-graph{border:1px solid rgba(128,128,128,.22);border-radius:12px;overflow:hidden;position:relative;background:rgba(128,128,128,.04)}
+  .dym-graph svg{display:block;cursor:grab;touch-action:none}
+  .dym-graph svg.dragging{cursor:grabbing}
+  .dym-gctrl{position:absolute;right:8px;bottom:8px;display:flex;gap:6px}
+  .dym-gbtn{width:28px;height:28px;border-radius:8px;border:1px solid rgba(128,128,128,.35);background:var(--dsh-bg,#1b1d22);color:inherit;font-size:14px;line-height:1;cursor:pointer}
+  .dym-tip{position:absolute;left:10px;bottom:10px;font-size:11.5px;opacity:.7}
+`
+
     const CSS = `
 [data-dy-page]{display:flex;flex-direction:column;gap:14px;padding:2px 2px 10px;max-width:660px;}
 [data-dy-top]{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
@@ -862,7 +884,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const style = document.createElement('style')
         style.setAttribute('data-plugin-css', 'dsh-douyin-life')
-        style.textContent = CSS
+        style.textContent = CSS + '\n' + MEM_CSS
         document.head.appendChild(style)
         try { ctx.effect(() => () => style.remove(), 'dsh-douyin-life: 设置页样式') } catch {}
 
@@ -873,204 +895,257 @@ window.__ModuleLoader__.load({
           () => h(Panel),
         ))
 
-        // ⭐ 2026-10-26 使用者：「记忆塞到设置左侧列表里，之前那个一重启就没了」
-        //   + 「之前的那些 UI 也放进来」→ 直接调记忆插件的 memory.* RPC：
-        //   角色卡 / 时间线 / 图谱 / 原始记忆（读 <家>/memory/*.md）
+        // ⭐ 2026-10-26 使用者：记忆塞进设置左侧列表；UI 照记忆插件那套（标题/徽章/胶囊 tab/卡片/力导向图谱）
         const memCall = async (method, params) => {
           const conn = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) || ctx.connection
           if (!conn?.rpc?.call) throw new Error('没有 connection.rpc')
           const raw = await conn.rpc.call('/api', 'memory.' + method, params || {})
-          // 宿主会把结果包成 {ok, value}
           if (raw && typeof raw === 'object' && 'ok' in raw) return raw.value !== undefined ? raw.value : raw
           return raw
         }
 
         const MemTabs = [
+          { id: 'graph', label: '图谱' },
           { id: 'character', label: '角色卡' },
           { id: 'timeline', label: '时间线' },
-          { id: 'graph', label: '图谱' },
           { id: 'raw', label: '原始记录' },
         ]
 
-        const MemBox = ({ children }) => h('div', {
-          style: { fontSize: '12.5px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px',
-            border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '10px', whiteSpace: 'pre-wrap' },
-        }, children)
+        const Card = ({ children, style }) => h('div', { className: 'dym-card', style }, children)
+        const KV = (k, v) => h('div', { className: 'dym-kv' },
+          h('span', { className: 'dym-k' }, k), h('span', null, String(v ?? '—')))
+
+        const MemGraph = ({ data, busy }) => {
+          const wrapRef = React.useRef(null)
+          const [size, setSize] = React.useState({ w: 640, h: 380 })
+          const posRef = React.useRef(null)
+          const viewRef = React.useRef({ k: 1, x: 0, y: 0 })
+          const dragRef = React.useRef(null)
+          const [, tick] = React.useState(0)
+          const [sel, setSel] = React.useState(null)
+
+          React.useEffect(() => {
+            const el = wrapRef.current
+            if (!el) return
+            const w = el.clientWidth || 640
+            setSize({ w, h: 380 })
+          }, [])
+
+          // 力导向：只在数据变化时算一次（240 帧）
+          React.useEffect(() => {
+            posRef.current = null
+            viewRef.current = { k: 1, x: 0, y: 0 }
+            const nodes = (data && data.nodes) || []
+            if (!nodes.length) return
+            const W = size.w, H = size.h
+            const ns = nodes.map((n, i) => {
+              const ang = (i / nodes.length) * Math.PI * 2
+              const r0 = Math.min(W, H) * 0.3
+              return {
+                id: n.id, label: n.label || n.name || n.id, type: n.type || '', importance: n.importance || 0,
+                tags: n.tags || [], created_at: n.created_at || '',
+                x: W / 2 + Math.cos(ang) * r0 * (0.45 + Math.random() * 0.55),
+                y: H / 2 + Math.sin(ang) * r0 * (0.45 + Math.random() * 0.55),
+                vx: 0, vy: 0, r: 5 + Math.min(1, Math.max(0, n.importance || 0)) * 13,
+              }
+            })
+            const byId = {}
+            for (const n of ns) byId[n.id] = n
+            const es = ((data && data.edges) || []).map((e) => ({ a: byId[e.source], b: byId[e.target] })).filter((e) => e.a && e.b)
+            posRef.current = { nodes: ns, edges: es, home: ns.map((n) => ({ x: n.x, y: n.y })) }
+            let alpha = 1, raf = 0, ticks = 0
+            const step = () => {
+              const s = posRef.current
+              if (!s) return
+              alpha *= 0.972
+              for (let i = 0; i < s.nodes.length; i++) {
+                for (let j = i + 1; j < s.nodes.length; j++) {
+                  const a = s.nodes[i], b = s.nodes[j]
+                  const dx = b.x - a.x, dy = b.y - a.y
+                  const d2 = dx * dx + dy * dy || 1
+                  const d = Math.sqrt(d2)
+                  const f = Math.min(5, 2600 / d2) * alpha
+                  const fx = (dx / d) * f, fy = (dy / d) * f
+                  a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy
+                }
+              }
+              for (const e of s.edges) {
+                const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y
+                const d = Math.sqrt(dx * dx + dy * dy) || 1
+                const f = (d - 118) * 0.012 * alpha
+                e.a.vx += (dx / d) * f; e.a.vy += (dy / d) * f
+                e.b.vx -= (dx / d) * f; e.b.vy -= (dy / d) * f
+              }
+              for (const n of s.nodes) {
+                n.vx += (W / 2 - n.x) * 0.0018 * alpha
+                n.vy += (H / 2 - n.y) * 0.0018 * alpha
+                n.vx *= 0.86; n.vy *= 0.86
+                n.x = Math.max(28, Math.min(W - 28, n.x + n.vx))
+                n.y = Math.max(28, Math.min(H - 28, n.y + n.vy))
+              }
+              ticks += 1
+              tick((v) => v + 1)
+              if (ticks < 240) raf = requestAnimationFrame(step)
+            }
+            raf = requestAnimationFrame(step)
+            return () => cancelAnimationFrame(raf)
+          }, [data, size.w, size.h])
+
+          const sim = posRef.current
+          const view = viewRef.current
+          const zoomAt = (factor, cx, cy) => {
+            const v = viewRef.current
+            const k2 = Math.max(0.35, Math.min(3.5, v.k * factor))
+            const wx = (cx - v.x) / v.k, wy = (cy - v.y) / v.k
+            viewRef.current = { k: k2, x: cx - wx * k2, y: cy - wy * k2 }
+            tick((n) => n + 1)
+          }
+          const onWheel = (e) => {
+            e.preventDefault()
+            const r = e.currentTarget.getBoundingClientRect()
+            zoomAt(e.deltaY < 0 ? 1.12 : 0.89, e.clientX - r.left, e.clientY - r.top)
+          }
+          const onDown = (e, node) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            dragRef.current = { node, sx: e.clientX, sy: e.clientY, ox: node ? node.x : viewRef.current.x, oy: node ? node.y : viewRef.current.y, rect: r }
+            e.currentTarget.classList?.add('dragging')
+            try { e.currentTarget.setPointerCapture?.(e.pointerId) } catch { /* 忽略 */ }
+          }
+          const onMove = (e) => {
+            const d = dragRef.current
+            if (!d) return
+            const dx = e.clientX - d.sx, dy = e.clientY - d.sy
+            if (d.node) {
+              const k = viewRef.current.k || 1
+              d.node.x = d.ox + dx / k
+              d.node.y = d.oy + dy / k
+            } else {
+              viewRef.current = { ...viewRef.current, x: d.ox + dx, y: d.oy + dy }
+            }
+            tick((n) => n + 1)
+          }
+          const onUp = (e) => {
+            dragRef.current = null
+            e.currentTarget?.classList?.remove('dragging')
+          }
+          const reset = (relayout) => {
+            const s = posRef.current
+            if (!s) return
+            if (relayout && s.home) s.nodes.forEach((n, i) => { n.x = s.home[i].x; n.y = s.home[i].y; n.vx = 0; n.vy = 0 })
+            viewRef.current = { k: 1, x: 0, y: 0 }
+            tick((n) => n + 1)
+          }
+
+          if (!sim) return h(Card, null, busy ? '读取中…' : '（图谱为空）')
+          const color = (ty) => (ty === 'person' ? '#7c6ff7' : ty === 'preference' ? '#f0a35e'
+            : ty === 'event' ? '#4bb6a8' : ty === 'fact' ? '#5b8def' : '#9aa3b2')
+          return h('div', null,
+            h(Card, null, '节点 ' + sim.nodes.length + ' 个 · 关系 ' + sim.edges.length + ' 条 · 滚轮缩放，拖空白移动，拖节点可挪，右下角 ⟲ 复位'),
+            h('div', { className: 'dym-graph', ref: wrapRef },
+              h('svg', {
+                width: '100%', height: size.h, viewBox: '0 0 ' + size.w + ' ' + size.h,
+                onWheel, onPointerDown: (e) => onDown(e, null), onPointerMove: onMove, onPointerUp: onUp, onPointerLeave: onUp,
+              },
+                h('g', { transform: 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')' },
+                  sim.edges.map((e, i) => h('line', {
+                    key: 'e' + i, x1: e.a.x, y1: e.a.y, x2: e.b.x, y2: e.b.y,
+                    stroke: 'rgba(140,150,170,.4)', strokeWidth: 1 / view.k,
+                  })),
+                  sim.nodes.map((n, i) => h('g', {
+                    key: 'n' + i, style: { cursor: 'pointer' },
+                    onPointerDown: (e) => { e.stopPropagation(); onDown(e, n) },
+                    onClick: () => setSel(n),
+                  },
+                    h('circle', { cx: n.x, cy: n.y, r: n.r, fill: color(n.type), opacity: 0.92 }),
+                    h('text', {
+                      x: n.x, y: n.y - n.r - 5, textAnchor: 'middle',
+                      style: { fontSize: (10.5 / view.k) + 'px', fill: 'currentColor', opacity: 0.82 },
+                    }, String(n.label).slice(0, 12)))))),
+              h('div', { className: 'dym-gctrl' },
+                h('button', { className: 'dym-gbtn', title: '放大', onClick: () => zoomAt(1.25, size.w / 2, size.h / 2) }, '+'),
+                h('button', { className: 'dym-gbtn', title: '缩小', onClick: () => zoomAt(0.8, size.w / 2, size.h / 2) }, '−'),
+                h('button', { className: 'dym-gbtn', title: '复位（回到初始位置与缩放）', onClick: () => reset(true) }, '⟲')),
+              h('div', { className: 'dym-tip' }, '缩放 ' + Math.round(view.k * 100) + '%'),
+            ),
+            sel ? h(Card, { style: { marginTop: '8px' } },
+              h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, sel.label),
+              h('div', { style: { opacity: 0.7 } },
+                [sel.type || '未分类', sel.importance != null ? '重要度 ' + sel.importance : '', (sel.tags || []).join(' / ')].filter(Boolean).join(' · ')),
+              sel.created_at ? h('div', { style: { opacity: 0.55, fontSize: '11.5px' } }, sel.created_at) : null,
+            ) : null,
+          )
+        }
 
         const MemoryPage = () => {
-          const [tab, setTab] = React.useState('character')
+          const [tab, setTab] = React.useState('graph')
           const [char, setChar] = React.useState(null)
           const [tl, setTl] = React.useState(null)
           const [g, setG] = React.useState(null)
           const [raw, setRaw] = React.useState(null)
+          const [stats, setStats] = React.useState(null)
           const [err, setErr] = React.useState('')
           const [busy, setBusy] = React.useState(false)
 
-          const load = React.useCallback(async () => {
+          const load = React.useCallback(async (force) => {
             setBusy(true); setErr('')
             try {
-              if (tab === 'character' && char === null) setChar(await memCall('character', { action: 'read' }))
-              if (tab === 'timeline' && tl === null) setTl(await memCall('recall', { limit: 80 }))
-              if (tab === 'graph' && g === null) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
-              if (tab === 'raw' && raw === null) {
+              if (force || stats === null) { try { setStats(await memCall('stats', {})) } catch { /* 忽略 */ } }
+              if (tab === 'character' && (force || char === null)) setChar(await memCall('character', { action: 'read' }))
+              if (tab === 'timeline' && (force || tl === null)) setTl(await memCall('recall', { limit: 80 }))
+              if (tab === 'graph' && (force || g === null)) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
+              if (tab === 'raw' && (force || raw === null)) {
                 const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
                 setRaw(await r.json())
               }
             } catch (e) { setErr(String((e && e.message) || e)) } finally { setBusy(false) }
-          }, [tab, char, tl, g, raw])
-          React.useEffect(() => { load() }, [load])
-
-          const kv = (k, v) => h('div', { style: { display: 'flex', gap: '8px', marginBottom: '4px' } },
-            h('span', { style: { opacity: 0.65, minWidth: '86px' } }, k),
-            h('span', null, String(v ?? '—')))
+          }, [tab, char, tl, g, raw, stats])
+          React.useEffect(() => { load(false) }, [tab])
 
           const charBody = () => {
-            if (!char) return h(MemBox, null, busy ? '读取中…' : '（没有角色卡数据）')
+            if (!char) return h(Card, null, busy ? '读取中…' : '（没有角色卡数据）')
             const c = char.character || char
-            const fields = Object.keys(c || {}).filter((k) => !['updated_at', 'id', 'name'].includes(k))
+            const skip = ['updated_at', 'id', 'name', '_last_updated']
+            const keys = Object.keys(c || {}).filter((k) => !skip.includes(k))
             return h('div', null,
-              h(MemBox, null,
-                kv('名字', c.name || '（未命名）'),
-                kv('更新时间', c.updated_at || '—')),
-              h(MemBox, null, fields.length
-                ? fields.map((k) => kv(k, typeof c[k] === 'object' ? JSON.stringify(c[k], null, 0) : c[k]))
+              h(Card, null, KV('名字', c.name || '（未命名）'), KV('更新时间', c.updated_at || c._last_updated || '—')),
+              h(Card, null, keys.length
+                ? keys.map((k) => KV(k, typeof c[k] === 'object' ? JSON.stringify(c[k]) : c[k]))
                 : '（角色卡是空的）'))
           }
-
           const tlBody = () => {
             const items = (tl && (tl.results || tl)) || []
-            if (!items.length) return h(MemBox, null, busy ? '读取中…' : '（还没有回忆条目）')
-            return h('div', null, items.slice(0, 40).map((it, i) => h(MemBox, { key: i },
-              h('div', { style: { opacity: 0.6, fontSize: '11.5px' } },
+            if (!items.length) return h(Card, null, busy ? '读取中…' : '（还没有回忆条目）')
+            return h('div', null, items.slice(0, 40).map((it, i) => h(Card, { key: i },
+              h('div', { style: { opacity: 0.55, fontSize: '11px', marginBottom: '3px' } },
                 [it.created_at || it.at || '', it.kind || it.type || '', it.importance != null ? '重要度 ' + it.importance : ''].filter(Boolean).join(' · ')),
-              h('div', null, String(it.text || it.summary || it.content || '').slice(0, 400)))))
+              String(it.text || it.summary || it.content || '').slice(0, 400))))
           }
-
-          // ⭐ 图谱：手写力导向（SVG，无依赖），照记忆插件那套布局
-          const MemGraph = () => {
-            const wrapRef = React.useRef(null)
-            const simRef = React.useRef(null)
-            const [, force] = React.useState(0)
-            const [sel, setSel] = React.useState(null)
-            React.useEffect(() => {
-              const data = g || {}
-              simRef.current = null
-              if (!Array.isArray(data.nodes) || !data.nodes.length) return
-              const wrap = wrapRef.current
-              const W = (wrap && wrap.clientWidth) || 620
-              const H = 380
-              const ns = data.nodes.map((n, i) => {
-                const ang = (i / Math.max(1, data.nodes.length)) * Math.PI * 2
-                const r0 = Math.min(W, H) * 0.3
-                return {
-                  id: n.id, label: n.label || n.name || n.id, type: n.type || '', importance: n.importance || 0,
-                  tags: n.tags || [], created_at: n.created_at || '',
-                  x: W / 2 + Math.cos(ang) * r0 * (0.45 + Math.random() * 0.55),
-                  y: H / 2 + Math.sin(ang) * r0 * (0.45 + Math.random() * 0.55),
-                  vx: 0, vy: 0, r: 5 + Math.min(1, Math.max(0, n.importance || 0)) * 13,
-                }
-              })
-              const byId = {}
-              for (const n of ns) byId[n.id] = n
-              const es = (data.edges || []).map((e) => ({ a: byId[e.source], b: byId[e.target], rel: e.relation || e.label || '' }))
-                .filter((e) => e.a && e.b)
-              const sim = { nodes: ns, edges: es, W, H }
-              simRef.current = sim
-              let alpha = 1
-              let raf = 0
-              let ticks = 0
-              const step = () => {
-                const s = simRef.current
-                if (!s) return
-                alpha *= 0.972
-                const N = s.nodes, E = s.edges
-                for (let i = 0; i < N.length; i++) {
-                  for (let j = i + 1; j < N.length; j++) {
-                    const a = N[i], b = N[j]
-                    const dx = b.x - a.x, dy = b.y - a.y
-                    const d2 = dx * dx + dy * dy || 1
-                    const d = Math.sqrt(d2)
-                    const f = Math.min(5, 2600 / d2) * alpha
-                    const fx = (dx / d) * f, fy = (dy / d) * f
-                    a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy
-                  }
-                }
-                for (const e of E) {
-                  const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y
-                  const d = Math.sqrt(dx * dx + dy * dy) || 1
-                  const f = (d - 118) * 0.012 * alpha
-                  const fx = (dx / d) * f, fy = (dy / d) * f
-                  e.a.vx += fx; e.a.vy += fy; e.b.vx -= fx; e.b.vy -= fy
-                }
-                for (const n of N) {
-                  n.vx += (s.W / 2 - n.x) * 0.0018 * alpha
-                  n.vy += (s.H / 2 - n.y) * 0.0018 * alpha
-                  n.vx *= 0.86; n.vy *= 0.86
-                  n.x += n.vx; n.y += n.vy
-                  const pad = 26
-                  n.x = Math.max(pad, Math.min(s.W - pad, n.x))
-                  n.y = Math.max(pad, Math.min(s.H - pad, n.y))
-                }
-                ticks += 1
-                force((x) => x + 1)
-                if (ticks < 240) raf = requestAnimationFrame(step)
-              }
-              raf = requestAnimationFrame(step)
-              return () => cancelAnimationFrame(raf)
-            }, [g])
-
-            const sim = simRef.current
-            if (!sim) return h(MemBox, null, busy ? '读取中…' : '（图谱为空）')
-            const color = (ty) => (ty === 'person' ? '#7c6ff7' : ty === 'preference' ? '#f0a35e'
-              : ty === 'event' ? '#4bb6a8' : ty === 'fact' ? '#5b8def' : '#9aa3b2')
-            return h('div', null,
-              h(MemBox, null, '节点 ' + sim.nodes.length + ' 个 · 关系 ' + sim.edges.length + ' 条（可点节点看详情）'),
-              h('div', { ref: wrapRef, style: { border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '10px', overflow: 'hidden' } },
-                h('svg', { width: '100%', viewBox: '0 0 ' + sim.W + ' ' + sim.H, style: { display: 'block', background: 'transparent' } },
-                  sim.edges.map((e, i) => h('line', {
-                    key: 'e' + i, x1: e.a.x, y1: e.a.y, x2: e.b.x, y2: e.b.y,
-                    stroke: 'rgba(140,150,170,.45)', strokeWidth: 1,
-                  })),
-                  sim.nodes.map((n, i) => h('g', { key: 'n' + i, style: { cursor: 'pointer' }, onClick: () => setSel(n) },
-                    h('circle', { cx: n.x, cy: n.y, r: n.r, fill: color(n.type), opacity: 0.9 }),
-                    h('text', { x: n.x, y: n.y - n.r - 5, textAnchor: 'middle',
-                      style: { fontSize: '10.5px', fill: 'currentColor', opacity: 0.8 } },
-                      String(n.label).slice(0, 12)))))),
-              sel ? h(MemBox, { style: { marginTop: '8px' } },
-                h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, sel.label),
-                h('div', { style: { opacity: 0.7 } },
-                  [sel.type || '未分类', sel.importance != null ? '重要度 ' + sel.importance : '', (sel.tags || []).join(' / ')].filter(Boolean).join(' · ')),
-                sel.created_at ? h('div', { style: { opacity: 0.55, fontSize: '11.5px' } }, sel.created_at) : null,
-              ) : null,
-            )
-          }
-
           const rawBody = () => {
-            if (!raw) return h(MemBox, null, busy ? '读取中…' : '（读不到）')
+            if (!raw) return h(Card, null, busy ? '读取中…' : '（读不到）')
             return h('div', null,
-              h(MemBox, null,
-                kv('记忆目录', raw.mdDir || '—'),
-                kv('数据库', raw.dbPath ? raw.dbPath + '（' + raw.dbMb + ' MB）' : '（没找到）'),
-                kv('文件', (raw.files || []).join(' / ') || '—')),
-              (raw.lines || []).length
-                ? h('div', null, raw.lines.map((ln, i) => h(MemBox, { key: i }, ln)))
-                : h(MemBox, null, raw.hint || '还没有记录'))
+              h(Card, null, KV('记忆目录', raw.mdDir || '—'),
+                KV('数据库', raw.dbPath ? raw.dbPath + '（' + raw.dbMb + ' MB）' : '（没找到）'),
+                KV('文件', (raw.files || []).join(' / ') || '—')),
+              (raw.lines || []).length ? h('div', null, raw.lines.map((ln, i) => h(Card, { key: i }, ln))) : h(Card, null, raw.hint || '还没有记录'))
           }
 
-          return h('div', { 'data-dy-panel': '' },
-            h('div', { 'data-dy-h': '' }, '记忆'),
-            h('div', { style: { display: 'flex', gap: '6px', margin: '6px 0 12px' } },
+          return h('div', { className: 'dym-root' },
+            h('div', { className: 'dym-head' },
+              h('span', { className: 'dym-title' }, '记忆'),
+              h('span', { className: 'dym-badge' }, 'memory-system'),
+              h('div', { className: 'dym-chips' },
+                h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆'),
+                h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点'),
+                h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系'))),
+            h('div', { className: 'dym-tabs' },
               MemTabs.map((t2) => h('button', {
-                key: t2.id,
-                'data-dy-btn': '',
-                style: tab === t2.id ? { background: 'var(--dsh-accent, #4b6bfb)', color: '#fff', borderColor: 'transparent' } : undefined,
-                onClick: () => setTab(t2.id),
+                key: t2.id, className: 'dym-tab' + (tab === t2.id ? ' on' : ''), onClick: () => setTab(t2.id),
               }, t2.label)),
-              h('button', { 'data-dy-btn': '', onClick: () => { setChar(null); setTl(null); setG(null); setRaw(null); load() } }, '刷新')),
-            err ? h(MemBox, { style: { borderColor: '#e0a' } }, '读取失败：' + err) : null,
+              h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
+            err ? h(Card, null, '读取失败：' + err) : null,
+            tab === 'graph' ? h(MemGraph, { data: g, busy }) : null,
             tab === 'character' ? charBody() : null,
             tab === 'timeline' ? tlBody() : null,
-            tab === 'graph' ? h(MemGraph) : null,
             tab === 'raw' ? rawBody() : null,
           )
         }
