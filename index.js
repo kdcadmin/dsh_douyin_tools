@@ -31,7 +31,7 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -390,8 +390,21 @@ export function apply(ctx, config) {
       await ctx.settings.update(row.ns, patch, row.revision)
       return { ok: true, ns: row.ns }
     } catch (e) {
-      log(`写 DSH 设置失败（本地那份仍然生效）：${e?.message ?? e}`)
-      return { ok: false, error: String(e?.message ?? e) }
+      const msg = String(e?.message ?? e)
+      // revision 过期（设置页开着太久 / 别处改过）→ 取最新 revision 再试一次
+      if (/revision|stale|conflict/i.test(msg)) {
+        try {
+          const row2 = settingsDesc(true)
+          if (row2?.ns) {
+            await ctx.settings.update(row2.ns, patch, row2.revision)
+            return { ok: true, ns: row2.ns, retried: true }
+          }
+        } catch (e2) {
+          log(`写 DSH 设置重试仍失败：${e2?.message ?? e2}`)
+        }
+      }
+      log(`写 DSH 设置失败（本地那份仍然生效）：${msg}`)
+      return { ok: false, error: msg }
     }
   }
 
@@ -2320,12 +2333,20 @@ export function apply(ctx, config) {
       if (rec.day !== today) { rec.count = 0; rec.day = today }
       if (rec.lastSeen === preview) continue                        // 没有新消息
       if (rec.count >= Math.max(1, Number(cfg.dmReplyPerContact) || 1)) continue
+      // ⭐ 2026-10-26 使用者：「我要的是别人发消息你才回」
+      //   会话预览如果还是「我上次发的那句」，就说明对方没说话 ⇒ 不主动发
+      const mine = String(rec.lastReply || '')
+      if (mine && preview.includes(mine.replace(/\[[^\]]+\]/g, '').trim().slice(0, 8))) {
+        out.push({ to: name, ok: true, skipped: '最后一条是我发的，等对方先说' })
+        continue
+      }
       const reply = pickDmReply(preview)
       try {
         const r = await call('douyin_chat_send', { nickname: name, text: reply }, { timeoutMs: 180_000 })
         const ok = r && r.ok !== false
         rec.count = Number(rec.count || 0) + 1
         rec.lastSeen = preview
+        rec.lastReply = reply
         led.dm[name] = rec
         if (ok) usedToday += 1
         out.push({ to: name, preview: preview.slice(0, 30), reply, ok, error: ok ? undefined : (r?.error || '没发出去') })
@@ -2389,6 +2410,48 @@ export function apply(ctx, config) {
     } catch { /* 忽略 */ }
     if (out.length) log(`定期清理：${out.length} 项（${out.slice(0, 3).join('，')}…）`)
     return { ok: true, cleaned: out.length, items: out.slice(0, 20) }
+  }
+
+  /** 人设：每天根据记忆自动更新一次（只动「自动」那一段，手写正文不碰） */
+  const PERSONA_AUTO_HEAD = '## 我最近学到的（自动，每天更新）'
+  const refreshPersonaFromMemory = () => {
+    try {
+      const st = readState()
+      const key = `persona:${dayKey()}`
+      if (st[key]) return { ok: true, skipped: '今天已经更新过' }
+      const pf = join(stateDir, 'persona.md')
+      if (!existsSync(pf)) return { ok: false, error: '没有 persona.md' }
+      // 抓今天的记忆条目（memory/YYYY-MM.md 里带时间戳的行）
+      const dir = join(stateDir, 'memory')
+      const lines = []
+      if (existsSync(dir)) {
+        for (const f of readdirSync(dir).filter((x) => x.endsWith('.md')).sort().slice(-1)) {
+          const txt = readFileSync(join(dir, f), 'utf8')
+          for (const ln of txt.split('\n')) {
+            const s = ln.trim()
+            if (!s || s.startsWith('#')) continue
+            // 只收「偏好 / 教训 / 规则」这类会改变说话方式的内容
+            if (!/(喜欢|讨厌|偏好|别|不要|记住|规矩|以后|下次|习惯|口吻|语气|短句|表情)/.test(s)) continue
+            lines.push(s.replace(/^[-*\d.、\s]+/, '').slice(0, 120))
+          }
+        }
+      }
+      const picked = Array.from(new Set(lines)).slice(-12)
+      const block = PERSONA_AUTO_HEAD + '\n\n' + (picked.length
+        ? picked.map((s) => '- ' + s).join('\n')
+        : '- （今天还没攒到新的，保持原样）') + '\n'
+      let text = readFileSync(pf, 'utf8')
+      const i = text.indexOf(PERSONA_AUTO_HEAD)
+      if (i >= 0) text = text.slice(0, i) + block
+      else text = text.trimEnd() + '\n\n---\n\n' + block
+      writeFileSync(pf, text, 'utf8')
+      bumpState({ [key]: true, personaUpdatedAt: new Date().toISOString(), personaItems: picked.length })
+      log(`人设已按记忆更新（收进 ${picked.length} 条）`)
+      return { ok: true, items: picked.length }
+    } catch (e) {
+      log(`更新人设出错（已兜住）：${e?.message ?? e}`)
+      return { ok: false, error: String(e?.message ?? e) }
+    }
   }
 
   /** 每天只清一次 */
@@ -2749,6 +2812,7 @@ export function apply(ctx, config) {
       try {
         refreshCfg()
         if (typeof maybeClean === 'function') maybeClean()
+        try { if (typeof refreshPersonaFromMemory === 'function') refreshPersonaFromMemory() } catch (e) { log('人设更新出错（已兜住）：' + String(e?.message ?? e)) }
         // 谷时到了就刷一轮（跟下面三件事共用这同一个间隔）
         try { if (typeof windowTick === 'function') await windowTick() } catch (e) { log('谷时那一轮出错（已兜住）：' + String(e?.message ?? e)) }
         await maybeKeepStreak()
@@ -2933,6 +2997,65 @@ export function apply(ctx, config) {
     }
 
     // ⭐ 给设置页用：把日报里的「刷到过的视频」抽成结构化列表（页面用卡片显示，不用开文件）
+    /* ⭐ 2026-10-26 使用者：「记忆塞到设置左侧列表里」——这里给面板提供数据：
+     *   读 <家>/memory/YYYY-MM.md 的最近几条 + 记忆系统数据库路径/大小。
+     */
+    // ⭐ 2026-10-26 使用者：「人设每天会根据记忆更新」——人设存 persona.md，这里负责读写
+    if (method === 'POST' && path === '/api/douyin-duty/persona') {
+      try {
+        const body = await readBody(req)
+        const text = String((body && body.text) || '')
+        if (!text.trim()) return sendJson(res, 400, { ok: false, error: '人设不能是空的' })
+        const pf = join(stateDir, 'persona.md')
+        if (existsSync(pf)) {
+          try { copyFileSync(pf, join(stateDir, 'persona.md.bak')) } catch { /* 备份失败不拦 */ }
+        }
+        writeFileSync(pf, text, 'utf8')
+        bumpState({ personaSavedAt: new Date().toISOString() })
+        log(`人设已保存（${text.length} 字）`)
+        return sendJson(res, 200, { ok: true, path: pf, bytes: text.length })
+      } catch (e) {
+        return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+      }
+    }
+
+    if (method === 'GET' && path === '/api/douyin-duty/memory') {
+      const out = { ok: true, lines: [], files: [], mdDir: join(stateDir, 'memory'), dbPath: '', dbMb: 0, hint: '' }
+      try {
+        const dir = join(stateDir, 'memory')
+        if (existsSync(dir)) {
+          const files = readdirSync(dir).filter((f) => f.endsWith('.md')).sort().reverse()
+          out.files = files.slice(0, 6)
+          const all = []
+          for (const f of files.slice(0, 2)) {
+            try {
+              const txt = readFileSync(join(dir, f), 'utf8')
+              for (const ln of txt.split('\n')) if (ln.trim()) all.push(ln.trim())
+            } catch { /* 单个文件失败不影响 */ }
+          }
+          out.lines = all.slice(-60).reverse()
+        }
+      } catch { /* 读不到就给空 */ }
+      try {
+        const db = '<DSH_HOME>\\memory-system\\memory.db'
+        if (existsSync(db)) { out.dbPath = db; out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10 }
+      } catch { /* 忽略 */ }
+      // ⭐ 人设（persona.md）也一起给出来：角色卡里要能看、能改
+      try {
+        const pf = join(stateDir, 'persona.md')
+        if (existsSync(pf)) {
+          out.personaPath = pf
+          out.persona = readFileSync(pf, 'utf8')
+          out.personaAt = statSync(pf).mtime.toISOString()
+        } else {
+          out.personaPath = pf
+          out.persona = ''
+        }
+      } catch { /* 忽略 */ }
+      if (!out.lines.length) out.hint = '还没有记忆（跑几轮或者给它说点事，就会记下来）'
+      return sendJson(res, 200, out)
+    }
+
     if (method === 'GET' && path === '/api/douyin-duty/watched') {
       // ⭐ 按日期分组（使用者 2026-10-23：「要分日期懂了吗」）：读最近 14 份日报，每份带自己的日期
       const days = Math.max(1, Math.min(Number(url.searchParams.get('days')) || 14, 60))
