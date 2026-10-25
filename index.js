@@ -1867,11 +1867,16 @@ export function apply(ctx, config) {
         // 分享完再补一句「人话」——不然对方只收到一张卡片，很冷
         const note = makeShareNote({ title: args.title || '' })
         let noteOk = false
+        let stickerOk = false
         try {
-          const r2 = await call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 })
+          const r2 = await call('douyin_chat_batch', {
+            nickname: to,
+            messages: `${note}|sticker:${pickStickerKeyword(note)}`,
+          }, { timeoutMs: 300_000 })
           noteOk = r2 && r2.ok !== false
+          stickerOk = noteOk
         } catch { /* 附言失败不影响转发成功 */ }
-        return { ...r, shared_to: to, via: 'share-panel', note, noteOk }
+        return { ...r, shared_to: to, via: 'share-panel', note, noteOk, stickerOk }
       }
       // 面板里没有这个人就退回发链接
       const url = `https://www.douyin.com/video/${id}`
@@ -2543,7 +2548,7 @@ export function apply(ctx, config) {
               const r2 = await call('douyin_chat_batch', {
                 nickname: to,
                 messages: `${note}|sticker:${mood}`,
-              }, { timeoutMs: 240_000 })
+              }, { timeoutMs: 300_000 })
               const okk2 = r2 && r2.ok !== false
               acts.push('附言+表情包：' + (okk2 ? `已发（${sentBrief(r2)}）` : (r2?.error || '没发出去')))
             } catch (e) { acts.push('附言+表情包失败：' + String(e?.message ?? e)) }

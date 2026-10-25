@@ -976,8 +976,18 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
     notes: list[str] = []
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
-        got = await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=10.0)
-        # ⭐ 图文（note）/非视频作品：/video/<id> 里没有播放器也不拉评论接口 ⇒ 换 /note/<id> 再试
+        got = await net.wait_for(lambda u, d: isinstance(d.get("comments"), list), timeout=6.0)
+        # ⭐ 2026-10-25：图文（note）作品接口不抛评论 ⇒ **直接走 DOM**，不再等/换 URL
+        try:
+            is_note_now = await page.evaluate("() => !document.querySelector('video')")
+        except Exception:
+            is_note_now = False
+        if is_note_now and not got:
+            await page.wait_for_timeout(1500)
+            dom_items = await _scrape_comments_dom(page, num)
+            if dom_items:
+                notes.append(f"图文作品：直接 DOM 抠到 {len(dom_items)} 条")
+                return _ok(aweme_id=aid, count=len(dom_items), items=dom_items, notes=notes, source="dom")
         if not got:
             try:
                 is_note = await page.evaluate("() => !document.querySelector('video')")
