@@ -2518,6 +2518,13 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
     notes: list[str] = []
     url_hit: dict = {}
 
+    # ⭐ 用一张**新标签页**跑：主标签常被别的操作占着，goto 会超时
+    try:
+        page = await page.context.new_page()
+        notes.append("新开标签页")
+    except Exception:
+        pass
+
     # ① 转写结果的缓存：同一条视频只下一次、只转一次
     cache = media_dir / f"{aid}.{int(seconds)}.json"
     if cache.exists():
@@ -2533,55 +2540,94 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
         if not url_hit and ("/video/tos/" in u or "mime_type=video" in u) and ".mp4" not in u[:20]:
             url_hit.setdefault("url", u)
 
-    page.on("response", on_resp)
     try:
         await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
-        await page.wait_for_timeout(2500)
-        # 让 <video> 开始播，浏览器才会去拉媒体流
+        await page.wait_for_timeout(1500)
+        # 让 <video> 起播，currentSrc 才有值
         try:
             await page.evaluate("() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play && v.play(); } }")
         except Exception:
             pass
-        for _ in range(20):
-            if url_hit.get("url"):
+        url = ""
+        for _ in range(12):
+            cands = await page.evaluate(
+                """() => {
+                    const v = document.querySelector('video');
+                    if (!v) return [];
+                    const out = [];
+                    if (v.currentSrc) out.push(v.currentSrc);
+                    if (v.src) out.push(v.src);
+                    v.querySelectorAll('source').forEach((s) => { if (s.src) out.push(s.src); });
+                    return out;
+                }"""
+            )
+            # ⭐ 只认 CDN 直链（douyinvod / .mp4）；/aweme/v1/play/ 是接口，ffmpeg 读不了
+            for c in cands or []:
+                if ("douyinvod.com" in c) or c.split("?")[0].endswith(".mp4"):
+                    url = c
+                    break
+            if url:
                 break
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(400)
+        dur = 0
+        try:
+            dur = float(await page.evaluate("() => { const v = document.querySelector('video'); return v ? v.duration : 0; }") or 0)
+        except Exception:
+            pass
     finally:
         try:
             page.remove_listener("response", on_resp)
         except Exception:
             pass
 
-    dur = 0
-    try:
-        dur = float(await page.evaluate("() => { const v = document.querySelector('video'); return v ? v.duration : 0; }") or 0)
-    except Exception:
-        pass
-    url = url_hit.get("url") or ""
     if not url:
-        return _err("没抓到视频流地址（可能被风控或未登录）", aweme_id=aid, duration=dur, notes=notes or None)
+        return _err("没拿到视频流地址（未登录或被风控）", aweme_id=aid, duration=dur, notes=notes or None)
 
-    out_mp4 = media_dir / f"{aid}.mp4"
-    try:
-        resp = await page.request.get(url, timeout=120000)
-        if resp.status != 200:
-            return _err(f"下载视频失败 HTTP {resp.status}", aweme_id=aid, notes=notes or None)
-        out_mp4.write_bytes(await resp.body())
-    except Exception as exc:
-        return _err(f"下载视频出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes or None)
-    notes.append(f"下载 {out_mp4.stat().st_size // 1024} KB")
-
-    # 抽音轨（单声道 16k，whisper 要的）
-    wav = media_dir / f"{aid}.wav"
+    # ⭐ 两条路：能拿到 CDN 直链就流式抽（1.2s）；拿不到就把流下下来（1.9s）+ 抽音轨（0.07s）
+    wav = media_dir / f"{aid}.{int(seconds)}.wav"
     ff = _ffmpeg_path()
-    try:
-        import subprocess
-        cmd = [ff, "-y", "-i", str(out_mp4), "-t", str(max(10, int(seconds))), "-vn", "-ac", "1", "-ar", "16000", str(wav)]
-        r = subprocess.run(cmd, capture_output=True, timeout=300)
-        if r.returncode != 0 or not wav.exists():
-            return _err("抽音轨失败：" + (r.stderr or b'')[-200:].decode("utf-8", "replace"), aweme_id=aid, notes=notes)
-    except Exception as exc:
-        return _err(f"抽音轨出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
+    hdr = "Referer: https://www.douyin.com/\r\n"
+    ok_stream = False
+    if "douyinvod.com" in url:
+        try:
+            import subprocess
+            cmd = [ff, "-y", "-user_agent", ua, "-headers", hdr,
+                   "-t", str(max(10, int(seconds))), "-i", url,
+                   "-vn", "-ac", "1", "-ar", "16000", str(wav)]
+            r = subprocess.run(cmd, capture_output=True, timeout=180)
+            ok_stream = r.returncode == 0 and wav.exists()
+            if ok_stream:
+                notes.append(f"流式抽取 {int(seconds)}s（{wav.stat().st_size // 1024} KB）")
+        except Exception:
+            ok_stream = False
+    if not ok_stream:
+        # 兜底：走浏览器会话把流下下来（带 cookie），再抽音轨
+        out_mp4 = media_dir / f"{aid}.mp4"
+        try:
+            resp = await page.request.get(url, timeout=120000)
+            if resp.status != 200:
+                return _err(f"下载视频失败 HTTP {resp.status}", aweme_id=aid, notes=notes)
+            out_mp4.write_bytes(await resp.body())
+            notes.append(f"下载 {out_mp4.stat().st_size // 1024} KB")
+        except Exception as exc:
+            return _err(f"下载视频出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
+        try:
+            import subprocess
+            cmd = [ff, "-y", "-i", str(out_mp4), "-t", str(max(10, int(seconds))),
+                   "-vn", "-ac", "1", "-ar", "16000", str(wav)]
+            r = subprocess.run(cmd, capture_output=True, timeout=300)
+            if r.returncode != 0 or not wav.exists():
+                return _err("抽音轨失败", aweme_id=aid, notes=notes)
+            notes.append("下载后抽音轨")
+        except Exception as exc:
+            return _err(f"抽音轨出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes)
+        try:
+            if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
+                out_mp4.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     text = ""
     try:
@@ -2605,17 +2651,20 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
         return _err(f"转写出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes, downloaded=str(out_mp4))
 
     result = _ok(aweme_id=aid, duration=round(dur, 1), transcript=text,
-                 chars=len(text), video_file=str(out_mp4), notes=notes)
+                 chars=len(text), notes=notes)
     try:
         cache.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
     # 用完即弃（想留着素材就设 DOUYIN_KEEP_MEDIA=1）
+    try:
+        await page.close()
+    except Exception:
+        pass
     if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
         try:
             wav.unlink(missing_ok=True)
-            out_mp4.unlink(missing_ok=True)
-            notes.append("媒体已删（DOUYIN_KEEP_MEDIA=1 可保留）")
+            notes.append("音轨已删（DOUYIN_KEEP_MEDIA=1 可保留）")
         except Exception:
             pass
     return result
