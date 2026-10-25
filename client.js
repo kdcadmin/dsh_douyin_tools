@@ -946,18 +946,103 @@ window.__ModuleLoader__.load({
               h('div', null, String(it.text || it.summary || it.content || '').slice(0, 400)))))
           }
 
-          const gBody = () => {
-            const nodes = (g && (g.nodes || g.results)) || []
-            const edges = (g && g.edges) || []
-            if (!nodes.length) return h(MemBox, null, busy ? '读取中…' : '（图谱为空）')
+          // ⭐ 图谱：手写力导向（SVG，无依赖），照记忆插件那套布局
+          const MemGraph = () => {
+            const wrapRef = React.useRef(null)
+            const simRef = React.useRef(null)
+            const [, force] = React.useState(0)
+            const [sel, setSel] = React.useState(null)
+            React.useEffect(() => {
+              const data = g || {}
+              simRef.current = null
+              if (!Array.isArray(data.nodes) || !data.nodes.length) return
+              const wrap = wrapRef.current
+              const W = (wrap && wrap.clientWidth) || 620
+              const H = 380
+              const ns = data.nodes.map((n, i) => {
+                const ang = (i / Math.max(1, data.nodes.length)) * Math.PI * 2
+                const r0 = Math.min(W, H) * 0.3
+                return {
+                  id: n.id, label: n.label || n.name || n.id, type: n.type || '', importance: n.importance || 0,
+                  tags: n.tags || [], created_at: n.created_at || '',
+                  x: W / 2 + Math.cos(ang) * r0 * (0.45 + Math.random() * 0.55),
+                  y: H / 2 + Math.sin(ang) * r0 * (0.45 + Math.random() * 0.55),
+                  vx: 0, vy: 0, r: 5 + Math.min(1, Math.max(0, n.importance || 0)) * 13,
+                }
+              })
+              const byId = {}
+              for (const n of ns) byId[n.id] = n
+              const es = (data.edges || []).map((e) => ({ a: byId[e.source], b: byId[e.target], rel: e.relation || e.label || '' }))
+                .filter((e) => e.a && e.b)
+              const sim = { nodes: ns, edges: es, W, H }
+              simRef.current = sim
+              let alpha = 1
+              let raf = 0
+              let ticks = 0
+              const step = () => {
+                const s = simRef.current
+                if (!s) return
+                alpha *= 0.972
+                const N = s.nodes, E = s.edges
+                for (let i = 0; i < N.length; i++) {
+                  for (let j = i + 1; j < N.length; j++) {
+                    const a = N[i], b = N[j]
+                    const dx = b.x - a.x, dy = b.y - a.y
+                    const d2 = dx * dx + dy * dy || 1
+                    const d = Math.sqrt(d2)
+                    const f = Math.min(5, 2600 / d2) * alpha
+                    const fx = (dx / d) * f, fy = (dy / d) * f
+                    a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy
+                  }
+                }
+                for (const e of E) {
+                  const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y
+                  const d = Math.sqrt(dx * dx + dy * dy) || 1
+                  const f = (d - 118) * 0.012 * alpha
+                  const fx = (dx / d) * f, fy = (dy / d) * f
+                  e.a.vx += fx; e.a.vy += fy; e.b.vx -= fx; e.b.vy -= fy
+                }
+                for (const n of N) {
+                  n.vx += (s.W / 2 - n.x) * 0.0018 * alpha
+                  n.vy += (s.H / 2 - n.y) * 0.0018 * alpha
+                  n.vx *= 0.86; n.vy *= 0.86
+                  n.x += n.vx; n.y += n.vy
+                  const pad = 26
+                  n.x = Math.max(pad, Math.min(s.W - pad, n.x))
+                  n.y = Math.max(pad, Math.min(s.H - pad, n.y))
+                }
+                ticks += 1
+                force((x) => x + 1)
+                if (ticks < 240) raf = requestAnimationFrame(step)
+              }
+              raf = requestAnimationFrame(step)
+              return () => cancelAnimationFrame(raf)
+            }, [g])
+
+            const sim = simRef.current
+            if (!sim) return h(MemBox, null, busy ? '读取中…' : '（图谱为空）')
+            const color = (ty) => (ty === 'person' ? '#7c6ff7' : ty === 'preference' ? '#f0a35e'
+              : ty === 'event' ? '#4bb6a8' : ty === 'fact' ? '#5b8def' : '#9aa3b2')
             return h('div', null,
-              h(MemBox, null, '节点 ' + nodes.length + ' 个 · 关系 ' + edges.length + ' 条'),
-              h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
-                nodes.slice(0, 60).map((n, i) => h('span', {
-                  key: i,
-                  style: { fontSize: '12px', padding: '4px 9px', borderRadius: '999px',
-                    border: '1px solid var(--dsh-border, rgba(128,128,128,.3))' },
-                }, String(n.label || n.name || n.id || '').slice(0, 18)))))
+              h(MemBox, null, '节点 ' + sim.nodes.length + ' 个 · 关系 ' + sim.edges.length + ' 条（可点节点看详情）'),
+              h('div', { ref: wrapRef, style: { border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: '10px', overflow: 'hidden' } },
+                h('svg', { width: '100%', viewBox: '0 0 ' + sim.W + ' ' + sim.H, style: { display: 'block', background: 'transparent' } },
+                  sim.edges.map((e, i) => h('line', {
+                    key: 'e' + i, x1: e.a.x, y1: e.a.y, x2: e.b.x, y2: e.b.y,
+                    stroke: 'rgba(140,150,170,.45)', strokeWidth: 1,
+                  })),
+                  sim.nodes.map((n, i) => h('g', { key: 'n' + i, style: { cursor: 'pointer' }, onClick: () => setSel(n) },
+                    h('circle', { cx: n.x, cy: n.y, r: n.r, fill: color(n.type), opacity: 0.9 }),
+                    h('text', { x: n.x, y: n.y - n.r - 5, textAnchor: 'middle',
+                      style: { fontSize: '10.5px', fill: 'currentColor', opacity: 0.8 } },
+                      String(n.label).slice(0, 12)))))),
+              sel ? h(MemBox, { style: { marginTop: '8px' } },
+                h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, sel.label),
+                h('div', { style: { opacity: 0.7 } },
+                  [sel.type || '未分类', sel.importance != null ? '重要度 ' + sel.importance : '', (sel.tags || []).join(' / ')].filter(Boolean).join(' · ')),
+                sel.created_at ? h('div', { style: { opacity: 0.55, fontSize: '11.5px' } }, sel.created_at) : null,
+              ) : null,
+            )
           }
 
           const rawBody = () => {
@@ -985,7 +1070,7 @@ window.__ModuleLoader__.load({
             err ? h(MemBox, { style: { borderColor: '#e0a' } }, '读取失败：' + err) : null,
             tab === 'character' ? charBody() : null,
             tab === 'timeline' ? tlBody() : null,
-            tab === 'graph' ? gBody() : null,
+            tab === 'graph' ? h(MemGraph) : null,
             tab === 'raw' ? rawBody() : null,
           )
         }
