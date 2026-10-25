@@ -3290,6 +3290,41 @@ async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
         await page.mouse.click(rowBox["x"], rowBox["y"])
         await page.wait_for_timeout(3500)
 
+        # 等会话真正打开（最多 30 秒），别一进来就找输入框（刚转发完页面还在渲染）
+        ready = False
+        for _ in range(30):
+            await page.wait_for_timeout(700)
+            ready = await page.evaluate(
+                """() => { const W = innerWidth, H = innerHeight;
+                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
+                        .some((e) => { const r = e.getBoundingClientRect();
+                            const ph = e.placeholder || '';
+                            return (ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) &&
+                                   r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }); }"""
+            )
+            if ready:
+                break
+        if not ready:
+            # 再试一次：重新点「消息」图标打开抽屉
+            try:
+                icon2 = page.locator('[data-e2e="im-entry"]').first
+                if await icon2.count():
+                    b2 = await icon2.bounding_box()
+                    if b2:
+                        await page.mouse.click(b2["x"] + b2["width"] / 2, b2["y"] + b2["height"] / 2)
+                        await page.wait_for_timeout(2500)
+                        await page.mouse.click(rowBox["x"], rowBox["y"])
+                        await page.wait_for_timeout(3000)
+            except Exception:
+                pass
+            ready = await page.evaluate(
+                """() => { const W = innerWidth, H = innerHeight;
+                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
+                        .some((e) => { const r = e.getBoundingClientRect();
+                            return r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }); }"""
+            )
+        notes.append("会话已就绪" if ready else "会话没就绪")
+
         sent = []
         parts = [x.strip() for x in str(messages or "").split("|") if x.strip()]
         for part in parts:
