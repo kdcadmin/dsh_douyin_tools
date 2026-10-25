@@ -5,3 +5,8 @@ out/
 thumbs/
 browser/
 bili-browser/
+# 本地调试脚本（含个人昵称，不推）
+tools/probe_comment_dom3.py
+tools/probe_send_at.py
+tools/render-cards.mjs
+
