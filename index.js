@@ -917,6 +917,13 @@ export function apply(ctx, config) {
       const myTexts = myReplyTexts()
       const repliedUsers = cfg.replyOncePerUser ? readRepliedUsers() : new Set()
       const seenThisRound = new Set()
+      // 图文作品的评论：没有 cid，且页面上点不到「回复」（抖音图文页不展开评论面板）
+      // 别硬试、别占额度 —— 直接在报告里写清楚「图文作品暂不支持回复」
+      const cidless = list.filter((c) => c && !String(c.cid || '').trim())
+      if (cidless.length && !list.some((c) => String(c.cid || '').trim())) {
+        out.push({ aweme_id: v, ok: true, skipped: `图文作品：读到 ${cidless.length} 条评论，但回复入口点不到（暂不支持回复）` })
+        continue
+      }
       let fresh = list.filter((c) => {
         if (!c) return false
         // 图文作品的评论从 DOM 抓来，没有 cid：用「序号 + 文本」当身份，照样能回
