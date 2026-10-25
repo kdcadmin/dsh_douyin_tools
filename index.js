@@ -138,7 +138,7 @@ export const Config = !z ? undefined : z.object({
   /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
   shareNote: z.string().default('').extra('volatile', true),
   /** 回评论时看多久以内的作品（1=只回今天发的；30=连老作品的新评论一起回） */
-  replyWorksDays: z.natural().default(1).extra('volatile', true),
+  replyWorksDays: z.natural().default(3).extra('volatile', true),
   /** 定期清理：每天一次，删临时目录、老缩略图，日志轮转 */
   autoClean: z.boolean().default(true).extra('volatile', true),
   /** 遇到直播就跳过（默认开） */
