@@ -137,6 +137,10 @@ export const Config = !z ? undefined : z.object({
   dmReplyPerDay: z.natural().default(5).extra('volatile', true),
   /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
   shareNote: z.string().default('').extra('volatile', true),
+  /** 回评论时看多久以内的作品（1=只回今天发的；30=连老作品的新评论一起回） */
+  replyWorksDays: z.natural().default(1).extra('volatile', true),
+  /** 定期清理：每天一次，删临时目录、老缩略图，日志轮转 */
+  autoClean: z.boolean().default(true).extra('volatile', true),
   /** 遇到直播就跳过（默认开） */
   skipLive: z.boolean().default(true).extra('volatile', true),
   /** 转发视频给谁（昵称；留空=不转发） */
@@ -278,6 +282,8 @@ export function apply(ctx, config) {
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
+    if ('replyWorksDays' in p) p.replyWorksDays = Math.max(1, Math.min(Number(p.replyWorksDays) || 1, 90))
+    if ('autoClean' in p) p.autoClean = Boolean(p.autoClean)
     if ('shareNote' in p) p.shareNote = String(p.shareNote || '').slice(0, 80)
     if ('sharePerDay' in p) p.sharePerDay = Math.max(0, Math.min(Number(p.sharePerDay) || 0, 50))
     if ('pickPerRound' in p) p.pickPerRound = Math.max(1, Math.min(Number(p.pickPerRound) || 1, 5))
@@ -764,7 +770,7 @@ export function apply(ctx, config) {
     let titles = []
     let source = 'none'
     try {
-      const r = await call('douyin_my_posts', { days: 1 }, { timeoutMs: 90_000 })
+      const r = await call('douyin_my_posts', { days: Math.max(1, Number(cfg.replyWorksDays) || 1) }, { timeoutMs: 90_000 })
       const list = Array.isArray(r?.items) ? r.items : []
       ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
       titles = list.map((x) => x.title)
@@ -1781,6 +1787,16 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'dy_cleanup',
+    description: '手动清一次：临时垃圾、30 天前的缩略图、120 天前的日报、超大日志轮转、浏览器 Cache（不动登录态）。',
+    parameters: {
+      thumbDays: { type: 'number', description: '缩略图保留多少天（默认 30）' },
+      reportDays: { type: 'number', description: '日报保留多少天（默认 120）' },
+    },
+    async execute(args) { return cleanup({ thumbDays: Number(args.thumbDays) || 30, reportDays: Number(args.reportDays) || 120 }) },
+  })
+
+  tool({
     name: 'dy_dm_round',
     description: '看一遍私信：谁发来新消息就回一句（每人每天「回几条」有限制，总条数也有上限）。陌生人消息也会回。',
     parameters: {},
@@ -2243,6 +2259,64 @@ export function apply(ctx, config) {
     return { ok: true, replied: out.filter((o) => o.ok).length, items: out, usedToday, perDay }
   }
 
+  /** 定期清理：临时目录、老缩略图、老日报、超大日志（防 Cookie/缓存/日志越堆越多拖垮启动） */
+  const cleanup = (opts = {}) => {
+    const out = []
+    const now = Date.now()
+    const drop = (dir, days, filter) => {
+      try {
+        if (!existsSync(dir)) return
+        for (const f of readdirSync(dir)) {
+          const full = join(dir, f)
+          try {
+            const st = statSync(full)
+            if (!st.isFile()) continue
+            if (filter && !filter(f)) continue
+            if (days === 0 || (now - st.mtimeMs) / 86400000 > days) {
+              rmSync(full, { force: true })
+              out.push(`删除 ${f}`)
+            }
+          } catch { /* 单个文件失败不影响 */ }
+        }
+      } catch { /* 目录读不到就算了 */ }
+    }
+    drop(join(stateDir, '.tmp'), 0)                       // 临时垃圾全清
+    drop(join(stateDir, 'thumbs'), opts.thumbDays ?? 30)   // 老缩略图
+    drop(join(stateDir, 'out'), opts.reportDays ?? 120, (f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+    // 日志轮转：超过 2MB 就把旧内容丢掉，只留最后 2000 行
+    try {
+      const logFile = join(stateDir, 'duty.log')
+      if (existsSync(logFile) && statSync(logFile).size > 2 * 1024 * 1024) {
+        const tail = readFileSync(logFile, 'utf8').split('\n').slice(-2000).join('\n')
+        writeFileSync(logFile, tail, 'utf8')
+        out.push('日志轮转（保留最后 2000 行）')
+      }
+    } catch { /* 忽略 */ }
+    // 浏览器缓存里的旧缓存文件（不动登录态：只删 Cache 子目录）
+    try {
+      const cache = join(stateDir, 'browser', 'Default', 'Cache')
+      if (existsSync(cache)) {
+        let n = 0
+        for (const f of readdirSync(cache)) { try { rmSync(join(cache, f), { recursive: true, force: true }); n += 1 } catch { /* 忽略 */ } }
+        if (n) out.push(`清缓存 ${n} 项`)
+      }
+    } catch { /* 忽略 */ }
+    if (out.length) log(`定期清理：${out.length} 项（${out.slice(0, 3).join('，')}…）`)
+    return { ok: true, cleaned: out.length, items: out.slice(0, 20) }
+  }
+
+  /** 每天只清一次 */
+  const maybeClean = () => {
+    try {
+      if (cfg.autoClean === false) return
+      const st = readState()
+      const key = `clean:${dayKey()}`
+      if (st[key]) return
+      const r = cleanup()
+      bumpState({ [key]: true, lastCleanAt: new Date().toISOString(), lastCleanCount: r.cleaned })
+    } catch (e) { log(`清理出错（已兜住）：${e?.message ?? e}`) }
+  }
+
   localRound = async () => {
     refreshCfg()
     const quota = Math.max(0, Number(cfg.perDay) || 0)
@@ -2553,6 +2627,7 @@ export function apply(ctx, config) {
     replyTimer = setTimeout(async () => {
       try {
         refreshCfg()
+        maybeClean()
         await maybeKeepStreak()
         try { await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
         if (cfg.autoReply && !replyBusy) {
