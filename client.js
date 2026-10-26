@@ -921,7 +921,6 @@ window.__ModuleLoader__.load({
           { id: 'graph', label: '图谱' },
           { id: 'character', label: '角色卡' },
           { id: 'timeline', label: '时间线' },
-          { id: 'clean', label: '清理' },
           { id: 'raw', label: '原始记录' },
         ]
 
@@ -1268,91 +1267,6 @@ window.__ModuleLoader__.load({
               : h(Card, null, busy ? '读取中…' : (q ? '没有匹配的记忆' : '（还没有回忆条目）')))
         }
 
-        // 清理：按工作区列出记忆条目，能单条删、也能整区清空（走 memory.forget）
-        const Cleanup = () => {
-          const [list, setList] = React.useState(null)
-          const [open, setOpen] = React.useState('')
-          const [items, setItems] = React.useState({})
-          const [msg, setMsg] = React.useState('')
-          const [busy3, setBusy3] = React.useState(false)
-
-          const loadWs = async () => {
-            try { setList(await memCall('workspaces', {})) } catch (e) { setMsg('读工作区失败：' + String(e && e.message || e)) }
-          }
-          React.useEffect(() => { loadWs() }, [])
-
-          const loadItems = async (wid) => {
-            if (items[wid]) return
-            try {
-              const r = await memCall('workspace_detail', { workspace_id: wid, limit: 300 })
-              setItems({ ...items, [wid]: (r && r.items) || [] })
-            } catch (e) { setMsg('读条目失败：' + String(e && e.message || e)) }
-          }
-
-          const delOne = async (wid, id) => {
-            setBusy3(true); setMsg('')
-            try {
-              await memCall('forget', { id })
-              setItems({ ...items, [wid]: (items[wid] || []).filter((x) => x.id !== id) })
-              setMsg('已删除 1 条')
-              loadWs()
-            } catch (e) { setMsg('删除失败：' + String(e && e.message || e)) } finally { setBusy3(false) }
-          }
-
-          const delAll = async (wid, label) => {
-            setBusy3(true); setMsg('')
-            try {
-              const r = await memCall('workspace_detail', { workspace_id: wid, limit: 500 })
-              const rows = (r && r.items) || []
-              let n = 0
-              for (const it of rows) {
-                try { await memCall('forget', { id: it.id }); n += 1 } catch { /* 单条失败继续 */ }
-              }
-              setItems({ ...items, [wid]: [] })
-              setMsg('已清空「' + label + '」' + n + ' 条')
-              loadWs()
-            } catch (e) { setMsg('清空失败：' + String(e && e.message || e)) } finally { setBusy3(false) }
-          }
-
-          if (!list) return h('div', { className: 'dym-card' }, '工作区读取中…')
-          const wss = list.workspaces || list.results || list || []
-          return h('div', null,
-            h('div', { className: 'dym-card', style: { fontSize: '12px', opacity: 0.85 } },
-              '想清掉哪些记忆就点开对应工作区；删掉后会同步删每日 md 里那一行（记忆插件自己做的）。'),
-            msg ? h('div', { className: 'dym-card', style: { color: '#0a0' } }, msg) : null,
-            (wss || []).map((w) => {
-              const wid = w.id || w.workspace_id || ''
-              const label = w.label || wid || '（未命名）'
-              const count = w.count ?? w.total ?? 0
-              const isOpen = open === wid
-              return h('div', { key: wid, className: 'dym-card' },
-                h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
-                  h('button', {
-                    className: 'dym-tab' + (isOpen ? ' on' : ''),
-                    onClick: () => { const nx = isOpen ? '' : wid; setOpen(nx); if (nx) loadItems(nx) },
-                  }, isOpen ? '收起' : '展开'),
-                  h('span', { style: { fontWeight: 600 } }, label),
-                  h('span', { className: 'dym-chip' }, count + ' 条'),
-                  h('span', { style: { marginLeft: 'auto' } },
-                    h('button', {
-                      className: 'dym-tab', disabled: busy3 ? '' : undefined,
-                      onClick: () => delAll(wid, label),
-                    }, '整区清空'))),
-                isOpen ? h('div', { style: { marginTop: '8px' } },
-                  (items[wid] || []).length
-                    ? (items[wid] || []).map((it) => h('div', {
-                        key: it.id, style: { display: 'flex', gap: '8px', alignItems: 'flex-start',
-                          padding: '6px 0', borderTop: '1px dashed rgba(128,128,128,.2)' },
-                      },
-                      h('span', { style: { fontSize: '11px', opacity: 0.5, minWidth: '64px' } }, String(it.created_at || '').slice(5, 16)),
-                      h('span', { style: { flex: 1, fontSize: '12px' } }, String(it.content || '').slice(0, 160)),
-                      h('button', { className: 'dym-tab', disabled: busy3 ? '' : undefined,
-                        onClick: () => delOne(wid, it.id) }, '删')))
-                    : h('div', { style: { fontSize: '12px', opacity: 0.6 } }, '（这一区没有条目了）'))
-                : null)
-            }))
-        }
-
         const MemoryPage = () => { try {
           const [tab, setTab] = React.useState('graph')
           const [char, setChar] = React.useState(null)
@@ -1407,7 +1321,6 @@ window.__ModuleLoader__.load({
             tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
             tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
             tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
-            tab === 'clean' ? h(Guard, { Comp: Cleanup, props: {}, label: '清理' }) : null,
             tab === 'raw' ? rawBody() : null,
           )
         } catch (e) {
