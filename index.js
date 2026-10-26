@@ -3049,9 +3049,29 @@ export function apply(ctx, config) {
           out.lines = all.slice(-60).reverse()
         }
       } catch { /* 读不到就给空 */ }
+      // ⭐ 2026-10-26 修（下载的人报「读取不到记忆」）：记忆系统的库不在本插件里，
+      //    路径不能写死本机的 `<DSH_HOME>\memory-system\memory.db`——别人那台机器根本没有这个路径。
+      //    这里按「DSH 家目录 → $DSH_HOME → 用户家目录/.dsh」各试一遍，找到哪个算哪个；
+      //    都找不到就留空（只是不显示库信息，读 md 那部分照旧）。
       try {
-        const db = '<DSH_HOME>\\memory-system\\memory.db'
-        if (existsSync(db)) { out.dbPath = db; out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10 }
+        const cands = []
+        try {
+          const dh = typeof ctx.get === 'function' ? ctx.get('dshHomePath') : null
+          if (typeof dh === 'function') { const p = dh('memory-system'); if (p) cands.push(join(String(p), 'memory.db')) }
+          else if (typeof dh === 'string' && dh.trim()) cands.push(join(dh.trim(), 'memory-system', 'memory.db'))
+        } catch { /* 拿不到 DSH 家目录就走下面两种 */ }
+        const envHome = String(process.env.DSH_HOME || '').trim()
+        if (envHome) cands.push(join(envHome, 'memory-system', 'memory.db'))
+        const userHome = String(process.env.USERPROFILE || process.env.HOME || '').trim()
+        if (userHome) cands.push(join(userHome, '.dsh', 'memory-system', 'memory.db'))
+        for (const db of cands) {
+          try {
+            if (!db || !db.toLowerCase().endsWith('memory.db') || !existsSync(db)) continue
+            out.dbPath = db
+            out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10
+            break
+          } catch { /* 这一个不行就看下一个 */ }
+        }
       } catch { /* 忽略 */ }
       // ⭐ 人设（persona.md）也一起给出来：角色卡里要能看、能改
       try {

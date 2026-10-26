@@ -917,6 +917,23 @@ window.__ModuleLoader__.load({
           return raw
         }
 
+        // ⭐ 2026-10-26 修（下载的人报「读取不到记忆」）：
+        //   「记忆」页里的 图谱 / 角色卡 / 时间线 用的是**记忆系统插件**的 memory.* RPC。
+        //   别人只装这个抖音插件、没装记忆系统时，那几条 RPC 根本不存在 ⇒ 页面直接红字「读取失败」。
+        //   这里先探一次并缓存结论：装了 = 完整记忆页；没装 = 退回本插件自己的 <家>/memory/*.md，
+        //   只给「原始记录」+ 人设，绝不报错。
+        let memSysState = 'unknown'   // unknown | on | off
+        const memSysProbe = async (force) => {
+          if (force) memSysState = 'unknown'
+          if (memSysState !== 'unknown') return memSysState === 'on'
+          try {
+            const r = await memCall('stats', {})
+            if (r == null || (typeof r === 'object' && r.ok === false)) throw new Error('memory-system 没装')
+            memSysState = 'on'
+          } catch { memSysState = 'off' }
+          return memSysState === 'on'
+        }
+
         const MemTabs = [
           { id: 'graph', label: '图谱' },
           { id: 'character', label: '角色卡' },
@@ -1276,18 +1293,29 @@ window.__ModuleLoader__.load({
           const [stats, setStats] = React.useState(null)
           const [err, setErr] = React.useState('')
           const [busy, setBusy] = React.useState(false)
+          const [memOn, setMemOn] = React.useState(null)   // null=还没探完 / true=有记忆系统插件 / false=没装
+
+          // 「原始记录」= 本插件自己的 <家>/memory/*.md，不依赖任何别的插件，永远能读
+          const rawFallback = async () => {
+            try {
+              const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+              setRaw(await r.json())
+            } catch {
+              setRaw({ ok: false, lines: [], files: [], hint: '读 <家>/memory/*.md 失败（可能是权限或插件还没激活）' })
+            }
+          }
 
           const load = React.useCallback(async (force) => {
             setBusy(true); setErr('')
+            const on = await memSysProbe(Boolean(force))
+            setMemOn(on)
             try {
+              if (!on) { await rawFallback(); return }   // 没装记忆系统 ⇒ 只读本地 md，不报错
               if (force || stats === null) { try { setStats(await memCall('stats', {})) } catch { /* 忽略 */ } }
               if (tab === 'character' && (force || char === null)) setChar(await memCall('character', { action: 'read' }))
               if (tab === 'timeline' && (force || tl === null)) setTl(await memCall('recall', { limit: 80 }))
               if (tab === 'graph' && (force || g === null)) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
-              if (tab === 'raw' && (force || raw === null)) {
-                const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
-                setRaw(await r.json())
-              }
+              if (tab === 'raw' && (force || raw === null)) await rawFallback()
             } catch (e) { setErr(String((e && e.message) || e)) } finally { setBusy(false) }
           }, [tab, char, tl, g, raw, stats])
           React.useEffect(() => { load(false) }, [tab])
@@ -1307,21 +1335,31 @@ window.__ModuleLoader__.load({
           return h('div', { className: 'dym-root' },
             h('div', { className: 'dym-head' },
               h('span', { className: 'dym-title' }, '记忆'),
-              h('span', { className: 'dym-badge' }, 'memory-system'),
+              h('span', { className: 'dym-badge' }, memOn === false ? '本地 memory/*.md' : 'memory-system'),
               h('div', { className: 'dym-chips' },
-                h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆'),
-                h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点'),
-                h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系'))),
+                memOn === true
+                  ? h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆')
+                  : h('span', { className: 'dym-chip' }, h('b', null, (raw && raw.lines || []).length || '–'), ' 条本地记录'),
+                memOn === true ? h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点') : null,
+                memOn === true ? h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系') : null)),
             h('div', { className: 'dym-tabs' },
-              MemTabs.map((t2) => h('button', {
-                key: t2.id, className: 'dym-tab' + (tab === t2.id ? ' on' : ''), onClick: () => setTab(t2.id),
+              (memOn === true ? MemTabs : [{ id: 'raw', label: '原始记录' }]).map((t2) => h('button', {
+                key: t2.id,
+                className: 'dym-tab' + ((memOn === true ? tab : 'raw') === t2.id ? ' on' : ''),
+                onClick: () => setTab(t2.id),
               }, t2.label)),
               h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
-            err ? h(Card, null, '读取失败：' + err) : null,
-            tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
-            tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
-            tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
-            tab === 'raw' ? rawBody() : null,
+            err && memOn === true ? h(Card, null, '读取失败：' + err) : null,
+            memOn === null ? h(Card, null, busy ? '读取中…' : '点「刷新」重试') : null,
+            memOn === false ? h(Card, null,
+              h('div', null, '没装「记忆系统」插件：图谱 / 角色卡 / 时间线这三样是它提供的，所以这一页现在只显示本插件自己攒的记忆（<家>/memory/*.md）。'),
+              h('div', { style: { opacity: 0.62, marginTop: '6px', fontSize: '12px' } },
+                '想让这里变成完整记忆面板，装一下 可选记忆插件 插件再回来点「刷新」；不装也完全不影响刷抖音。')) : null,
+            memOn === true && tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
+            memOn === true && tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
+            memOn === true && tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
+            (memOn === false || (memOn === true && tab === 'raw')) ? rawBody() : null,
+            memOn === false ? h(PersonaBox, null) : null,
           )
         } catch (e) {
           try {
