@@ -898,8 +898,12 @@ export function apply(ctx, config) {
     '看完心情好了[微笑]', '有点东西[比心]', '刚刷到就看完了[笑哭]', '说得对[赞]',
   ]
 
-  const sharesToday = (now = new Date()) => Object.values(readLedger().shares || {})
-    .filter((r) => r && r.day === dayKey(now)).length
+  // 只用「确认成功的 share 动作」算额度：旧版失败也写 shares，会把额度虚高、把视频卡掉
+  const sharesToday = (now = new Date()) => {
+    const d = dayKey(now)
+    return Object.values(readLedger().actions || {})
+      .filter((a) => a && a.day === d && a.kind === 'share' && a.status === 'succeeded').length
+  }
   const noteShare = (awemeId, rec) => {
     const l = readLedger()
     l.shares = l.shares || {}
@@ -3296,11 +3300,13 @@ export function apply(ctx, config) {
           const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
           const okk = confirmed(r)
           const clicked = Boolean(r) && r.ok !== false // 点了分享就算数（可能只是回执没确认）
-          acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，仍补附言）' : (r?.error || '没发出去')))
-          // ⭐ 附言/表情包当成一条普通私信来发：只要分享点了就补，不看回执
-          if (okk || clicked || cfg.shareWithNote !== false) {
+          acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，先不发附言）' : (r?.error || '没发出去')))
+          // ⭐ 只有真的点到分享/确认发送，才补附言和表情包；被额度挡下时只报失败，不发孤零零的文字
+          if (okk) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             appendVideoMemory('转发给你', v, 'to=' + to)
+          }
+          if (okk || clicked) {
             // 转发后让模型写一句人话 + 挑表情包（它看过转写，不是模板）
             if (cfg.shareWithNote !== false) {
               const prompt = [
