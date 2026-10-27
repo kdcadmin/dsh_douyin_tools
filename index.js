@@ -185,8 +185,9 @@ export const Config = !z ? undefined : z.object({
   publishTitle: z.string().default('').extra('volatile', true),
   /** 投稿默认带的话题（空格/逗号分隔） */
   publishTags: z.string().default('').extra('volatile', true),
-  /** ⭐ 复用「已经登录的 Chrome」：CDP 调试地址（空 = 用自己的持久 profile，首次要扫一次码） */
-  cdpUrl: z.string().default('http://127.0.0.1:9222').extra('volatile', true),
+  /** ⭐ 浏览器模式：默认留空 = 用插件自己的持久 profile（第一次扫码一次，开箱即用）。
+   *    想复用「本人已登录的 Chrome」才填 `http://127.0.0.1:9222`（并先 dy_chrome_open）。 */
+  cdpUrl: z.string().default('').extra('volatile', true),
   /** 调试端口（`dy_chrome_open` 用它拉 Chrome） */
   cdpPort: z.natural().default(9222).extra('volatile', true),
   /** Chrome 可执行文件路径（留空 = 自动探测） */
@@ -203,6 +204,15 @@ export function apply(ctx, config) {
   const cfgFile = join(stateDir, 'config.json')
   const qrFile = join(stateDir, 'login-qr.png')
   const scriptPath = join(stateDir, 'mcp_server.py')
+  /** Python 半边共享的调试端口：按家目录派生，两个实例不会抢同一个 9333 */
+  const profilePort = (() => {
+    const env = Number(process.env.DOUYIN_PROFILE_PORT)
+    if (Number.isInteger(env) && env >= 1024 && env <= 65535) return env
+    let h = 2166136261
+    for (const ch of stateDir) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0
+    return 9300 + (h % 600)
+  })()
+  const videoLabDir = join(pluginDir, 'video-understanding-lab')
 
   try { mkdirSync(outDir, { recursive: true }) } catch { /* 建不出来也别在 apply 里抛 */ }
 
@@ -253,7 +263,7 @@ export function apply(ctx, config) {
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
     commentPerDay: 10, publishPerDay: 1, publishTitle: '', publishTags: '',
-    cdpUrl: 'http://127.0.0.1:9222', cdpPort: 9222, chromePath: '',
+    cdpUrl: '', cdpPort: 9222, chromePath: '',
   }
 
   /**
@@ -379,6 +389,19 @@ export function apply(ctx, config) {
   }
 
   const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
+  /** 宿主设置写失败时，这些键以本地 config.json 为准（避免下次读回宿主旧值） */
+  const readLocalOnly = () => {
+    try {
+      const raw = readJson(cfgFile, {})
+      return new Set(Array.isArray(raw._localOnly) ? raw._localOnly.filter((k) => typeof k === 'string') : [])
+    } catch { return new Set() }
+  }
+  const writeLocalOnly = (set) => {
+    try {
+      const raw = readJson(cfgFile, {})
+      writeJson(cfgFile, { ...raw, _localOnly: [...set] })
+    } catch { /* 写不了就下次再说 */ }
+  }
 
   /**
    * 配置怎么合：**插件面板/config.json 存过的键 > DSH 原生设置页 > 默认值**。
@@ -386,12 +409,15 @@ export function apply(ctx, config) {
    */
   const loadCfg = () => {
     const saved = savedCfg()
+    const localOnly = readLocalOnly()
     const row = settingsDesc()
     if (!row) return clampPatch(saved)
     const user = row.user || {}
     const out = normalize(row.value && typeof row.value === 'object' ? row.value : config, { ...DEFAULTS })
     for (const k of Object.keys(DEFAULTS)) {
-      out[k] = user[k] !== undefined && typeof user[k] === typeof DEFAULTS[k] ? user[k] : saved[k]
+      out[k] = localOnly.has(k)
+        ? saved[k]
+        : (user[k] !== undefined && typeof user[k] === typeof DEFAULTS[k] ? user[k] : saved[k])
     }
     return clampPatch(out)
   }
@@ -403,7 +429,8 @@ export function apply(ctx, config) {
   const saveCfg = (patch) => {
     Object.assign(cfg, normalize(patch, cfg))
     for (const k of Object.keys(patch || {})) if (k in DEFAULTS) touchedKeys.add(k)
-    writeJson(cfgFile, { ...cfg, _set: [...touchedKeys] })
+    const localOnly = readLocalOnly()
+    writeJson(cfgFile, { ...cfg, _set: [...touchedKeys], _localOnly: [...localOnly] })
   }
 
   const saveCfgHost = async (patch) => {
@@ -437,6 +464,11 @@ export function apply(ctx, config) {
     const clean = clampPatch(patch)
     saveCfg(clean)
     const host = await saveCfgHost(clean)
+    // 宿主写失败时把键记成「本地优先」，否则下次 loadCfg 会被宿主旧值盖回去
+    const keys = Object.keys(clean)
+    const localOnly = readLocalOnly()
+    for (const k of keys) { if (host.ok) localOnly.delete(k); else localOnly.add(k) }
+    writeLocalOnly(localOnly)
     return { clean, host }
   }
 
@@ -506,6 +538,9 @@ export function apply(ctx, config) {
         // ⭐ 2026-10-27：平时无头静默；一旦检测到验证码，就切成带界面让本人手动过（过完自动切回）
         DOUYIN_HEADLESS: hasCaptchaFlag() ? '0' : '1',
         DOUYIN_CDP_URL: String(cfg.cdpUrl || ''),
+        // 多实例隔离：每个家目录一个独立端口；视频理解原型也用这个端口连同一份浏览器
+        DOUYIN_PROFILE_PORT: String(profilePort),
+        DOUYIN_VIDEO_LAB: videoLabDir,
         TEMP: join(stateDir, '.tmp'),
         TMP: join(stateDir, '.tmp'),
         TMPDIR: join(stateDir, '.tmp'),
@@ -1779,7 +1814,7 @@ export function apply(ctx, config) {
     runningHeadless = run
     const finish = async (code, error = '') => {
       if (run.finished) return
-      try { if (typeof opts.onFinish === 'function') opts.onFinish(code, error) } catch { /* 回调别影响收尾 */ }
+      try { if (typeof opts.onFinish === 'function') opts.onFinish(code, error, run) } catch { /* 回调别影响收尾 */ }
       run.finished = true
       clearTimeout(run.timer)
       // Remove credentials before allowing a new run to create an overlay.
@@ -1816,6 +1851,10 @@ export function apply(ctx, config) {
           const key = dayKey() + ':' + String(args.aweme_id || '')
           if (name === 'douyin_watch' && !readLedger().picks[key] && (countWatchedToday() >= Number(cfg.perDay || 0) || Object.values(readLedger().picks).filter(p => p.runId === run.runId && p.watched).length >= cfg.pickPerRound)) return { ok: false, blocked: true, error: '今日看片额度已用完' }
           const result = await call(name, args, { timeoutMs: name === 'douyin_watch' ? 900_000 : 300_000 })
+          // ⭐ 只有平台明确确认的发送才记在 run 上；私信收尾时用这个判断「真回了没」
+          if (name === 'douyin_chat_send' && confirmed(result)) {
+            run.lastReply = { text: String(args.text || '').slice(0, 300), at: Date.now(), messageId: String(result.messageId || '') }
+          }
           if (name === 'douyin_watch' && result.ok) {
             const l = readLedger()
             const prev = l.picks[key] || { day: key.slice(0, 10), aweme_id: String(args.aweme_id), source: 'headless-watch', runId: run.runId, at: new Date().toISOString() }
@@ -1841,6 +1880,8 @@ export function apply(ctx, config) {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: uvEnv({
           DSH_DOUYIN_HOME: stateDir,
+          DOUYIN_PROFILE_PORT: String(profilePort),
+          DOUYIN_VIDEO_LAB: videoLabDir,
           // ⭐ 2026-10-25：headless 那轮被宿主的文件沙箱挡住写系统 Temp，
           //    Playwright 的 mkdtemp 直接 EPERM。把 TMP/TEMP/TMPDIR 指到家目录下就绕开了。
           TEMP: tmpDir,
@@ -1962,20 +2003,13 @@ export function apply(ctx, config) {
       refreshCfg()
       if (cfg.dmAutoReply === false) return { ok: true, skipped: 'dmAutoReply 关着' }
       try { await ensureMcp() } catch (e) { return { ok: false, error: 'MCP 起不来：' + String(e?.message ?? e) } }
-      const firstTo = String(cfg.msgAllowTo || '').split(/[,，、]+/).map((x) => x.trim()).filter(Boolean)[0] || ''
-      // ⭐ 拿「按时间排序的全部消息文本」，再用「我自己发过的话」逐条配对：
-      //    配得上的算我发的，配不上的就是她发的。最后一条是谁 → 决定回不回。
-      let snap = null
-      try {
-        snap = await Promise.race([
-          call('douyin_dm_snapshot', { nickname: firstTo, limit: 40 }, { timeoutMs: 45_000 }),
-          new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: '读会话超时' }), 45_000)),
-        ])
-      } catch (e) {
-        return { ok: false, error: '读会话失败：' + String(e?.message ?? e) }
+      const splitNicks = (s) => String(s || '').split(/[,，、\r\n]+/).map((x) => x.trim()).filter(Boolean)
+      const allowList = splitNicks(cfg.msgAllowTo)
+      const onlyList = splitNicks(cfg.dmReplyOnlyTo)
+      const contacts = allowList.filter((n) => !onlyList.length || onlyList.includes(n))
+      if (!contacts.length) {
+        return { ok: true, replied: 0, note: onlyList.length ? '「只回谁」和「可以主动发消息的人」没有交集' : '还没配置「可以主动发消息的人」' }
       }
-      if (!snap || snap.ok === false) return { ok: false, error: '会话没读到：' + String(snap?.error || '') }
-
       const items = readDmLog()
       const now = Date.now()
       // 冷却：刚回完 90 秒内不再触发（避免任何识别失误造成连环发）
@@ -1983,23 +2017,41 @@ export function apply(ctx, config) {
         return { ok: true, replied: 0, note: '刚回过，冷却中' }
       }
       const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-      const msgs = (snap.items || []).map((x) => norm(x && x.text)).filter(Boolean)
-      if (!msgs.length) return { ok: true, replied: 0, note: '会话里没读到消息' }
       const sent = readDmSent().map((x) => norm(x && x.text)).filter(Boolean)
-      const pool = new Map()
-      for (const s of sent) pool.set(s, (pool.get(s) || 0) + 1)
-      let lastRole = 'her'
-      let lastHer = ''
-      for (const m of msgs) {
-        const left = pool.get(m) || 0
-        if (left > 0) { pool.set(m, left - 1); lastRole = 'me' } else { lastRole = 'her'; lastHer = m }
+      // ⭐ 逐个联系人看，而不是只看白名单第一个；只回谁是「白名单」之上的筛选
+      let picked = null
+      for (const contact of contacts) {
+        let snap = null
+        try {
+          snap = await Promise.race([
+            call('douyin_dm_snapshot', { nickname: contact, limit: 40 }, { timeoutMs: 45_000 }),
+            new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: '读会话超时' }), 45_000)),
+          ])
+        } catch (e) {
+          log(`私信巡检：读「${contact}」会话失败：${e?.message ?? e}`)
+          continue
+        }
+        if (!snap || snap.ok === false) continue
+        const msgs = (snap.items || []).map((x) => norm(x && x.text)).filter(Boolean)
+        if (!msgs.length) continue
+        const pool = new Map()
+        for (const s of sent) pool.set(s, (pool.get(s) || 0) + 1)
+        let lastRole = 'her'
+        let lastHer = ''
+        for (const m of msgs) {
+          const left = pool.get(m) || 0
+          if (left > 0) { pool.set(m, left - 1); lastRole = 'me' } else { lastRole = 'her'; lastHer = m }
+        }
+        if (lastRole === 'me') continue // 最后一条是我发的，不用回
+        const inflight = [...items].reverse().find((x) => x && x.name === contact && x.replied !== true && !x.failed && now - Number(x.at || 0) < 120000)
+        if (inflight) continue // 这个人的上一条还在回
+        picked = { name: contact, text: lastHer || msgs[msgs.length - 1] }
+        break
       }
-      if (lastRole === 'me') return { ok: true, replied: 0, note: '最后一条是我发的，不用回' }
-      const name = firstTo
-      const text = lastHer || msgs[msgs.length - 1]
+      if (!picked) return { ok: true, replied: 0, note: '没有需要回的消息' }
+      const name = picked.name
+      const text = picked.text
       if (!name || !allowInitiate(name)) return { ok: true, replied: 0, note: '不是白名单里的人' }
-      const inflight = [...items].reverse().find((x) => x && x.name === name && x.replied !== true && now - Number(x.at || 0) < 120000)
-      if (inflight) return { ok: true, replied: 0, note: '上一条还在回' }
       const key = `seq:${now}`
       const row = { name, text, key }
       const entry = { day: dmDayOf(now), name: row.name, text: row.text, key: row.key, at: now, replied: false, replyAt: 0, runId: '' }
@@ -2017,27 +2069,28 @@ export function apply(ctx, config) {
       const r = await runDuty('dm', {
         prompt: dmReplyPrompt(row.name, row.text, sharedMemo),
         countRound: false,
-        onFinish: (code) => {
+        onFinish: (code, error, run) => {
           try {
             const list = readDmLog()
             const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
             if (!it) return
-            if (code === 0) {
+            const hit = run && run.lastReply
+            if (code === 0 && hit) {
               it.replied = true
               it.replyAt = Date.now()
-              // ⭐ 把这一问一答写进记忆（格式「我:/dsh:」），以后记得住
-              call('douyin_dm_snapshot', { nickname: row.name, limit: 8 }, { timeoutMs: 60_000 }).then((h) => {
-                try {
-                  const arr = (h && h.ok !== false && Array.isArray(h.items)) ? h.items : []
-                  const norm2 = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-                  // 最后一条只要不是她那句原话，就是我们的回复（和轮询用同一个抓取函数，能精确比对）
-                  const cands = arr.map((m) => norm2(m && m.text)).filter((s) => s && s !== norm2(row.text))
-                  const replyText = cands.length ? cands[cands.length - 1] : ''
-                  it.replyText = replyText
-                  appendDmMemory(row.name, row.text, replyText || '（已回复，内容未取到）')
-                } catch { /* 记不上不影响 */ }
-              }).catch(() => { /* 记不上不影响 */ })
-            } else { it.at = 0 } // 失败就把时间清掉，下一轮重试
+              it.status = 'sent'
+              it.replyText = String(hit.text || '')
+              // ⭐ 一问一答写进插件默认记忆（格式「我:/大肥鱼:」），不用外部记忆插件
+              appendDmMemory(row.name, row.text, it.replyText || '（已回复，内容未取到）')
+            } else {
+              it.replied = false
+              it.status = code === 0 ? 'unknown' : 'failed'
+              it.tries = Number(it.tries || 0) + 1
+              it.error = code === 0 ? '没有收到发送回执，未记为已回复' : String(error || '')
+              if (it.tries >= 2) it.failed = true
+              else it.at = 0
+              log(`私信巡检：${row.name} 未确认发送（${it.status}，tries=${it.tries}）`)
+            }
             writeDmLog(list)
           } catch { /* 记不上不影响 */ }
         },
@@ -2052,7 +2105,7 @@ export function apply(ctx, config) {
         } catch { /* ignore */ }
         return { ok: false, error: 'headless 没起来：' + String(r?.error || '未知'), to: row.name, text: row.text }
       }
-      return { ok: true, replied: 1, to: row.name, text: row.text, started: true }
+      return { ok: true, replied: 0, pending: true, to: row.name, text: row.text, started: true, note: '已起任务，等发送回执后才会记为已回复' }
     } catch (e) {
       log('私信巡检出错（已兜住）：' + String(e?.message ?? e))
       return { ok: false, error: String(e?.message ?? e) }
@@ -2142,17 +2195,18 @@ export function apply(ctx, config) {
     name: 'dy_chrome_open',
     description: '把「本人已经登录的那个 Chrome」拉起来并开 CDP 调试端口，之后所有抖音动作都走这个浏览器（登录态直接用，不用再扫码）。\n'
       + '⚠️ Chrome 已经开着的时候，带同一个默认 profile 再拉一次**不会**开调试端口 —— 先全关 Chrome 再调这个。\n'
-      + '不开 CDP 也能用：那就退回插件自己的持久 profile，首次扫码一次。',
+      + '默认（cdpUrl 为空）用插件自己的持久 profile，第一次扫码一次；调这个会把 cdpUrl 切成 CDP 模式。',
     parameters: {
       port: { type: 'number', description: '调试端口（默认用设置里的 cdpPort / 9222）' },
     },
     async execute(args) {
       refreshCfg()
       const port = Number(args?.port) || Number(cfg.cdpPort) || 9222
-      if (port !== Number(cfg.cdpPort)) {
-        await persistCfg({ cdpPort: port, cdpUrl: `http://127.0.0.1:${port}` })
-      }
       const r = await openChromeWithCdp()
+      // CDP 拉起成功 → 把 cdpUrl 切过去（首次从 profile 模式切到 CDP 模式时这就是开关）
+      if (r.ok && String(cfg.cdpUrl || '').trim() !== `http://127.0.0.1:${port}`) {
+        try { await persistCfg({ cdpPort: port, cdpUrl: `http://127.0.0.1:${port}` }) } catch { /* 写不进去就下次再说 */ }
+      }
       log(`dy_chrome_open → ${r.ok ? (r.already ? 'CDP 本来就通' : '已拉起') : (r.needClose ? 'Chrome 在跑，需要先关' : '失败')}`)
       return {
         ...r,
@@ -3038,14 +3092,18 @@ export function apply(ctx, config) {
   })
 
 
-  localRound = () => withActionLock(stateDir, async () => {
+  localRound = (opts = {}) => withActionLock(stateDir, async () => {
     refreshCfg()
     const roundDate = new Date(), roundDay = dayKey(roundDate)
     const roundReport = reportFileOf(roundDate)
     const quota = Math.max(0, Number(cfg.perDay) || 0)
-    const left = Math.max(0, quota - countWatchedToday())
+    const watched = countWatchedToday()
+    // perDay=0 表示「不自动刷」，但手动点「现在跑一轮」仍应能跑（最多一轮的 pickPerRound）
+    const left = quota > 0
+      ? Math.max(0, quota - watched)
+      : (opts.manual ? Math.max(1, Number(cfg.pickPerRound) || 2) : 0)
     if (left <= 0) {
-      return { ok: true, picked: 0, skipped: `今天已经挑够 ${quota} 条了（不再重复挑）`, report: roundReport, actions: [] }
+      return { ok: true, picked: 0, skipped: quota > 0 ? `今天已经挑够 ${quota} 条了（不再重复挑）` : '每天最多挑几条=0，已停止自动刷', report: roundReport, actions: [] }
     }
     const notes = []
     let items = []
@@ -3284,7 +3342,7 @@ export function apply(ctx, config) {
       refreshCfg()
       const mode = String(args.mode || '').trim() || (cfg.localRound !== false ? 'local' : 'headless')
       if (!['local', 'headless'].includes(mode)) return { ok: false, error: 'mode 只支持 local/headless' }
-      if (mode === 'local') return localRound()
+      if (mode === 'local') return localRound({ manual: true })
       const r = await runDuty('manual')
       return { ok: Boolean(r.started), ...r }
     },
@@ -3308,6 +3366,7 @@ export function apply(ctx, config) {
         { name: 'Python 解释器及转写依赖', ok: imports.ok, detail: `${py.command}${py.args.length ? ' ' + py.args.join(' ') : ''}（${py.via}）`, fix: '装 Python 3.11+ 并在设置里把 pythonPath 指到 python.exe；或者干脆填 uv' },
         { name: 'MCP 脚本', ok: existsSync(scriptPath), detail: scriptPath, fix: '把 vendor/douyin-mcp/mcp_server.py 放好（或用 --force 让插件重铺），然后重启一次 dsh' },
         { name: 'ComfyUI 输出目录', ok: Boolean(String(cfg.comfyOutputDir || '').trim()) && existsSync(String(cfg.comfyOutputDir || '').trim()), detail: String(cfg.comfyOutputDir || ''), fix: '把 comfyOutputDir 改成 ComfyUI 的 output 目录' },
+        { name: '视频理解原型', ok: existsSync(join(videoLabDir, 'run.py')), detail: videoLabDir, fix: '安装包应自带 video-understanding-lab；不行就设 DOUYIN_VIDEO_LAB 指向 run.py 所在目录' },
       ]
       let mcpResult = null
       if (items[1].ok && items[2].ok) {
@@ -3319,7 +3378,11 @@ export function apply(ctx, config) {
       if (mcpResult && mcpResult.loggedIn !== undefined) markLogin(Boolean(mcpResult.loggedIn))
       const browserReady = mcpResult?.ok === true && mcpResult.loggedIn === true && mcpResult.searched === true
       const mediaReady = !cfg.watchBeforeAct || (mcpResult?.media?.ffmpegReady === true && mcpResult?.media?.dependenciesReady === true && mcpResult?.media?.modelCached === true)
-      const ok = items.filter(x => x.name !== 'ComfyUI 输出目录' || cfg.autoPublish).every((x) => x.ok) && browserReady && mediaReady
+      const ok = items.filter(x => {
+        if (x.name === 'ComfyUI 输出目录') return cfg.autoPublish
+        if (x.name === '视频理解原型') return cfg.watchBeforeAct !== false
+        return true
+      }).every((x) => x.ok) && browserReady && mediaReady
       return {
         ok,
         items,
@@ -3599,7 +3662,7 @@ export function apply(ctx, config) {
       // ⭐ 2026-10-25：默认本机直跑（宿主自己调 MCP），不再 spawn headless（那个在沙箱里开不了管道）
       if (cfg.localRound !== false && typeof localRound === 'function') {
         try {
-          const r = await localRound()
+          const r = await localRound({ manual: true })
           return sendJson(res, 200, { ok: r.ok !== false, ...r, mode: 'local' })
         } catch (e) {
           const msg = String(e?.message ?? e)
@@ -3895,8 +3958,16 @@ export function apply(ctx, config) {
     if (method === 'GET' && path === '/api/douyin-duty/setup/log') {
       let tail = ''
       try { tail = readFileSync(join(stateDir, 'setup.log'), 'utf8').slice(-6000) } catch {}
-      const probe = await pythonDependencies({ command: venvPython(), args: [] })
-      return sendJson(res, 200, { ok: true, ...setupState, venvReady: probe.ok, missing: probe.ok ? [] : [probe.error], tail })
+      // 不只探测 .venv：自定义 pythonPath（比如测试用的独立 venv）也要按实际解释器判
+      const py = pythonNow()
+      const probe = await pythonDependencies(py)
+      return sendJson(res, 200, {
+        ok: true, ...setupState,
+        venvReady: probe.ok,
+        python: { command: py.command, args: py.args, via: py.via },
+        missing: probe.ok ? [] : [probe.error],
+        tail,
+      })
     }
 
     // ⭐ 给设置页用：环境自检（页面「高级」那一栏点一下就逐项告诉我哪一步不通）

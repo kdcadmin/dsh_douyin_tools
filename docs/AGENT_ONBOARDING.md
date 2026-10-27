@@ -28,8 +28,8 @@
 | 步骤 | 调什么 | 看到什么算过 |
 |---|---|---|
 | ① 体检 | `dy_selfcheck`、`dy_status` | 家目录/Python/MCP 脚本 `ok`；拿到 `home` 路径 |
-| ② Chrome | `dy_status.cdp` → 没有就装 → `dy_chrome_open` | 返回 `ok:true`，`cdpUrl=http://127.0.0.1:9222` |
-| ③ 登录 | `dy_whoami` → 扫码或短信 | `loggedIn:true`，昵称是主人那个号 |
+| ② 登录 | `dy_whoami` → 扫码/短信（默认用插件自己的 profile，不用先开 Chrome） | `loggedIn:true`，昵称是主人那个号 |
+| ②b 可选 CDP | 想复用「主人日常已登录的 Chrome」才 `dy_chrome_open` | 返回 `ok:true`，`cdpUrl` 变成 `http://127.0.0.1:9222` |
 | ④ 记忆/人设 | 看 `<home>/memory/`、`persona.md`，问主人要人设 | 记忆能写、人设已定（空也能用） |
 | ⑤ 私信（可选） | `dy_config(msgAllowTo=...)` → `dy_dm_poll` | 白名单不为空；`dy_dm_inbox` 能读到消息 |
 | ⑥ 表情包 | 巡检收藏 → 关键字兜底 / 文本码 | `dy_chat_sticker` 返回 `verified:true` |
@@ -55,7 +55,7 @@
     { "name": "ComfyUI 输出目录", "ok": false, "detail": "E:\\...\\output", "fix": "..." }
   ],
   "mcp": { "ok": true, "chrome": true, "loggedIn": false, "searched": false,
-           "mode": "cdp", "cdpUrl": "http://127.0.0.1:9222", "headless": true },
+           "mode": "profile", "cdpUrl": "", "headless": true },
   "home": "C:\\Users\\<你>\\.dsh\\douyin-duty"
 }
 ```
@@ -63,10 +63,10 @@
 怎么读：
 
 - `items` 里 **家目录可写 / Python 解释器及转写依赖 / MCP 脚本** 必须 `ok:true`；
-  `ComfyUI 输出目录` 只在主人要投稿时才算数，没有 ComfyUI 可以先不管。
+  `ComfyUI 输出目录` 只在主人要投稿时才算数；`视频理解原型` 在「互动前先看片」开着时必须 `ok`（缺 `run.py` 会导致看片不可用）。
 - `mcp.chrome:true` = 能拉起 Chrome；`mcp.loggedIn:true` = 已登录；
   `mcp.searched:true` = 登录后能搜到东西。
-- 三条有一 false：**它的 `fix` 就是下一步**；修完重启一次 DSH 再自检。
+- 哪条 false：**它的 `fix` 就是下一步**；修完重启一次 DSH 再自检。
 - `ok:true` 只代表「环境 + 登录 + 搜索」通了，**页面上的发送动作还要单独验收**。
 
 ### 2.2 `dy_status`
@@ -75,10 +75,10 @@
 {
   "home": "C:\\Users\\<你>\\.dsh\\douyin-duty",
   "loggedIn": false,
-  "cdp": { "url": "http://127.0.0.1:9222", "ok": false,
+  "cdp": { "url": "", "ok": false,
            "chrome": { "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "via": "probe" },
            "running": false,
-           "hint": "Chrome 没带调试端口在跑：调 dy_chrome_open（先全关 Chrome）" },
+           "hint": "cdpUrl 是空的 ⇒ 走插件自己的持久 profile（首次要扫码）" },
   "python": { "command": "...\\.venv\\Scripts\\python.exe", "via": "venv" },
   "gates": { "autoLike": false, "autoComment": false, "autoPublish": false }
 }
@@ -148,7 +148,10 @@ sudo apt install -y /tmp/chrome.deb
 - 装不上（没管理员权限/下载失败）：把 <https://www.google.com/chrome/> 给主人手动装；**不要**拿 Edge/Chromium 冒充。
 - 装在非标准位置：`dy_config(patch: { "chromePath": "D:\\...\\chrome.exe" })` 指过去。
 
-### 3.3 拉起「可见的浏览器」
+### 3.3（可选）拉起「可见的浏览器」——只有想复用主人日常 Chrome 时才做
+
+**默认不需要这一步**：新装默认 `cdpUrl=''`，插件自己拉起持久 profile，`dy_login_start` 出二维码即可。
+只有主人说「用我平时那个 Chrome / 我已经在浏览器里登录过抖音」时，才走 CDP：
 
 1. **先确认没有 Chrome 在跑**（`dy_status.cdp.running=false`，或问主人）。
    Chrome 正开着时，用同一份默认 profile 再拉一次**不会**开调试端口。
@@ -177,15 +180,15 @@ dy_chrome_open()
 
 ### 3.4 两种浏览器模式
 
-| | **CDP 模式（默认）** | **profile 模式** |
+| | **profile 模式（默认）** | **CDP 模式** |
 |---|---|---|
-| 怎么开 | `cdpUrl` 默认 `http://127.0.0.1:9222`，先 `dy_chrome_open` | `dy_config(patch: { "cdpUrl": "" })` |
-| 浏览器 | 主人自己的 Chrome，**看得见** | 插件家目录 `browser/` 里的独立 profile，默认无头 |
-| 登录态存在哪 | 主人的 Chrome 里 | 插件家目录里 |
-| 优点 | 登录直观；复用日常登录 | 不打扰日常 Chrome；后台跑稳定 |
-| 缺点 | **必须保持这个带调试端口的 Chrome 开着**；关了要再 `dy_chrome_open` | 首次要扫码；换模式等于换浏览器，要重新登录 |
+| 怎么开 | 默认就是；`cdpUrl` 留空 | `dy_config(patch: { "cdpUrl": "http://127.0.0.1:9222" })` 并先 `dy_chrome_open` |
+| 浏览器 | 插件家目录 `browser/` 里的独立 profile，默认无头 | 主人自己的 Chrome，**看得见** |
+| 登录态存在哪 | 插件家目录里 | 主人的 Chrome 里 |
+| 优点 | 开箱即用；不打扰日常 Chrome；后台跑稳定 | 登录直观；复用日常登录 |
+| 缺点 | 首次要扫码 | **必须保持这个带调试端口的 Chrome 开着**；关了要再 `dy_chrome_open` |
 
-**首次帮人配，优先 CDP 模式**（看得见，好排查）。主人不想一直开 Chrome，再商量切 profile 模式——切之前说清楚「要重新扫一次码」。
+**首次帮人配，优先 profile 模式**（默认，不用先关 Chrome）。主人想复用日常 Chrome 再切 CDP——切之前说清楚「要重新扫一次码」。显式 CDP 连不上时 Python 会**自动退回 profile**（日志里有提示），不会整个挂掉。
 
 ---
 
@@ -225,8 +228,8 @@ dy_whoami()
 
 适合「二维码扫不了 / 主人不在电脑旁但手机在手上」：
 
-1. **先确保有可见浏览器**：`dy_status.cdp.ok` 不是 `true` 就先 `dy_chrome_open`。
-   默认 Python 半边是**无头**的；CDP 模式（接主人自己的 Chrome）才有看得见的窗口。
+1. **短信登录不需要先开可见浏览器**：默认 profile 模式就能发短信、提交验证码。
+   如果主人想「看得见窗口 / 自己点获取验证码」，再 `dy_chrome_open` 临时切 CDP（会切浏览器，要重新登）。
 2. 问主人要手机号（11 位），确认是他本人的、且同意用它登录。
 3. 发短信：
 
@@ -374,17 +377,18 @@ dy_login_sms_submit(code: "123456")
 ### 6.1 它怎么工作（2026-10-27 新）
 
 - `dmAutoReply`（默认 **true**）开着时，插件每 `dmAutoIntervalSec` 秒（默认 15，最小 5）
-  看一次私信收件箱；
-- 只处理「**可以主动发消息的人**」（`msgAllowTo`，昵称逗号分隔）里的会话；
-  **当前实现只盯名单里的第一个人**（要秒回谁，就把谁放第一个）；
+  看一次私信；
+- 目标 =「**可以主动发消息的人**」（`msgAllowTo`）里再按 `dmReplyOnlyTo` 筛一遍；名单里的人都会轮询；
 - 规则：**最后一条是对方发的才回**；最后一条是自己发的就不回；同一条不重复回；
 - 回的内容不是模板——起一个 headless 小任务，按人设写一句（会读最近记忆和最近聊天）；
-- 回完把聊天记录写进 `<home>/dm-log/`，也会尽量把「我: … / 大肥鱼: …」写进默认记忆（以实际文件为准）。
+- **只有平台确认发送成功才记「已回复」**；没拿到回执会标记 `unknown`、最多重试一次，不会假装成功；
+- 聊天记录写进 `<home>/dm-log/`，确认发送后把「我: … / 大肥鱼: …」写进默认记忆。
 
 ### 6.2 前提与开关
 
 - 必须**已登录**、`msgAllowTo` **不为空**；否则它谁都不回（名单为空 = 谁都不主动发）。
 - 名单里加人 = 授权它**主动发消息 / 后台秒回**，先问主人。
+- 「只回谁」是在名单里**再筛**，不会把名单外的人自动加进来；没有交集就谁都不回。
 - ⚠️ 后台秒回每来一条都起一个 headless 小会话（**耗 token/模型调用**），别把一堆人加进名单；
   只加真正常聊的那个。
 - 不想要秒回：`dy_config(patch: { "dmAutoReply": false })`。
@@ -603,7 +607,7 @@ dy_status()
 | 症状 / 返回 | 多半是 | 你该做什么 |
 |---|---|---|
 | 所有工具返回 `needLogin:true` | 没登录 / 登录态失效 | 走第 4 步；不要绕过 |
-| `显式 CDP 地址不可用` | `cdpUrl` 是 9222 但 Chrome 没带调试端口 | `dy_chrome_open`（先全关 Chrome）；或清空 `cdpUrl` 走 profile 模式 |
+| `显式 CDP 地址不可用` | `cdpUrl` 填了但 Chrome 没带调试端口 | 现在会自动退回 profile（日志提示）；想用 CDP 就 `dy_chrome_open`（先全关 Chrome） |
 | `Chrome 正在跑…不会开调试端口` | Chrome 没关干净 | 让主人全关（含托盘）；别 taskkill |
 | `没找到 Chrome` / 路径指到 `msedge.exe` | 没装 Chrome / 装错 | 按 3.2 装 Google Chrome，或设 `chromePath` |
 | `20s 内 CDP 端口没起来` | 端口被占 / Chrome 起不来 | `dy_chrome_open(port: 9333)`；看 `duty.log` |
@@ -620,7 +624,8 @@ dy_status()
 | 表情包发出但没图 | 收藏空 / 选错 tab | 按第 7 节巡检；退回关键字或 `[憨笑]` |
 | 评论发送 `unknown` / 回执确认不到 | 平台回执延迟 / 页面改版 | **不重发**；`dy_reconcile_pending()` 对账；连续 2 次失败当轮停 |
 | 搜索/评论返回空数组 | 可能只是没有结果 | 如实记「没取到」；不要写 debug 脚本 |
-| `dy_watch` 没转写 | 缺 ffmpeg / 模型没缓存 | 首次会下模型；装 ffmpeg；仍不行只看标题+评论 |
+| `dy_watch` 没转写 | 缺 lab / ffmpeg / 模型没缓存 | 先看 `dy_selfcheck` 的「视频理解原型」那条；装 ffmpeg；首次会下模型；仍不行只看标题+评论 |
+| `找不到视频理解原型 run.py` | 安装包不完整 / 被手动删了 | 重装插件（lab 随包发），或 `DOUYIN_VIDEO_LAB` 指向正确目录 |
 | headless 起不来 | 沙箱/CLI 找不到 | 用 `dy_run()` 本机模式；或按 `duty.log` 修 `dshBin` |
 | ComfyUI 输出目录 false | 没装 / 路径不对 | 不投稿可以忽略；投稿再改 `comfyOutputDir` |
 
@@ -628,8 +633,8 @@ dy_status()
 
 ## 12. 交回主人之前：验收清单
 
-- [ ] `dy_selfcheck`：家目录 / Python / MCP 脚本三条 `ok`；`mcp.chrome:true`
-- [ ] `dy_status.cdp.ok:true`，`cdpUrl` 是 `http://127.0.0.1:9222`（或已说明走 profile 模式）
+- [ ] `dy_selfcheck`：家目录 / Python / MCP 脚本 / 视频理解原型（看片开启时）`ok`；`mcp.chrome:true`
+- [ ] 默认走 profile 模式即可（`cdpUrl` 为空）；只有切了 CDP 才要求 `cdp.ok:true`
 - [ ] `dy_whoami`：`loggedIn:true`，昵称与主人一致
 - [ ] `dy_selfcheck`：`mcp.loggedIn:true`、`mcp.searched:true`
 - [ ] 记忆：`<home>/memory/YYYY-MM.md` 能写（`dy_remember` 测试过），跑完一轮有新行
@@ -638,6 +643,7 @@ dy_status()
 - [ ] 表情包：`dy_chat_sticker` 返回过 `verified:true`（或已说明没发出去 + 原因）
 - [ ] 白名单 / 闸门：`dy_config` 写过的字段与主人确认一致
 - [ ] `dy_run` 或 `dy_feed` 跑通过；`out/` 里能看到今天的报告
+- [ ] 写动作（点赞/评论/私信/发布）**如果没在测试号上真发过，就不要说「已通过」**；只说明「闸门默认关、拦截已验」
 - [ ] 已告诉主人：验证码/扫码怎么配合、Chrome 要不要一直开着、记忆/人设在哪儿看、不想秒回怎么关
 
 ---

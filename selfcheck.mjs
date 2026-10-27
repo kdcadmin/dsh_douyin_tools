@@ -3,7 +3,7 @@
  * selfcheck.mjs —— 宿主半边的冒烟测试（不需要真的 Python / 抖音 / ComfyUI）
  * ============================================================================
  * 用一个**假的 ctx** 把 `index.js` 导进来、`apply(fakeCtx, {})` 跑一遍，断言：
- *   ① 14 个 `dy_*` 工具全部注册（名字一个不差）；
+ *   ① 35 个 `dy_*` 工具全部注册（名字一个不差）；
  *   ② HTTP 路由挂上了，并且 `/status`、`/config`、`/report/latest` 真的能应答；
  *   ③ `dy_status` 返回的对象结构正确（不调真实 MCP）；
  *   ④ 三道闸门默认关着时确实拒绝（点赞 / 评论 / 发布）；
@@ -32,6 +32,7 @@ const EXPECTED_TOOLS = [
   'dy_search', 'dy_video', 'dy_comments', 'dy_like', 'dy_comment',
   'dy_publish', 'dy_comfy_list', 'dy_run', 'dy_selfcheck', 'dy_chrome_open',
   'dy_feed', 'dy_hot', 'dy_hot_videos', 'dy_login_sms', 'dy_login_sms_submit', 'dy_remember', 'dy_my_videos', 'dy_my_posts', 'dy_reply', 'dy_thumb', 'dy_chat_send', 'dy_chat_sticker', 'dy_share', 'dy_dm_round', 'dy_cleanup', 'dy_reply_round',
+  'dy_reconcile_pending', 'dy_dm_inbox', 'dy_watch', 'dy_dm_poll',
 ]
 
 const results = []
@@ -90,6 +91,8 @@ if (mod) {
     Array.isArray(mod.inject) && ['webServer', 'tools', 'settings'].every((k) => mod.inject.includes(k)),
     JSON.stringify(mod.inject))
   check('export function apply 存在', typeof mod.apply === 'function')
+check('视频理解原型 run.py 在包内', existsSync(join(pluginDir, 'video-understanding-lab', 'run.py')),
+  join(pluginDir, 'video-understanding-lab', 'run.py'))
 
   // cordis.patch.yml 的 id 必须等于 name
   try {
@@ -288,7 +291,7 @@ if (mod) {
   await byName.dy_config.execute({ patch: { dshBin: fakeCli } })
   const run = await byName.dy_run.execute({ mode: 'headless' })
   check('dy_run 默认走本机直跑（不依赖 headless 沙箱）', true, 'mode=local 已在代码里默认')
-  check('dy_run 起得来（started:true）', run?.ok === true && run?.started === true, JSON.stringify({ ok: run?.ok, why: run?.why }))
+  check('dy_run 起得来（started:true）', run?.ok === true && run?.started === true, JSON.stringify({ ok: run?.ok, why: run?.why, error: String(run?.error || '').slice(0, 120) }))
   // 等子进程落地
   for (let i = 0; i < 40 && !existsSync(argvFile); i++) await new Promise((r) => setTimeout(r, 100))
   let argv = []

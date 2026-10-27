@@ -360,13 +360,19 @@ class BrowserManager:
                 log(f"已连上本人 Chrome：{CDP_URL}（登录态直接用）")
                 return self._ctx
             except Exception as exc:  # noqa: BLE001
-                try:
-                    await self._pw.stop()
-                except Exception:
-                    pass
-                self._pw = None
+                # ⭐ 默认不因为 CDP 没开就整个失败：退回插件自己的持久 profile（首次扫码）。
+                #    想强制 CDP 才用 DOUYIN_CDP_STRICT=1。
+                if os.environ.get("DOUYIN_CDP_STRICT") == "1":
+                    try:
+                        await self._pw.stop()
+                    except Exception:
+                        pass
+                    self._pw = None
+                    self._browser = None
+                    raise RuntimeError(f"显式 CDP 地址不可用：{CDP_URL}") from exc
+                log(f"CDP 地址不可用（{CDP_URL}），退回插件自有 profile：{type(exc).__name__}: {exc}")
                 self._browser = None
-                raise RuntimeError(f"显式 CDP 地址不可用，未切换账号：{CDP_URL}") from exc
+                self._ctx = None
         try:
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(PROFILE_DIR),
@@ -2856,14 +2862,18 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         except Exception:
             pass
 
-    lab_dir = Path(os.environ.get("DOUYIN_VIDEO_LAB")
-                   or (Path(__file__).resolve().parents[2] / "video-understanding-lab"))
+    lab_candidates = [
+        Path(os.environ["DOUYIN_VIDEO_LAB"]) if os.environ.get("DOUYIN_VIDEO_LAB") else None,
+        Path(__file__).resolve().parent / "video-understanding-lab",
+        Path(__file__).resolve().parents[2] / "video-understanding-lab",
+    ]
+    lab_dir = next((p for p in lab_candidates if p and (p / "run.py").is_file()), lab_candidates[1])
     entry = lab_dir / "run.py"
     if not entry.exists():
-        return _err("找不到视频理解原型 run.py", path=str(entry))
+        return _err("找不到视频理解原型 run.py（安装包应自带 video-understanding-lab；也可设 DOUYIN_VIDEO_LAB）", path=str(entry))
     case = media_dir / "lab" / f"{aid}-{int(time.time())}"
     case.parent.mkdir(parents=True, exist_ok=True)
-    cdp = (CDP_URL or "http://127.0.0.1:9333").strip()
+    cdp = (CDP_URL if _browser.mode == "cdp" else "") or f"http://127.0.0.1:{SHARED_PORT}"
     notes: list[str] = []
     phase = "capture"
 
@@ -2910,9 +2920,12 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         except Exception:
             dur = 0
         want = max(3, min(int(frames or 10), 48))
-        step = max(0.4, round((dur / want) if dur > 0 else 2.0, 2))
+        # ⭐ watchSeconds 是「最多看前多少秒」的硬预算：传给 prepare 截断，不能只拿来做缓存名
+        analyze_dur = min(dur, float(seconds)) if dur and seconds else dur
+        step = max(0.4, round((analyze_dur / want) if analyze_dur > 0 else 2.0, 2))
         rc, out, err = await run_lab(
-            ["prepare", str(case / "source.mp4"), "--out", str(case), "--step", str(step)], 240)
+            ["prepare", str(case / "source.mp4"), "--out", str(case), "--step", str(step),
+             "--limit-seconds", str(max(1, int(seconds or 600)))], 240)
         if rc != 0:
             tail = (err or out).strip()[-300:] or "prepare 失败"
             return _err(f"原型抽帧/音轨失败：{tail}", phase=phase, aweme_id=aid)
@@ -2928,12 +2941,14 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         segs = tr.get("segments") or []
         text = " ".join(str(s.get("text") or "").strip() for s in segs if str(s.get("text") or "").strip())[:4000]
         duration = float(tr.get("duration") or 0)
+        partial = bool(dur and duration and duration + 0.5 < dur)
         if not text:
             return _err("音轨中未识别出语音", phase=phase, aweme_id=aid, labCase=str(case))
-        result = _ok(aweme_id=aid, duration=duration, transcript=text, schemaVersion=3,
+        result = _ok(aweme_id=aid, duration=duration, fullDuration=dur or duration, transcript=text, schemaVersion=3,
                      model=os.environ.get("DOUYIN_WHISPER_MODEL", "base"),
-                     sampledRanges=[[0, duration]], partial=False,
-                     notes=notes + [f"视频理解原型：{case.name}"], labCase=str(case))
+                     sampledRanges=[[0, duration]], partial=partial,
+                     notes=notes + [f"视频理解原型：{case.name}"] + (["只转写了前 %d 秒（partial=true）" % duration] if partial else []),
+                     labCase=str(case))
         tmp = cache.with_suffix(".tmp")
         tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         tmp.replace(cache)

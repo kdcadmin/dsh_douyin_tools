@@ -36,6 +36,7 @@
     "lib/",
     "prompts/",
     "docs/AGENT_ONBOARDING.md",
+    "video-understanding-lab/",
     "vendor/douyin-mcp/mcp_server.py",
     "vendor/douyin-mcp/requirements.txt",
     "README.md",

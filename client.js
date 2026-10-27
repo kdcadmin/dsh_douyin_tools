@@ -471,7 +471,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-note': '' },
               `跑了 ${st.ranToday ?? 0} 轮 · 看片 ${st.watchedToday ?? st.pickedToday ?? 0}/${st.perDay ?? 0} 条 · 回复 ${st.doing?.todayReplies ?? 0} 条`),
             h('div', { 'data-dy-note': '' },
-              `登录：${st.loggedIn ? '✅' : '❌ 未登录'} · 浏览器：${st.cdp?.ok ? '✅ 连得上' : '⚠️ 没连上'} · 额度和窗口以左边提示为准`),
+              `登录：${st.loggedIn ? '✅' : '❌ 未登录'} · 浏览器：${st.cdp?.ok ? '✅ 已连上 CDP' : (st.cdp?.url ? '⚠️ CDP 没连上' : '✅ 自有 profile')} · 额度和窗口以左边提示为准`),
             h('div', { 'data-dy-note': '' }, `家目录：${st.home || ''}`)),
 
           /* ⭐ 账号摆在第一页最上面：登录入口要一眼看见（使用者 2026-10-23「你要有给登录入口啊」） */
@@ -507,7 +507,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-label': '' }, '峰谷时段自动刷'),
-                Note('只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑')),
+                Note('只在谷时跑 —— 每天 12:00–14:00 与 00:30–08:30 两段（不区分工作日/周末）；关了就只能手动跑')),
               Sw({ on: Boolean(draft.peakValley), onChange: (v) => set('peakValley', v) })),
             draft.peakValley ? h('div', { 'data-dy-sub': '' },
               h('div', { 'data-dy-row': '' }, h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '中午 12:00–14:00')),
@@ -771,7 +771,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-dy-h': '' }, '后台自动回复'),
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '后台静默回私信'),
-              Note('每 5 秒看一次收件箱，有新消息就自动回；不占对话窗口')),
+              Note('每 N 秒看一次收件箱（默认 15），有新消息就自动回；不占对话窗口')),
             Sw({ on: Boolean(draft.dmAutoReply !== false), onChange: (v) => set('dmAutoReply', v) })),
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '多久看一次（秒）'),
@@ -779,7 +779,8 @@ window.__ModuleLoader__.load({
             h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '90px' }, value: draft.dmAutoIntervalSec ?? 15,
               onChange: (e) => set('dmAutoIntervalSec', Number(e.target.value) || 15) })),
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只回谁（昵称）')),
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只回谁（昵称）'),
+              Note('在「可以主动发消息的人」名单里再筛一次；留空 = 名单里的人全回')),
             h('input', { 'data-dy-input': '', style: { width: '220px' }, value: draft.dmReplyOnlyTo ?? '',
               onChange: (e) => set('dmReplyOnlyTo', e.target.value) })),
           h('div', { 'data-dy-row': '' },
@@ -1478,21 +1479,33 @@ window.__ModuleLoader__.load({
           const [stats, setStats] = React.useState(null)
           const [err, setErr] = React.useState('')
           const [busy, setBusy] = React.useState(false)
+          const [memOk, setMemOk] = React.useState(null)
+
+          // 先探一次记忆服务：没有可选记忆插件时只显示「原始记录 + 人设」，不报 404
+          React.useEffect(() => {
+            let alive = true
+            memCall('stats', {})
+              .then(() => { if (alive) setMemOk(true) })
+              .catch(() => { if (alive) { setMemOk(false); setTab('raw') } })
+            return () => { alive = false }
+          }, [])
 
           const load = React.useCallback(async (force) => {
             setBusy(true); setErr('')
             try {
+              if (tab === 'raw' && (force || raw === null)) {
+                const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+                setRaw(await r.json())
+                return
+              }
+              if (memOk === false) return
               if (force || stats === null) { try { setStats(await memCall('stats', {})) } catch { /* 忽略 */ } }
               if (tab === 'character' && (force || char === null)) setChar(await memCall('character', { action: 'read' }))
               if (tab === 'timeline' && (force || tl === null)) setTl(await memCall('recall', { limit: 80 }))
               if (tab === 'graph' && (force || g === null)) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
-              if (tab === 'raw' && (force || raw === null)) {
-                const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
-                setRaw(await r.json())
-              }
             } catch (e) { setErr(String((e && e.message) || e)) } finally { setBusy(false) }
-          }, [tab, char, tl, g, raw, stats])
-          React.useEffect(() => { load(false) }, [tab])
+          }, [tab, char, tl, g, raw, stats, memOk])
+          React.useEffect(() => { if (memOk !== null) load(false) }, [tab, memOk])
 
           // ⭐ 角色卡：照记忆插件那套——**一直可编辑的表单**（称呼/时区/沟通风格/回复长度/约束 + 保存）
 
@@ -1509,22 +1522,30 @@ window.__ModuleLoader__.load({
           return h('div', { className: 'dym-root' },
             h('div', { className: 'dym-head' },
               h('span', { className: 'dym-title' }, '记忆'),
-              h('span', { className: 'dym-badge' }, 'memory-system'),
+              h('span', { className: 'dym-badge' }, memOk === false ? '本地记忆' : 'memory-system'),
               h('div', { className: 'dym-chips' },
-                h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆'),
-                h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点'),
-                h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系'))),
+                memOk === false
+                  ? h('span', { className: 'dym-chip' }, '未装可选记忆插件：显示本地记忆 + 人设')
+                  : [
+                    h('span', { key: 'm', className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆'),
+                    h('span', { key: 'n', className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点'),
+                    h('span', { key: 'e', className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系'),
+                  ])),
             h('div', { className: 'dym-tabs' },
-              MemTabs.map((t2) => h('button', {
+              (memOk === false ? MemTabs.filter((t2) => t2.id === 'raw') : MemTabs).map((t2) => h('button', {
                 key: t2.id, className: 'dym-tab' + (tab === t2.id ? ' on' : ''), onClick: () => setTab(t2.id),
               }, t2.label)),
               h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
             err ? h(Card, null, '读取失败：' + err) : null,
-            tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
-            tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
-            tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
-            tab === 'clean' ? h(Guard, { Comp: Cleanup, props: {}, label: '清理' }) : null,
-            tab === 'raw' ? rawBody() : null,
+            memOk === false ? h('div', null,
+              h(Card, null, '没装可选记忆插件，只显示本插件自己的记忆文件和人设；装不装都不影响刷抖音。'),
+              rawBody(),
+              h(PersonaBox)) : null,
+            memOk !== false && tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
+            memOk !== false && tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
+            memOk !== false && tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
+            memOk !== false && tab === 'clean' ? h(Guard, { Comp: Cleanup, props: {}, label: '清理' }) : null,
+            memOk !== false && tab === 'raw' ? rawBody() : null,
           )
         } catch (e) {
           try {

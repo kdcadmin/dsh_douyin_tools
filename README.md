@@ -64,11 +64,12 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 # 之后重启一次 dsh 才生效
 ```
 
-首次启用后：先 `dy_chrome_open` 拉起一个带调试端口的 Chrome（默认 http://127.0.0.1:9222），首次在里面扫码 / 验证码登录；
-连不上就退回插件自己的 profile，用 `dy_login_start` 出二维码 PNG 扫码。完整步骤见 [`docs/AGENT_ONBOARDING.md`](docs/AGENT_ONBOARDING.md)。
-登录态只落在本机，不上传任何地方。
+首次启用后**默认走插件自己的浏览器 profile**：直接 `dy_login_start` 出二维码 / `dy_login_sms` 短信登录即可，第一次扫一次码，
+之后登录态一直留在本机。想复用「本人日常已登录的 Chrome」才调 `dy_chrome_open`（它会拉起带调试端口的 Chrome 并把 `cdpUrl` 切到 CDP 模式）。
+完整步骤见 [`docs/AGENT_ONBOARDING.md`](docs/AGENT_ONBOARDING.md)。登录态只落在本机，不上传任何地方。
 
-**「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright`（用系统 Chrome，不下载浏览器）→ `环境自检`。
+**「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright + numpy + faster-whisper + httpx + pillow`（用系统 Chrome，不下载浏览器）→ `环境自检`。
+视频理解原型 `video-understanding-lab/` 随插件包一起发（`dy_watch` 用），缺了会在自检里明确报出来。
 
 ---
 
@@ -173,19 +174,21 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 
 ## 5. 看片（真转写）
 
-- 从 `/aweme/detail/` 的 `play_addr` 拿直链（页面 `currentSrc` 常是 `blob:`，MSE 分片读不了）；
-- `ffmpeg` 抽 16k 单声道音轨（默认只取前 `watchSeconds` 秒），`faster-whisper` 本地转写；
-- 转写结果按 `media/<id>.<秒数>.json` 缓存，**同一条永不重复下载/转写**；音轨每天清空；
-- 模型走 HuggingFace 镜像（`HF_ENDPOINT`），缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`。
+- 走随包发布的 `video-understanding-lab/`：`capture`（用浏览器 cookie 下载）→ `prepare`（抽帧 + 16k 单声道）→ `asr`（faster-whisper）→ `transcript.json`；
+- `watchSeconds` 是**硬预算**：传给 `prepare --limit-seconds`，只分析前 N 秒，返回 `partial=true`、`duration` 为实际分析时长；
+- 转写缓存 `media/<id>.<秒数>.v3.json`；模型缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`；
+- `video-understanding-lab/` 随 npm 包发布；也可用 `DOUYIN_VIDEO_LAB` 指向别的原型目录；缺 `run.py` 时 `dy_watch` 明确报「未安装」，依赖看片的评论/转发会跳过；
+- 依赖：`ffmpeg`（系统安装）+ Python 包里的 `faster-whisper` / `numpy` / `pillow` / `playwright`。
 
 **已知限制（实测）**
 
 | 情况 | 结果 |
 |---|---|
-| 普通短视频（有 http 直链） | 能看片，一条约 2~3 秒 |
-| 长视频 / MSE（`blob:`） | 拿不到可读流；抓分片也拼不成可播文件 ⇒ 不整条下载，只看标题+热评 |
+| 普通短视频 | 能看片；只转写前 `watchSeconds` 秒，长片会标 `partial=true` |
+| 长视频 / 大文件 | 不再整条下载；按预算截断转写，超出 256MiB 的原型预算会明确失败 |
 | 图文作品（note） | 评论接口不抛数据 ⇒ **直接 DOM 抠**；「回复某条评论」入口点不到，暂不支持回复 |
 | 短视频评论 | 桌面端没有发送按钮，**回车即发**；发完会**回读确认**，确认不到就算失败（不误报成功） |
+| 缺 lab / ffmpeg / 模型 | `dy_watch` 返回明确原因；不会谎称「看过了」 |
 
 ---
 
@@ -194,8 +197,8 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 ### 日常
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `perDay` | 5 | 每天最多挑几条（0 = 不自动刷） |
-| `peakValley` / `noon` / `night` | true | 谷时自动刷总开关 / 中午 12–14 / 夜间 00:30–08:30 |
+| `perDay` | 5 | 每天最多挑几条（0 = 不自动刷；手动「现在跑一轮」仍可跑一轮） |
+| `peakValley` / `noon` / `night` | false / true / true | 谷时自动刷总开关（默认关）/ 中午 12–14 / 夜间 00:30–08:30 |
 | `pickPerRound` | 2 | 一次挑几条（别一口气刷完） |
 | `skipOverMin` | 60 | 超过多少分钟就划走 |
 | `skimOverMin` | 5 | 超过多少分钟就跳着看（评论/附言会写明） |
@@ -228,7 +231,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `msgAllowTo` | `''` | **可以主动发消息的人**（昵称逗号分隔；空 = 谁都不主动发） |
 | `dmReplyOnlyTo` | `''` | **只回谁的私信**（昵称，逗号分隔，可多人；空 = 谁发来都回） |
 | `dmReply` | false | 自动回**陌生人**私信（模板短句） |
-| `dmAutoReply` / `dmAutoIntervalSec` | true / 15 | 后台秒回**白名单**私信 / 多少秒看一次 |
+| `dmAutoReply` / `dmAutoIntervalSec` | true / 15 | 后台秒回**白名单**私信 / 多少秒看一次；只有收到平台确认的发送才记为已回复 |
 | `dmReplyPerContact` / `dmReplyPerDay` | 1 / 5 | 每个联系人每天回几条 / 每天合计 |
 | `streakNick` / `streakPerDay` | `''` / 1 | 续火花发给谁 / 每天几次 |
 | `askDoubao` | false | 遇到不会的视频在评论里 @ 豆包 求解答 |
@@ -243,7 +246,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `watchBeforeAct` / `watchSeconds` | true / 90 | 动手前先真看片 / 最多听前多少秒 |
 | `autoClean` | true | 每天自动清理一次 |
 | `pythonPath` | `python` | `pythonPath` → `.venv` → `uv` → `python` |
-| `cdpUrl` / `cdpPort` / `chromePath` | `9222` / 9222 / `''` | 复用「本人已登录的 Chrome」 |
+| `cdpUrl` / `cdpPort` / `chromePath` | `''` / 9222 / `''` | 默认 `''` 用插件自己的 profile；填地址才复用「本人已登录的 Chrome」 |
 | `headlessProfile` / `headlessModel` / `overlayMcp` / `workspace` | headless / `''` / true / `''` | 起子会话时的参数 |
 | `dshBin` | `''` | dsh 的 bin.js（空 = 自动探测，含 `app.asar` 路径） |
 | `comfyUrl` / `comfyOutputDir` | `127.0.0.1:8188` / ComfyUI output | ComfyUI 地址 / 成片目录 |
@@ -289,12 +292,32 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 ## 9. 自检
 
 ```bash
-node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（35 个）/ 路由通 / 结构对 / 闸门默认关
+node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）/ 路由通 / 结构对 / 闸门默认关 / 视频理解原型在位
 ```
+
+**验收边界（别把「装上了」当「全通了」）**
+
+- 已用离线/本地方式验证：宿主加载、工具注册、HTTP 路由、六页 UI 可切换、只读工具（热榜/推荐/详情/评论/缩略图）、闸门关闭时的拒绝、记忆降级、看片原型入口与依赖检查；
+- **未做真实账号验收**：点赞 / 评论 / 私信发送 / 转发的平台回执、真实视频的看片转写、登录后的搜索与个人作品读取；这些需要测试账号和联网环境，报告里不写「已通过」；
+- 看片还需要本机 `ffmpeg` + faster-whisper 模型（首次会下载）；未登录也能用热榜/详情/评论（只读）。
 
 ---
 
-## 10. 最近更新（增量说明 · 2026-10-25 ~ 10-26）
+## 10. 最近更新（0.2.1 修复补丁 · 2026-10-27）
+
+- **新装默认 profile 模式**（`cdpUrl` 空）：不用先开 Chrome/调试端口；显式 CDP 连不上会自动退回 profile；想复用日常 Chrome 才调 `dy_chrome_open`（会切 CDP）。
+- **看片模块随包发布**：`video-understanding-lab/` 进 npm files/仓库，宿主通过 `DOUYIN_VIDEO_LAB` 指路；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断，返回 `partial`。
+- **私信不再假成功**：只有平台确认的发送才记 `replied=true`；否则 `unknown` 且最多重试一次。秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 筛选，多个联系人逐个巡检。
+- **记忆页无插件降级**：只显示「原始记录 + 人设」，不再 404 红字。
+- **配置保存失败**：本地值优先，不再被宿主旧值盖回去。
+- **`perDay=0`**：只停自动刷，手动「现在跑一轮」仍可跑一轮。
+- **多实例端口隔离**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），默认不再抢 9333。
+- **依赖**：requirements 补 `pillow`；自检新增「视频理解原型」检查、工具清单对齐 35 个。
+- 时段文案改成实际的两段：12:00–14:00、00:30–08:30（不区分周末）。
+
+---
+
+## 11. 最近更新（增量说明 · 2026-10-25 ~ 10-26）
 
 > 只做补充说明，前面章节的结构和内容没动。
 

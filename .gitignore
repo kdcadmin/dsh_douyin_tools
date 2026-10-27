@@ -13,4 +13,5 @@ tools/render-cards.mjs
 
 __pycache__/
 *.pyc
+video-understanding-lab/__pycache__/
 .douyin-selfcheck-*/
