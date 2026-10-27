@@ -2202,8 +2202,12 @@ export function apply(ctx, config) {
     async execute(args) {
       refreshCfg()
       const port = Number(args?.port) || Number(cfg.cdpPort) || 9222
+      // 从 profile 模式切 CDP 时，先把 cdpUrl 写上：openChromeWithCdp 靠它判断“端口通没通”
+      if (!String(cfg.cdpUrl || '').trim()) {
+        try { await persistCfg({ cdpPort: port, cdpUrl: `http://127.0.0.1:${port}` }) } catch { /* 写不进去就下次再说 */ }
+      }
       const r = await openChromeWithCdp()
-      // CDP 拉起成功 → 把 cdpUrl 切过去（首次从 profile 模式切到 CDP 模式时这就是开关）
+      // CDP 拉起成功 → 把 cdpUrl 切过去（端口不同也一并更新）
       if (r.ok && String(cfg.cdpUrl || '').trim() !== `http://127.0.0.1:${port}`) {
         try { await persistCfg({ cdpPort: port, cdpUrl: `http://127.0.0.1:${port}` }) } catch { /* 写不进去就下次再说 */ }
       }
