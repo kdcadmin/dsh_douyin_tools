@@ -2052,9 +2052,19 @@ export function apply(ctx, config) {
       const name = picked.name
       const text = picked.text
       if (!name || !allowInitiate(name)) return { ok: true, replied: 0, note: '不是白名单里的人' }
+      // ⭐ 重试上限：同一个人、同一条内容最多试 2 次；失败后保留记录，不再无限起新任务
+      const prior = [...items].reverse().find((x) => x && x.name === name && x.text === text && x.replied !== true)
+      if (prior && prior.failed) {
+        return { ok: true, replied: 0, note: '这条上次没有确认发送，已停止重试（等新的消息）' }
+      }
+      const tries = prior ? Number(prior.tries || 0) : 0
+      if (tries >= 2) {
+        if (prior) { prior.failed = true; writeDmLog(items) }
+        return { ok: true, replied: 0, note: '这条已经重试到上限，不再自动发' }
+      }
       const key = `seq:${now}`
       const row = { name, text, key }
-      const entry = { day: dmDayOf(now), name: row.name, text: row.text, key: row.key, at: now, replied: false, replyAt: 0, runId: '' }
+      const entry = { day: dmDayOf(now), name: row.name, text: row.text, key: row.key, at: now, replied: false, replyAt: 0, runId: '', tries }
       items.push(entry)
       writeDmLog(items)
       log(`私信来了（${why}）：${row.name}「${row.text.slice(0, 40)}」→ 起 headless 回一句`)
@@ -2088,7 +2098,8 @@ export function apply(ctx, config) {
               it.tries = Number(it.tries || 0) + 1
               it.error = code === 0 ? '没有收到发送回执，未记为已回复' : String(error || '')
               if (it.tries >= 2) it.failed = true
-              else it.at = 0
+              // 保留 at 让「上一条还在回」生效；120 秒后才允许再试一次，避免连环起任务
+              it.at = Date.now()
               log(`私信巡检：${row.name} 未确认发送（${it.status}，tries=${it.tries}）`)
             }
             writeDmLog(list)
@@ -2100,7 +2111,7 @@ export function apply(ctx, config) {
         try {
           const list = readDmLog()
           const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
-          if (it) { it.at = 0 }
+          if (it) { it.tries = Number(it.tries || 0) + 1; if (it.tries >= 2) it.failed = true; it.at = Date.now() }
           writeDmLog(list)
         } catch { /* ignore */ }
         return { ok: false, error: 'headless 没起来：' + String(r?.error || '未知'), to: row.name, text: row.text }

@@ -2930,7 +2930,11 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
             tail = (err or out).strip()[-300:] or "prepare 失败"
             return _err(f"原型抽帧/音轨失败：{tail}", phase=phase, aweme_id=aid)
         phase = "transcription"
-        rc, out, err = await run_lab(["asr", str(case)], 420)
+        model_name = os.environ.get("DOUYIN_WHISPER_MODEL", "base") or "base"
+        model_cache = str(HOME / "models" / "hub")
+        # ⭐ 模型名和缓存路径必须传给 ASR；首次运行允许下载（asr.py 不再强制离线）
+        rc, out, err = await run_lab(
+            ["asr", str(case), "--model", model_name, "--cache", model_cache], 900)
         if rc != 0:
             tail = (err or out).strip()[-300:] or "asr 失败"
             return _err(f"原型转写失败：{tail}", phase=phase, aweme_id=aid)
@@ -2940,12 +2944,19 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         tr = json.loads(tr_path.read_text(encoding="utf-8"))
         segs = tr.get("segments") or []
         text = " ".join(str(s.get("text") or "").strip() for s in segs if str(s.get("text") or "").strip())[:4000]
-        duration = float(tr.get("duration") or 0)
+        # 真实 ASR 输出字段是 audioDuration；兼容旧的 duration
+        duration = float(tr.get("audioDuration") or tr.get("duration") or 0)
+        if not duration:
+            try:
+                packet = json.loads((case / "packet.json").read_text(encoding="utf-8"))
+                duration = float((packet.get("audio") or {}).get("duration") or 0)
+            except Exception:
+                duration = 0
         partial = bool(dur and duration and duration + 0.5 < dur)
         if not text:
             return _err("音轨中未识别出语音", phase=phase, aweme_id=aid, labCase=str(case))
         result = _ok(aweme_id=aid, duration=duration, fullDuration=dur or duration, transcript=text, schemaVersion=3,
-                     model=os.environ.get("DOUYIN_WHISPER_MODEL", "base"),
+                     model=model_name,
                      sampledRanges=[[0, duration]], partial=partial,
                      notes=notes + [f"视频理解原型：{case.name}"] + (["只转写了前 %d 秒（partial=true）" % duration] if partial else []),
                      labCase=str(case))

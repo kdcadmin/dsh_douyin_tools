@@ -4,7 +4,7 @@
 > 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
 > 另一头接他自己的 **ComfyUI** 出片，把成片发到抖音。
 
-**装法**：从插件市场 / npm 装，或把源码目录 link 进 profile。设置页有「刷抖音」一页（**日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级** 六个 tab），左侧还有「记忆」一页（**插件自带**记忆 `<家>/memory/*.md` + 人设 `persona.md`，不依赖任何记忆插件）。
+**装法**：从插件市场 / 源码目录 link 进 profile（**npm 包 0.2.1 尚未发布，公开 npm 查询是 404，先别用 `dsh plugin add dsh-douyin-life`**）。设置页有「刷抖音」一页（**日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级** 六个 tab），左侧还有「记忆」一页（**插件自带**记忆 `<家>/memory/*.md` + 人设 `persona.md`，不依赖任何记忆插件）。
 
 ![封面](assets/cover.png)
 
@@ -57,9 +57,8 @@
 
 ```bash
 # ① 插件市场（推荐）：DSH → 插件 → 搜「刷抖音」→ 安装
-# ② npm
-dsh plugin --profile desktop add dsh-douyin-life
-# ③ 源码目录（开发用）
+# ② npm（0.2.1 尚未发布，先别用；发布后才是 dsh plugin --profile desktop add dsh-douyin-life）
+# ③ 源码目录（当前可用）
 dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-life
 # 之后重启一次 dsh 才生效
 ```
@@ -177,6 +176,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 - 走随包发布的 `video-understanding-lab/`：`capture`（用浏览器 cookie 下载）→ `prepare`（抽帧 + 16k 单声道）→ `asr`（faster-whisper）→ `transcript.json`；
 - `watchSeconds` 是**硬预算**：传给 `prepare --limit-seconds`，只分析前 N 秒，返回 `partial=true`、`duration` 为实际分析时长；
 - 转写缓存 `media/<id>.<秒数>.v3.json`；模型缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`；
+- 首次转写：缓存里没有模型时会自动按 `HF_ENDPOINT`（默认 hf-mirror）下载；要强制离线就设 `DOUYIN_WHISPER_OFFLINE=1`；
 - `video-understanding-lab/` 随 npm 包发布；也可用 `DOUYIN_VIDEO_LAB` 指向别的原型目录；缺 `run.py` 时 `dy_watch` 明确报「未安装」，依赖看片的评论/转发会跳过；
 - 依赖：`ffmpeg`（系统安装）+ Python 包里的 `faster-whisper` / `numpy` / `pillow` / `playwright`。
 
@@ -375,4 +375,7 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 - **记忆页**：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404 红字。
 - **配置**：宿主设置写失败时以本地 `config.json` 为准；`perDay=0` 只停自动刷，手动「现在跑一轮」仍可跑一轮。
 - **多实例**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），不再默认抢 9333；requirements 补 `pillow`。
+- **npm 入口**：0.2.1 还没发布到 npm（公开查询 404）；当前用源码 link/插件市场安装，发布后再恢复 npm 安装说明。
+- **看片**：首次转写会自动下载模型（HF 镜像）；`duration` 按真实 ASR 输出字段 `audioDuration` 读取，`watchSeconds` 截断后 `partial=true`。
+- **私信重试**：同一个人/同一条内容最多起 2 次任务，失败保留 `tries`，不会每轮重置成 1 无限重试。
 - **验收边界**：只读/离线部分已验；点赞/评论/私信/发布没有做真实账号验收（只验证了闸门关闭时的拒绝），别对外说「全部通过」。

@@ -24,13 +24,17 @@ def segment_result(segments,duration,language):
 def transcribe(audio,out,model="base",cache=None):
     from faster_whisper import WhisperModel
     import numpy as np
-    os.environ["HF_HUB_OFFLINE"]="1"
+    # 首次允许在线下载模型（走 HF 镜像）；要完全离线再设 DOUYIN_WHISPER_OFFLINE=1
+    offline=os.environ.get("DOUYIN_WHISPER_OFFLINE")=="1"
+    if offline:os.environ["HF_HUB_OFFLINE"]="1"
+    else:os.environ.pop("HF_HUB_OFFLINE",None)
+    os.environ.setdefault("HF_ENDPOINT","https://hf-mirror.com")
     if cache:os.environ["HUGGINGFACE_HUB_CACHE"]=str(Path(cache).resolve())
     with wave.open(str(audio),"rb") as wav:
         if (wav.getnchannels(),wav.getframerate(),wav.getsampwidth())!=(1,16000,2):raise ValueError("Expected mono 16kHz PCM16")
         duration=wav.getnframes()/wav.getframerate()
         samples=np.frombuffer(wav.readframes(wav.getnframes()),dtype=np.int16).astype(np.float32)/32768.0
-    engine=WhisperModel(model,device="cpu",compute_type="int8",local_files_only=True,
+    engine=WhisperModel(model,device="cpu",compute_type="int8",local_files_only=offline,
                         download_root=str(Path(cache).resolve()) if cache else None)
     parts,info=engine.transcribe(samples,language="zh",vad_filter=True,beam_size=5)
     result=segment_result(parts,duration,info.language)
