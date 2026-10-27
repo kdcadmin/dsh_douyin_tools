@@ -3730,19 +3730,9 @@ async def _send_chat_part(page, editor, part):
                 body = ""
             if expected in body and expected not in before_body:
                 return _ok(verified=True, messageId="body-text", kind=kind, evidence="body-text-appears")
-        # 兜底 2：出站气泡数量增加了（表情包/图片这类比文本更难精确比对）
-        if kind == "sticker":
-            now_out = sum(1 for m in msgs if m.get("direction") == "outbound")
-            if now_out > before_out:
-                return _ok(verified=True, messageId="outbound-count", kind=kind, evidence="outbound-count-increased")
-            # 兜底 3：表情气泡数量增加了（收藏表情最稳的判据）
-            try:
-                now_emoji = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemEmojiemojiBox"]').length""")
-                if now_emoji > before_emoji:
-                    return _ok(verified=True, messageId="emoji-count", kind=kind, evidence="emoji-bubble-increased")
-            except Exception:
-                pass
-            # （删掉了「按图片路径匹配」的兜底：它会把表情面板里的预览图当成已发送，误判成功）
+        # ⭐ 表情包不再用「出站数量/表情气泡数量增加」兜底：
+        #    打开表情面板本身就会让计数变化，会把没发出去误判成成功（2026-10-27 实测）。
+        #    只认上面「新出站消息里带同一张表情图」这一条，否则如实返回 unknown。
     return _err("已操作但没有读取到新出站消息，停止自动重发", status="unknown", kind=kind)
 
 
