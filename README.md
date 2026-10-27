@@ -371,6 +371,7 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 - **重启后实际自检通过**：`mode=profile`、已登录、搜索正常、ffmpeg + whisper 模型就绪、`video-understanding-lab` 在位（`dy_selfcheck` 新增了这一项）。
 - **浏览器**：新装默认走插件自有 profile（`cdpUrl` 空）；显式 CDP 连不上会退回 profile，不再整个挂掉；想复用日常 Chrome 才调 `dy_chrome_open`（成功后会切 CDP）。
 - **看片**：`video-understanding-lab/` 随包发布；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断（返回 `partial`）；缺 lab 时 `dy_watch` 明确报错并跳过依赖看片的互动。
+- **看片不再依赖 9333**：默认 profile 模式用当前已登录页面拿直链 + cookie 下载；只有 CDP 模式才走原型的 `capture`（不需要用户手动开 9333）。
 - **私信**：只有平台确认的发送才记「已回复」；没回执标 `unknown`、最多重试一次；秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 再筛，多个联系人逐个巡检。
 - **记忆页**：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404 红字。
 - **配置**：宿主设置写失败时以本地 `config.json` 为准；`perDay=0` 只停自动刷，手动「现在跑一轮」仍可跑一轮。

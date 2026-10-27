@@ -2906,13 +2906,42 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         return proc.returncode, (out or b"").decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace")
 
     try:
-        rc, out, err = await run_lab(
-            ["capture", "--url", f"https://www.douyin.com/video/{aid}", "--out", str(case), "--cdp-url", cdp],
-            240)
-        if rc != 0:
-            tail = (err or out).strip()[-300:] or "capture 失败"
-            await _note_captcha(page)
-            return _err(f"原型下载失败：{tail}", phase=phase, aweme_id=aid)
+        if _browser.mode == "cdp":
+            # CDP 模式：原型的 capture 直接连本人 Chrome
+            rc, out, err = await run_lab(
+                ["capture", "--url", f"https://www.douyin.com/video/{aid}", "--out", str(case), "--cdp-url", cdp],
+                240)
+            if rc != 0:
+                tail = (err or out).strip()[-300:] or "capture 失败"
+                await _note_captcha(page)
+                return _err(f"原型下载失败：{tail}", phase=phase, aweme_id=aid)
+        else:
+            # profile 模式：Playwright 拉起的 Chrome 不一定暴露调试端口，capture 连不上 9333。
+            # 直接用当前页面（已登录）拿 play_addr + cookie 下载，再交给原型的 prepare/asr。
+            case.mkdir(parents=True, exist_ok=True)
+            net = Net(page, _is_detail_url)
+            try:
+                await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.5)
+                hit = await net.wait_for(lambda u, d: bool((d.get("aweme_detail") or {}).get("aweme_id")), timeout=12.0)
+                aw = ((hit or {}).get("data") or {}).get("aweme_detail") or {}
+                if not aw:
+                    await _note_captcha(page)
+                    return _err("没拿到视频详情，无法下载（可能被风控/删除）", phase=phase, aweme_id=aid)
+                video = aw.get("video") or {}
+                urls = []
+                for addr in [video.get("play_addr")] + [b.get("play_addr") for b in video.get("bit_rate") or [] if isinstance(b, dict)]:
+                    for u in (addr or {}).get("url_list") or []:
+                        if _media_url_allowed(u):
+                            urls.append(u)
+                urls = list(dict.fromkeys(urls))
+                if not urls:
+                    return _err("详情里没有可信的视频直链（可能图文/受保护）", phase=phase, aweme_id=aid)
+                await _download_media(page, urls[0], case / "source.mp4", max_bytes=64 * 1024 * 1024)
+                duration = float(video.get("duration") or aw.get("duration") or 0) / 1000.0
+                (case / "source.json").write_text(json.dumps({"actualDuration": duration}, ensure_ascii=False), encoding="utf-8")
+                notes.append("本地 cookie 下载（无需 CDP 调试端口）")
+            finally:
+                net.close()
         phase = "prepare"
         # ⭐ 抽帧数可调（设置里的 watchFrames，默认 10）：间隔 = 片长 / 帧数，最少 0.4 秒
         try:
