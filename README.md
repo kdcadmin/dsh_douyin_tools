@@ -361,3 +361,18 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 新增字段必须**同时**改四处：`Config`(schema) / `DEFAULTS` / `clampPatch` / `client.js` 的 load&save。
 少写 schema 会这样：设置页保存时弹「已存到插件自己那份（宿主设置层没写成）」，日志里是
 `Config field "xxx" is not volatile` —— 本地照常生效，但设置页刷新会回到旧值。
+
+---
+
+## 12. 补充：0.2.1 修复验证（2026-10-27 重启后）
+
+> 这一节只补这次修复的内容，前面的说明保留不动。
+
+- **重启后实际自检通过**：`mode=profile`、已登录、搜索正常、ffmpeg + whisper 模型就绪、`video-understanding-lab` 在位（`dy_selfcheck` 新增了这一项）。
+- **浏览器**：新装默认走插件自有 profile（`cdpUrl` 空）；显式 CDP 连不上会退回 profile，不再整个挂掉；想复用日常 Chrome 才调 `dy_chrome_open`（成功后会切 CDP）。
+- **看片**：`video-understanding-lab/` 随包发布；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断（返回 `partial`）；缺 lab 时 `dy_watch` 明确报错并跳过依赖看片的互动。
+- **私信**：只有平台确认的发送才记「已回复」；没回执标 `unknown`、最多重试一次；秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 再筛，多个联系人逐个巡检。
+- **记忆页**：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404 红字。
+- **配置**：宿主设置写失败时以本地 `config.json` 为准；`perDay=0` 只停自动刷，手动「现在跑一轮」仍可跑一轮。
+- **多实例**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），不再默认抢 9333；requirements 补 `pillow`。
+- **验收边界**：只读/离线部分已验；点赞/评论/私信/发布没有做真实账号验收（只验证了闸门关闭时的拒绝），别对外说「全部通过」。
