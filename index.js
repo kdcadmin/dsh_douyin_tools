@@ -2082,8 +2082,9 @@ export function apply(ctx, config) {
         onFinish: (code, error, run) => {
           try {
             const list = readDmLog()
-            const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
+            const it = [...list].reverse().find((x) => x && x.key === row.key)
             if (!it) return
+            it.finished = true // 收尾回调只算一次，避免和「没起来」分支重复计数
             const hit = run && run.lastReply
             if (code === 0 && hit) {
               it.replied = true
@@ -2110,8 +2111,9 @@ export function apply(ctx, config) {
         // 没起来（比如已有轮次在跑）⇒ 这条不想被当成回过了，下一轮再试
         try {
           const list = readDmLog()
-          const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
-          if (it) { it.tries = Number(it.tries || 0) + 1; if (it.tries >= 2) it.failed = true; it.at = Date.now() }
+          const it = [...list].reverse().find((x) => x && x.key === row.key)
+          // onFinish 已经计过这一次失败的就别再计；没走到 onFinish 才补一次
+          if (it && !it.finished) { it.tries = Number(it.tries || 0) + 1; if (it.tries >= 2) it.failed = true; it.at = Date.now() }
           writeDmLog(list)
         } catch { /* ignore */ }
         return { ok: false, error: 'headless 没起来：' + String(r?.error || '未知'), to: row.name, text: row.text }

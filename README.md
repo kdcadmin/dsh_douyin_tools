@@ -175,7 +175,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 
 - 走随包发布的 `video-understanding-lab/`：`capture`（用浏览器 cookie 下载）→ `prepare`（抽帧 + 16k 单声道）→ `asr`（faster-whisper）→ `transcript.json`；
 - `watchSeconds` 是**硬预算**：传给 `prepare --limit-seconds`，只分析前 N 秒，返回 `partial=true`、`duration` 为实际分析时长；
-- 转写缓存 `media/<id>.<秒数>.v3.json`；模型缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`；
+- 转写缓存 `media/<id>.<秒数>.v4.json`（旧 v3 缓存一律忽略并重跑；避免读到 duration=0 的坏缓存）；模型缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`；
 - 首次转写：缓存里没有模型时会自动按 `HF_ENDPOINT`（默认 hf-mirror）下载；要强制离线就设 `DOUYIN_WHISPER_OFFLINE=1`；
 - `video-understanding-lab/` 随 npm 包发布；也可用 `DOUYIN_VIDEO_LAB` 指向别的原型目录；缺 `run.py` 时 `dy_watch` 明确报「未安装」，依赖看片的评论/转发会跳过；
 - 依赖：`ffmpeg`（系统安装）+ Python 包里的 `faster-whisper` / `numpy` / `pillow` / `playwright`。
@@ -371,6 +371,7 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 - **重启后实际自检通过**：`mode=profile`、已登录、搜索正常、ffmpeg + whisper 模型就绪、`video-understanding-lab` 在位（`dy_selfcheck` 新增了这一项）。
 - **浏览器**：新装默认走插件自有 profile（`cdpUrl` 空）；显式 CDP 连不上会退回 profile，不再整个挂掉；想复用日常 Chrome 才调 `dy_chrome_open`（成功后会切 CDP）。
 - **看片**：`video-understanding-lab/` 随包发布；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断（返回 `partial`）；缺 lab 时 `dy_watch` 明确报错并跳过依赖看片的互动。
+- **看片缓存**：v4 起校验 `duration>0`，旧 v3 的 `duration=0/partial=false` 坏缓存不再命中。
 - **看片不再依赖 9333**：默认 profile 模式用当前已登录页面拿直链 + cookie 下载；只有 CDP 模式才走原型的 `capture`（不需要用户手动开 9333）。
 - **私信**：只有平台确认的发送才记「已回复」；没回执标 `unknown`、最多重试一次；秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 再筛，多个联系人逐个巡检。
 - **记忆页**：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404 红字。
@@ -378,5 +379,5 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 - **多实例**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），不再默认抢 9333；requirements 补 `pillow`。
 - **npm 入口**：0.2.1 还没发布到 npm（公开查询 404）；当前用源码 link/插件市场安装，发布后再恢复 npm 安装说明。
 - **看片**：首次转写会自动下载模型（HF 镜像）；`duration` 按真实 ASR 输出字段 `audioDuration` 读取，`watchSeconds` 截断后 `partial=true`。
-- **私信重试**：同一个人/同一条内容最多起 2 次任务，失败保留 `tries`，不会每轮重置成 1 无限重试。
+- **私信重试**：同一个人/同一条内容最多起 2 次任务，失败保留 `tries`；收尾回调和「没起来」分支用 `finished` 去重，不会一次失败记两次。
 - **验收边界**：只读/离线部分已验；点赞/评论/私信/发布没有做真实账号验收（只验证了闸门关闭时的拒绝），别对外说「全部通过」。

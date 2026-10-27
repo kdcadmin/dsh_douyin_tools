@@ -2853,11 +2853,12 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
     seconds = max(15, min(int(seconds), 600))
     media_dir = HOME / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
-    cache = media_dir / f"{aid}.{seconds}.v3.json"
+    cache = media_dir / f"{aid}.{seconds}.v4.json"
     if cache.exists():
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
-            if data.get("schemaVersion") == 3 and data.get("ok") is True:
+            # v4 起校验时长：旧版 duration=0/partial=false 的错误缓存必须重跑
+            if data.get("schemaVersion") == 4 and data.get("ok") is True and float(data.get("duration") or 0) > 0:
                 return {**data, "cached": True}
         except Exception:
             pass
@@ -2984,7 +2985,7 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         partial = bool(dur and duration and duration + 0.5 < dur)
         if not text:
             return _err("音轨中未识别出语音", phase=phase, aweme_id=aid, labCase=str(case))
-        result = _ok(aweme_id=aid, duration=duration, fullDuration=dur or duration, transcript=text, schemaVersion=3,
+        result = _ok(aweme_id=aid, duration=duration, fullDuration=dur or duration, transcript=text, schemaVersion=4,
                      model=model_name,
                      sampledRanges=[[0, duration]], partial=partial,
                      notes=notes + [f"视频理解原型：{case.name}"] + (["只转写了前 %d 秒（partial=true）" % duration] if partial else []),
