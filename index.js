@@ -2047,6 +2047,18 @@ export function apply(ctx, config) {
           if (left > 0) { pool.set(m, left - 1); lastRole = 'me' } else { lastRole = 'her'; lastHer = m }
         }
         if (lastRole === 'me') continue // 最后一条是我发的，不用回
+        // ⭐ 这个人的这条已经失败到上限 ⇒ 只跳过这个人，继续看后面的人（不能整轮退出）
+        const prior = [...items].reverse().find((x) => x && x.name === contact && x.text === lastHer && x.replied !== true)
+        if (prior && prior.failed) {
+          log(`私信巡检：跳过「${contact}」（这条已重试到上限，等新消息）`)
+          continue
+        }
+        if (prior && Number(prior.tries || 0) >= 2) {
+          prior.failed = true
+          writeDmLog(items)
+          log(`私信巡检：跳过「${contact}」（这条已重试到上限，等新消息）`)
+          continue
+        }
         const inflight = [...items].reverse().find((x) => x && x.name === contact && x.replied !== true && !x.failed && now - Number(x.at || 0) < 120000)
         if (inflight) continue // 这个人的上一条还在回
         picked = { name: contact, text: lastHer || msgs[msgs.length - 1] }
@@ -2056,11 +2068,8 @@ export function apply(ctx, config) {
       const name = picked.name
       const text = picked.text
       if (!name || !allowInitiate(name)) return { ok: true, replied: 0, note: '不是白名单里的人' }
-      // ⭐ 重试上限：同一个人、同一条内容最多试 2 次；失败后保留记录，不再无限起新任务
+      // 走到这里说明这个人没到失败上限；沿用之前的 tries（最多再试一次）
       const prior = [...items].reverse().find((x) => x && x.name === name && x.text === text && x.replied !== true)
-      if (prior && prior.failed) {
-        return { ok: true, replied: 0, note: '这条上次没有确认发送，已停止重试（等新的消息）' }
-      }
       const tries = prior ? Number(prior.tries || 0) : 0
       if (tries >= 2) {
         if (prior) { prior.failed = true; writeDmLog(items) }
