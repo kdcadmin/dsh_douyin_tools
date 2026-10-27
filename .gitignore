@@ -10,3 +10,7 @@ tools/probe_comment_dom3.py
 tools/probe_send_at.py
 tools/render-cards.mjs
 
+
+__pycache__/
+*.pyc
+.douyin-selfcheck-*/

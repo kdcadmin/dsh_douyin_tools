@@ -31,8 +31,14 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { withActionLock, execution, confirmed } from './lib/actions.mjs'
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
+import { coverUrl, fetchCover } from './lib/covers.mjs'
+import { runCommand } from './lib/process.mjs'
+import { createActionProxy } from './lib/action-proxy.mjs'
+import { findDesktopCli } from './lib/dsh-cli.mjs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
@@ -104,6 +110,8 @@ export const Config = !z ? undefined : z.object({
   /** 每次回几条 */
   replyPerRun: z.natural().default(3).extra('volatile', true),
   /** 每天最多回几条 */
+  /** 分享后的附言交给模型写（默认开；关掉=用模板） */
+  modelShareNote: z.boolean().default(true).extra('volatile', true),
   replyPerDay: z.natural().default(10).extra('volatile', true),
   /** 随机挑视频 / 随机挑评论（关掉 = 按顺序来） */
   replyRandom: z.boolean().default(true).extra('volatile', true),
@@ -125,10 +133,12 @@ export const Config = !z ? undefined : z.object({
   watchBeforeAct: z.boolean().default(true).extra('volatile', true),
   /** 转写最多听前多少秒（跳着看就靠它；默认 90） */
   watchSeconds: z.natural().default(90).extra('volatile', true),
+  /** 看片抽多少帧（默认 10，按整片均匀抽） */
+  watchFrames: z.natural().default(10).extra('volatile', true),
   /** 一轮最多挑几条（别一口气刷完） */
   pickPerRound: z.natural().default(2).extra('volatile', true),
   /** 自动评论（**不@人**，就是普通评论一句） */
-  autoCommentPlain: z.boolean().default(true).extra('volatile', true),
+  autoCommentPlain: z.boolean().default(false).extra('volatile', true),
   /** 每天最多发几条普通评论 */
   plainCommentPerDay: z.natural().default(10).extra('volatile', true),
   /** 允许「主动发消息」的人（昵称，逗号分隔；留空=谁都不主动发）。回复别人的消息不受这个限制 */
@@ -136,7 +146,11 @@ export const Config = !z ? undefined : z.object({
   /** 自动回复私信（别人发来消息就回一条） */
   /** 只回谁的私信（昵称，逗号分隔；空 = 谁发来都回） */
   dmReplyOnlyTo: z.string().default('').extra('volatile', true),
-  dmReply: z.boolean().default(true).extra('volatile', true),
+    dmReply: z.boolean().default(false).extra('volatile', true),
+    /** 私信后台静默自动回复（由插件自己盯，不占对话） */
+    dmAutoReply: z.boolean().default(true).extra('volatile', true),
+  /** 和指定人聊天：多少秒看一次私信（和陌生人巡检完全分开） */
+  dmAutoIntervalSec: z.natural().default(15).extra('volatile', true),
   /** 每个联系人每天最多回几条 */
   dmReplyPerContact: z.natural().default(1).extra('volatile', true),
   /** 每天最多回几条私信（所有人合计） */
@@ -226,15 +240,15 @@ export function apply(ctx, config) {
 
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true,
-    autoLike: false, autoComment: false, autoPublish: false,
+    autoLike: false, autoComment: false, autoPublish: false, autoClean: true, replyWorksDays: 3,
     mentionName: '', commentPerRound: 1, keywords: [],
     pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true,
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: true, plainCommentPerDay: 10, msgAllowTo: '', dmReply: true, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -254,7 +268,7 @@ export function apply(ctx, config) {
       const v = src?.[k]
       if (v === undefined || v === null) continue
       if (Array.isArray(base[k])) { if (Array.isArray(v)) out[k] = v.filter((x) => typeof x === 'string') }
-      else if (typeof base[k] === 'number') { const n = Number(v); if (Number.isFinite(n)) out[k] = n }
+      else if (typeof base[k] === 'number') { const n = Number(v); if (Number.isInteger(n) && n >= 0) out[k] = n }
       else if (typeof base[k] === 'boolean') { if (typeof v === 'boolean') out[k] = v }
       else if (typeof base[k] === 'string') { if (typeof v === 'string') out[k] = v }
     }
@@ -264,6 +278,14 @@ export function apply(ctx, config) {
   /** 「设置里能写什么范围」只有这一份 —— HTTP 接口、dy_config、读配置三处都走它 */
   const clampPatch = (patch) => {
     const p = { ...patch }
+    for (const [k, v] of Object.entries(p)) {
+      if (!(k in DEFAULTS)) throw new Error(`未知配置字段：${k}`)
+      const base = DEFAULTS[k]
+      if (typeof base === 'boolean' && typeof v !== 'boolean') throw new Error(`${k} 必须是布尔值`)
+      if (typeof base === 'number' && (!Number.isInteger(v) || v < 0)) throw new Error(`${k} 必须是非负整数`)
+      if (typeof base === 'string' && typeof v !== 'string') throw new Error(`${k} 必须是字符串`)
+      if (Array.isArray(base) && (!Array.isArray(v) || v.some(x => typeof x !== 'string'))) throw new Error(`${k} 必须是字符串数组`)
+    }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
     if ('comfyWaitSeconds' in p) p.comfyWaitSeconds = Math.max(30, Math.min(Number(p.comfyWaitSeconds) || 900, 7200))
@@ -291,6 +313,7 @@ export function apply(ctx, config) {
     if ('myNickname' in p) p.myNickname = String(p.myNickname || '').slice(0, 40)
     if ('replyIntervalMin' in p) p.replyIntervalMin = Math.max(5, Math.min(Number(p.replyIntervalMin) || 30, 1440))
     if ('replyOncePerUser' in p) p.replyOncePerUser = Boolean(p.replyOncePerUser)
+    if ('modelShareNote' in p) p.modelShareNote = Boolean(p.modelShareNote)
     if ('skipLive' in p) p.skipLive = Boolean(p.skipLive)
     if ('replyWorksDays' in p) p.replyWorksDays = Math.max(1, Math.min(Number(p.replyWorksDays) || 1, 90))
     if ('autoClean' in p) p.autoClean = Boolean(p.autoClean)
@@ -299,6 +322,7 @@ export function apply(ctx, config) {
     if ('pickPerRound' in p) p.pickPerRound = Math.max(1, Math.min(Number(p.pickPerRound) || 1, 5))
     if ('watchBeforeAct' in p) p.watchBeforeAct = Boolean(p.watchBeforeAct)
     if ('watchSeconds' in p) p.watchSeconds = Math.max(15, Math.min(Number(p.watchSeconds) || 90, 600))
+    if ('watchFrames' in p) p.watchFrames = Math.max(3, Math.min(Number(p.watchFrames) || 10, 48))
     if ('skipOverMin' in p) p.skipOverMin = Math.max(1, Math.min(Number(p.skipOverMin) || 60, 600))
     if ('skimOverMin' in p) p.skimOverMin = Math.max(1, Math.min(Number(p.skimOverMin) || 5, 120))
     if ('autoCommentPlain' in p) p.autoCommentPlain = Boolean(p.autoCommentPlain)
@@ -306,6 +330,8 @@ export function apply(ctx, config) {
     if ('msgAllowTo' in p) p.msgAllowTo = String(p.msgAllowTo || '').slice(0, 200)
     if ('dmReplyOnlyTo' in p) p.dmReplyOnlyTo = String(p.dmReplyOnlyTo || '').slice(0, 120)
     if ('dmReply' in p) p.dmReply = Boolean(p.dmReply)
+    if ('dmAutoReply' in p) p.dmAutoReply = Boolean(p.dmAutoReply)
+    if ('dmAutoIntervalSec' in p) p.dmAutoIntervalSec = Math.max(5, Math.min(Number(p.dmAutoIntervalSec) || 15, 120))
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 100))
     if ('localRound' in p) p.localRound = Boolean(p.localRound)
@@ -364,15 +390,8 @@ export function apply(ctx, config) {
     if (!row) return clampPatch(saved)
     const user = row.user || {}
     const out = normalize(row.value && typeof row.value === 'object' ? row.value : config, { ...DEFAULTS })
-    const touched = new Set([
-      ...touchedKeys,
-      'pythonPath',   // 插件自己算出来的路径，不该被界面上的旧值压住
-      ...Object.keys(DEFAULTS).filter((k) => JSON.stringify(saved[k]) !== JSON.stringify(DEFAULTS[k])),
-    ])
     for (const k of Object.keys(DEFAULTS)) {
-      if (touched.has(k)) { out[k] = saved[k]; continue }
-      if (user[k] !== undefined) { out[k] = user[k]; continue }
-      out[k] = saved[k]
+      out[k] = user[k] !== undefined && typeof user[k] === typeof DEFAULTS[k] ? user[k] : saved[k]
     }
     return clampPatch(out)
   }
@@ -461,10 +480,12 @@ export function apply(ctx, config) {
 
   let mcp = null
   let mcpKey = ''
-  const mcpKeyNow = () => { const p = pythonNow(); return `${p.command}|${p.args.join(' ')}|${scriptPath}|${cfg.cdpUrl}` }
+  const captchaFlagFile = join(stateDir, '.need-captcha')
+  const hasCaptchaFlag = () => { try { return existsSync(captchaFlagFile) } catch { return false } }
+  const mcpKeyNow = () => { const p = pythonNow(); return `${p.command}|${p.args.join(' ')}|${scriptPath}|${cfg.cdpUrl}|${hasCaptchaFlag() ? 'headed' : 'headless'}|${existsSync(scriptPath) ? statSync(scriptPath).mtimeMs : 0}` }
 
   const ensureMcp = async () => {
-    if (mcp?.running && mcpKey === mcpKeyNow()) return mcp
+    if (mcp && mcpKey === mcpKeyNow()) return mcp
     if (mcp) { try { mcp.stop() } catch { /* 已经没了 */ } mcp = null }
     if (!existsSync(scriptPath)) {
       throw new Error(`家里没有 mcp_server.py（应有 ${scriptPath}）—— 把 vendor/douyin-mcp/mcp_server.py 放好再重启一次 dsh；或者用 --force 让插件重铺`)
@@ -481,6 +502,9 @@ export function apply(ctx, config) {
       //    MCP 子进程也必须把 TEMP 指到家目录下，否则每个浏览器工具都起不来。
       env: uvEnv({
         DSH_DOUYIN_HOME: stateDir,
+        DOUYIN_ALLOW_WRITES: '1',
+        // ⭐ 2026-10-27：平时无头静默；一旦检测到验证码，就切成带界面让本人手动过（过完自动切回）
+        DOUYIN_HEADLESS: hasCaptchaFlag() ? '0' : '1',
         DOUYIN_CDP_URL: String(cfg.cdpUrl || ''),
         TEMP: join(stateDir, '.tmp'),
         TMP: join(stateDir, '.tmp'),
@@ -491,9 +515,126 @@ export function apply(ctx, config) {
     return mcp
   }
 
-  const call = async (toolName, args, opts) => {
-    const client = await ensureMcp()
-    return client.call(toolName, args, opts)
+  const WRITE_TOOLS = new Set(['douyin_like', 'douyin_comment', 'douyin_publish', 'douyin_share_video', 'douyin_chat_send', 'douyin_chat_sticker', 'douyin_chat_batch'])
+  // ⭐ 自己发出去的消息必须留底：判断「回没回」靠它，而不是靠页面方向识别
+  const dmSentFile = join(stateDir, 'dm-sent.json')
+  const readDmSent = () => {
+    try { const raw = JSON.parse(readFileSync(dmSentFile, 'utf8')) || {}; return Array.isArray(raw.items) ? raw.items : [] } catch { return [] }
+  }
+  const rememberDmSent = (text) => {
+    const s = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!s) return
+    try {
+      const items = readDmSent()
+      items.push({ text: s, at: Date.now() })
+      writeFileSync(dmSentFile, JSON.stringify({ items: items.slice(-300) }, null, 1), 'utf8')
+    } catch { /* 记不上就算 */ }
+  }
+
+  const call = async (toolName, args = {}, opts) => {
+    if (toolName === 'douyin_chat_send' && args && args.text) rememberDmSent(args.text)
+    else if (toolName === 'douyin_chat_sticker') rememberDmSent('[表情]')
+    else if (toolName === 'douyin_chat_batch' && args && args.messages) {
+      try { for (const p of JSON.parse(args.messages)) rememberDmSent(p && p.kind === 'sticker' ? '[表情]' : (p && p.text) || '') } catch { /* 解析不了就算 */ }
+    }
+    const invoke = async () => {
+      const client = await ensureMcp()
+      const r = await client.call(toolName, args, opts)
+      if (r?.runtime) client.lastRuntime = r.runtime
+      return r && typeof r === 'object' && !Array.isArray(r) && typeof r.ok === 'boolean'
+        ? r : { ok: false, error: 'MCP 返回格式无效', phase: 'protocol' }
+    }
+    if (!WRITE_TOOLS.has(toolName)) return invoke()
+    return withActionLock(stateDir, async () => {
+      refreshCfg()
+      const context = execution.getStore() || {}
+      if (context.origin === 'headless' && toolName === 'douyin_publish' && cfg.publishDraft) args = { ...args, draft: true }
+      const force = context.force === true
+      if (context.origin === 'headless' && toolName === 'douyin_publish') {
+        try {
+          const path = realpathSync(resolve(String(args.video_path || '')))
+          const rel = relative(realpathSync(resolve(cfg.comfyOutputDir)), path)
+          if (!String(cfg.comfyOutputDir).trim() || rel.startsWith('..') || isAbsolute(rel) || !path.toLowerCase().endsWith('.mp4')) throw new Error('目录外的文件')
+        } catch { return { ok: false, blocked: true, error: 'headless 只能投稿已配置 ComfyUI 输出目录里的现有 MP4' } }
+      }
+      const aid = String(args.aweme_id || '').match(/\d{6,}/)?.[0] || ''
+      const nick = String(args.nickname || '').trim()
+      let kind = toolName, key = '', cap = Infinity, used = 0, allowed = false
+      if (toolName === 'douyin_like') {
+        kind = 'like'; key = `${kind}:${aid}:${Boolean(args.undo)}`; allowed = cfg.autoLike && Boolean(aid)
+      } else if (toolName === 'douyin_comment') {
+        if (args.reply_cid) {
+          kind = 'reply'; key = `${kind}:${args.reply_cid}`; cap = cfg.replyPerDay; used = repliesToday()
+          allowed = cfg.autoReply && (await todayVideoIds()).ids.includes(aid)
+          args = { ...args, text: String(args.text || '').slice(0, 20), mention: '' }
+        } else {
+          kind = args.mention ? 'comment' : 'plain'; key = `top:${aid}`
+          cap = kind === 'comment' ? cfg.commentPerDay : cfg.plainCommentPerDay
+          used = kind === 'comment' ? commentsToday() : plainCommentsToday()
+          allowed = kind === 'comment' ? cfg.autoComment && String(args.mention).trim() === String(cfg.mentionName || '').trim() && Boolean(String(cfg.mentionName || '').trim()) : cfg.autoCommentPlain
+          if (readLedger().comments.some(c => String(c.aweme_id) === aid) || readLedger().plainComments[aid]) allowed = false
+        }
+      } else if (toolName === 'douyin_share_video') {
+        kind = 'share'; key = `${kind}:${nick}:${aid}`; cap = cfg.sharePerDay; used = sharesToday(); allowed = allowInitiate(nick) && Boolean(aid)
+      } else if (toolName === 'douyin_publish') {
+        kind = 'publish'; key = `${kind}:${videoKey(args.video_path)}:${args.draft ? 'draft' : 'published'}`
+        cap = cfg.publishPerDay; used = publishedToday(); allowed = cfg.autoPublish
+      } else {
+        kind = context.inbound ? 'dmReply' : context.streak ? 'streak' : 'message'
+        key = context.inbound ? `dm:${context.inbound.messageId}:${nick}` : context.streak ? `streak:${dayKey()}:${nick}` : `message:${randomUUID()}`
+        allowed = context.inbound ? cfg.dmReply && context.inbound.name === nick : allowInitiate(nick)
+        if (context.inbound) {
+          cap = allowInitiate(nick) ? Infinity : cfg.dmReplyPerDay
+          used = Object.values(readLedger().dm).filter(r => r.day === dayKey() && !r.exempt).reduce((n, r) => n + (r.count || 0), 0)
+        } else if (context.streak) { cap = cfg.streakPerDay; used = Number(readState()[streakKey()] || 0) }
+        else if (context.origin === 'headless') {
+          // 白名单里的人（「可以主动发消息的人」）聊天不占每日额度，否则聊两句就被卡死
+          cap = allowInitiate(nick) ? Infinity : cfg.dmReplyPerDay
+          key = `headless-message:${dayKey()}:${nick}:${createHash('sha256').update(JSON.stringify(args)).digest('hex')}`
+          // 表情包允许反复发（同样的关键词也不该被当成重复动作）
+          if (toolName === 'douyin_chat_sticker') key += ':' + randomUUID()
+        }
+      }
+      if (!allowed && !force) return { ok: false, blocked: true, error: '动作未获授权、目标不在名单、作品不属于本人或已发送', kind }
+      const ledger = readLedger()
+      const old = ledger.actions[key]
+      if (old && ['pending', 'unknown', 'succeeded'].includes(old.status) && !force) {
+        return { ok: false, already: old.status === 'succeeded', status: old.status, error: old.status === 'succeeded' ? '该动作已完成，未重复发送' : '此前发送状态待核对，未自动重发' }
+      }
+      const uncertain = Object.values(ledger.actions).filter(a => a.day === dayKey() && a.kind === kind && ['pending','unknown'].includes(a.status)).length
+      used = Math.max(used, Object.values(ledger.actions).filter(a => a.day === dayKey() && a.kind === kind && a.status === 'succeeded').length)
+      if (!force && used + uncertain >= Number(cap)) return { ok: false, blocked: true, cap, error: '该动作今日额度已用完或有待确认发送' }
+      if (context.origin === 'headless') {
+        const roundCap = kind === 'comment' || kind === 'plain' ? cfg.commentPerRound : kind === 'reply' ? cfg.replyPerRun : Infinity
+        const roundUsed = Object.values(ledger.actions).filter(a => a.runId === context.runId && (['comment','plain'].includes(kind) ? ['comment','plain'].includes(a.kind) : a.kind === kind) && a.status !== 'failed').length
+        if (roundUsed >= roundCap) return { ok: false, blocked: true, error: '本轮动作额度已用完' }
+        if (aid && !['publish','reply'].includes(kind) && !ledger.picks[`${dayKey()}:${aid}`]) {
+          if (countWatchedToday() >= Number(cfg.perDay || 0)) return { ok: false, blocked: true, error: '今日看片额度已用完' }
+          ledger.picks[`${dayKey()}:${aid}`] = { day: dayKey(), aweme_id: aid, source: 'headless-action', runId: context.runId }
+        }
+      }
+      if (force) key += ':' + randomUUID()
+      ledger.actions[key] = { day: dayKey(), at: new Date().toISOString(), runId: context.runId || '', kind, status: 'pending', awemeId: aid, peer: nick }
+      writeLedger(ledger) // Failure here prevents the external side effect.
+      let result
+      try { result = await invoke() } catch (e) { result = { ok: false, status: 'unknown', error: String(e?.message || e) } }
+      // 分享这类动作：只要确实点了分享（clicked），就算操作过，允许上层继续补附言；
+      // 但仍然标 unknown，不谎报「已确认」。
+      if (kind === 'share' && result && result.clicked && !confirmed(result)) {
+        result = { ...result, ok: true, status: 'unknown', error: '已点击分享（回执未确认）' }
+      } else if (result.ok && !confirmed(result)) result = { ...result, ok: false, status: 'unknown', error: '已操作但未取得平台确认，未记成功且不会自动重发' }
+      const next = readLedger()
+      next.actions[key] = { ...next.actions[key], status: confirmed(result) ? 'succeeded' : ['unknown','partial'].includes(result.status) ? 'unknown' : 'failed', finishedAt: new Date().toISOString(), platformId: result.cid || result.messageId || result.platformId || result.aweme_id || '' }
+      writeLedger(next)
+      if (confirmed(result)) {
+        if (kind === 'comment') noteComment({ aweme_id: aid, text: args.text })
+        if (kind === 'plain') notePlainComment(aid, args.text)
+        if (kind === 'reply') noteReply(args.reply_cid, { aweme_id: aid, text: args.text, ok: true })
+        if (kind === 'share') noteShare(aid, { to: nick })
+        if (kind === 'publish') notePublish(videoKey(args.video_path), { video: args.video_path, title: args.title, draft: args.draft, url: result.url || '', awemeId: result.aweme_id || '', draftId: result.draftId || '' })
+      }
+      return result
+    })
   }
 
   /* ─────────────── 小工具 ─────────────── */
@@ -534,14 +675,19 @@ export function apply(ctx, config) {
   /** 每条工具调用写一行 duty.log（时间 + 工具名 + 一句话结果），异常也兜住 */
   const tool = (spec) => {
     registeredTools.push(spec.name)
-    toolSpecs.set(spec.name, spec)
-    return ctx.tools.register(defineTool({
+    const wrapped = defineTool({
     ...spec,
     output: textOutput,
     async execute(args, exec) {
       let out
       try {
-        out = await spec.execute(args && typeof args === 'object' ? args : {}, exec)
+        const input = args && typeof args === 'object' ? args : {}
+        out = await withActionLock(stateDir, () => execution.run({ tool: spec.name, force: input.force === true && ['dy_like', 'dy_comment', 'dy_publish'].includes(spec.name) }, async () => {
+          refreshCfg()
+          if (!readJson(ledgerFile, {}).picksMigrated) writeLedger(readLedger())
+          migrateReplyIndex()
+          return spec.execute(input, exec)
+        }))
       } catch (e) {
         out = { ok: false, error: String(e?.message ?? e) }
         log(`工具 ${spec.name} 抛错（已兜住）：${e?.stack ?? e}`)
@@ -549,7 +695,9 @@ export function apply(ctx, config) {
       try { log(`工具 ${spec.name} → ${brief(out)}`) } catch { /* 日志失败不影响结果 */ }
       return safe(out)
     },
-    }))
+    })
+    toolSpecs.set(spec.name, wrapped)
+    return ctx.tools.register(wrapped)
   }
 
   /* ─────────────── 家目录里的状态 ─────────────── */
@@ -580,9 +728,17 @@ export function apply(ctx, config) {
     } catch { return 0 }
   }
   const countPickedToday = (now = new Date()) => {
-    const st = readState()
-    const fromState = st.day === dayKey(now) ? Number(st.picked || 0) : 0
-    return Math.max(fromState, countPicks(reportFileOf(now)))
+    const l = readLedger()
+    // ⭐ 只算真的挑过/看过的；headless 的「动作记录」不算挑中（它们只是 prevent-repeat 用的）
+    const real = Object.values(l.picks).filter(p => p.day === dayKey(now) && String(p.source || '') !== 'headless-action').length
+    return Math.max(Number(l.pickFloor?.[dayKey(now)] || 0), real)
+  }
+  /** ⭐ 额度按「真看过片（转写过）」算：没兴趣跳过的不占额度 */
+  const countWatchedToday = (now = new Date()) => {
+    try {
+      const day = dayKey(now)
+      return Object.values(readLedger().picks).filter(p => p.day === day && p.watched).length
+    } catch { return 0 }
   }
   const roundsToday = (now = new Date()) => {
     const st = readState()
@@ -597,11 +753,31 @@ export function apply(ctx, config) {
   // 那就必须记住"发过什么"，不然一轮跑两遍会把同一条视频投两次、把同一句话刷两遍。
   const ledgerFile = join(stateDir, 'ledger.json')
   const readLedger = () => {
-    const j = readJson(ledgerFile, {})
+    let j = {}
+    if (existsSync(ledgerFile)) {
+      try { j = JSON.parse(readFileSync(ledgerFile, 'utf8')) } catch { throw new Error('账本损坏，请恢复备份；已停止自动发送') }
+      if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('账本格式无效')
+    }
+    for (const name of ['published','replies','shares','plainComments','dm','actions','picks','pickFloor']) {
+      if (j[name] !== undefined && (!j[name] || typeof j[name] !== 'object' || Array.isArray(j[name]))) throw new Error('账本字段无效：' + name)
+      if (name !== 'pickFloor' && j[name] && Object.values(j[name]).some(v => !v || typeof v !== 'object' || Array.isArray(v))) throw new Error('账本记录无效：' + name)
+    }
+    if (j.comments !== undefined && (!Array.isArray(j.comments) || j.comments.some(v => !v || typeof v !== 'object'))) throw new Error('账本 comments 格式无效')
     const published = j && typeof j.published === 'object' && j.published ? j.published : {}
     const comments = Array.isArray(j?.comments) ? j.comments : []
     const replies = j && typeof j.replies === 'object' && j.replies ? j.replies : {}
-    return { published, comments, replies }
+    const l = { ...j, schemaVersion: 2, published, comments, replies, shares: j.shares || {}, plainComments: j.plainComments || {}, dm: j.dm || {}, actions: j.actions || {}, picks: j.picks || {} }
+    if (!j.picksMigrated) {
+      for (const f of readdirSync(outDir).filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))) {
+        const day = f.slice(0, 10)
+        const text = readFileSync(join(outDir, f), 'utf8').replace(/```[\s\S]*?```/g, '')
+        for (const m of text.matchAll(/^###[ \t]+(\d{6,})/gm)) l.picks[`${day}:${m[1]}`] = { day, aweme_id: m[1], source: 'legacy-report' }
+      }
+      const st = readState()
+      l.pickFloor = st.day ? { [st.day]: Number(st.picked || 0) } : {}
+      l.picksMigrated = true
+    }
+    return l
   }
   const writeLedger = (v) => writeJson(ledgerFile, v)
   const videoKey = (p) => {
@@ -616,6 +792,7 @@ export function apply(ctx, config) {
   }
   const noteComment = (rec) => {
     const l = readLedger()
+    if (l.comments.some(c => c.aweme_id === rec.aweme_id && c.reply_to === rec.reply_to)) return
     l.comments.push({ day: dayKey(), at: new Date().toISOString(), ...rec })
     l.comments = l.comments.slice(-500)
     writeLedger(l)
@@ -671,36 +848,13 @@ export function apply(ctx, config) {
     return arr.join(' / ').slice(0, 40) || 'ok'
   }
   const makeMentionComment = (video, mention) => {
-    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
-    const short = raw.length > 18 ? raw.slice(0, 18) + '…' : raw
-    const pool = [
-      `这条「${short}」好看，${mention} 你也看看[比心]`,
-      `刚看完「${short}」，${mention} 你应该会喜欢[笑哭]`,
-      `「${short}」这个真的可以，${mention} 你来看看[赞]`,
-    ]
-    return pool[Math.floor(Math.random() * pool.length)]
+    const text = String(video?.transcript || video?.title || '').replace(/\s+/g, ' ').slice(0, 70)
+    return `@${mention} 这条提到「${text}」，你可能感兴趣。`
   }
-
-  /** 看完再评论：拿标题 +（有的话）热评，说清这条讲了啥，比「说得对」像人 */
   const makePlainComment = (video, topComment) => {
-    const skim = Boolean(video?.skim)
-    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
-    const short = raw.length > 20 ? raw.slice(0, 20) + '…' : raw
-    const tag = String(topComment || '').replace(/\s+/g, ' ').slice(0, 14)
-    const pool = []
-    if (short) {
-      pool.push(`这条讲「${short}」，看完比想象中讲得清楚[比心]`)
-      pool.push(`刚看完「${short}」，中间那段确实有意思[笑哭]`)
-      if (tag) pool.push(`「${short}」看完最有感的是评论区那句「${tag}」[憨笑]`)
-      pool.push(`「${short}」这个我还真看完了一遍，挺值[赞]`)
-    }
-    if (skim) {
-      pool.push(`这条 ${Math.round(Number(video?.mins) || 0)} 分钟，我跳着看了几段，重点都在后半段[比心]`)
-      pool.push(`太长了，跳着看完了「${short}」，中间那段最值[憨笑]`)
-    } else {
-      pool.push('这条我一路看完了，比标题写得好[笑哭]', '笑死我了，看到一半就忍不住了[捂脸]')
-    }
-    return pool[Math.floor(Math.random() * pool.length)]
+    const text = String(video?.transcript || '').replace(/\s+/g, ' ').slice(0, 65)
+    if (text) return `听到这里提到「${text}」${video?.skim ? '，这是采样片段。' : '。'}`
+    return `看到标题提到「${String(video?.title || '').slice(0, 45)}」。`
   }
 
   /** 普通评论（不@人）用的短句 */
@@ -719,16 +873,48 @@ export function apply(ctx, config) {
   }
 
   const repliesToday = (now = new Date()) => Object.values(readLedger().replies || {})
-    .filter((r) => r && r.day === dayKey(now)).length
+    .filter((r) => r && r.ok === true && r.day === dayKey(now)).length
   /** 回过的 cid 索引（一行一个，只有宿主导入；不进模型上下文，所以不费 token） */
   const replyIndexFile = join(stateDir, 'replied-cids.txt')
+  const migrateReplyIndex = () => {
+    const ledger = readLedger()
+    if (ledger.replyIndexMigrated) return
+    const failed = new Set(), succeeded = new Set()
+    const collect = (replies) => {
+      for (const [cid, r] of Object.entries(replies || {})) {
+        if (r?.ok === false) failed.add(cid)
+        if (r?.ok === true) succeeded.add(cid)
+      }
+    }
+    collect(ledger.replies)
+    const archive = join(stateDir, 'ledger')
+    let visited = 0
+    if (existsSync(archive)) for (const year of readdirSync(archive).filter(x => /^\d{4}$/.test(x))) {
+      for (const month of readdirSync(join(archive, year)).filter(x => /^\d{2}$/.test(x))) {
+        for (const file of readdirSync(join(archive, year, month)).filter(x => /^\d{2}\.json$/.test(x))) {
+          if (++visited > 5000) throw new Error('回复索引迁移超出归档上限，需人工检查')
+          const data = JSON.parse(readFileSync(join(archive, year, month, file), 'utf8'))
+          collect(data.replies)
+        }
+      }
+    }
+    if (existsSync(replyIndexFile)) {
+      const ids = readFileSync(replyIndexFile, 'utf8').split(/\r?\n/).filter(cid => cid && (!failed.has(cid) || succeeded.has(cid)))
+      const temp = replyIndexFile + '.tmp'
+      try { writeFileSync(temp, [...new Set(ids)].join('\n') + (ids.length ? '\n' : ''), 'utf8'); renameSync(temp, replyIndexFile) }
+      finally { try { rmSync(temp, { force: true }) } catch {} }
+    }
+    ledger.replyIndexMigrated = true
+    writeLedger(ledger)
+  }
   const readReplyIndex = () => {
     try {
-      return new Set(readFileSync(replyIndexFile, 'utf8').split(/\r?\n/).filter(Boolean))
+      const failed = new Set(Object.entries(readLedger().replies).filter(([,r]) => r.ok === false).map(([cid]) => cid))
+      return new Set(readFileSync(replyIndexFile, 'utf8').split(/\r?\n/).filter(cid => cid && !failed.has(cid)))
     } catch { return new Set() }
   }
   const appendReplyIndex = (cid) => {
-    try { appendFileSync(replyIndexFile, String(cid) + '\n', 'utf8') } catch { /* 记不上不影响去重 */ }
+    try { if (!readReplyIndex().has(String(cid))) appendFileSync(replyIndexFile, String(cid) + '\n', 'utf8') } catch { /* 成功账本仍可去重 */ }
   }
   /** 账本按「年/月/日」归档：主账本只留**今天**，往前的按 ledger/YYYY/MM/DD.json 存
    *  使用者 2026-10-24 要求：年文件夹 → 月文件夹 → 日文件
@@ -762,7 +948,7 @@ export function apply(ctx, config) {
       if (d === today) continue
       if (!byDay.has(d)) byDay.set(d, { replies: {}, comments: [] })
       byDay.get(d).replies[cid] = rec
-      delete l.replies[cid]
+      // Keep records active until the archive is durably written.
     }
     const keep = []
     for (const c of l.comments || []) {
@@ -771,20 +957,26 @@ export function apply(ctx, config) {
       if (!byDay.has(d)) byDay.set(d, { replies: {}, comments: [] })
       byDay.get(d).comments.push(c)
     }
+    for (const [d, bucket] of byDay) {
+      if (moveToDayFile(d, bucket.replies, bucket.comments)) {
+        for (const cid of Object.keys(bucket.replies)) delete l.replies[cid]
+      } else keep.push(...bucket.comments)
+    }
     l.comments = keep
-    for (const [d, bucket] of byDay) moveToDayFile(d, bucket.replies, bucket.comments)
     return l
   }
-  const repliedCids = () => new Set([...readReplyIndex(), ...Object.keys(readLedger().replies || {})])
+  const repliedCids = () => new Set([...readReplyIndex(), ...Object.entries(readLedger().replies || {}).filter(([, r]) => r.ok === true).map(([cid]) => cid)])
   /** 回过谁（昵称归一化）+ 索引文件，给「同一个人只回一次」用 */
-  const normUser = (u) => String(u || '').replace(/[\s（）()【】]/g, '').toLowerCase()
+  const normUser = (u) => String(u || '').replace(/[\u200B-\u200D\uFE0E\uFE0F\s（）()【】]/g, '').toLowerCase()
+  /** 回复去重的身份 = 人 + 评论原文：同一人发新评论要回，同一条评论不回 */
+  const pairKey = (user, text) => normUser(user) + '\u0001' + String(text || '').replace(/\s+/g, ' ').trim()
   const repliedUsersFile = join(stateDir, 'replied-users.txt')
   const readRepliedUsers = () => {
     const s = new Set()
     try {
       for (const line of readFileSync(repliedUsersFile, 'utf8').split(/\r?\n/)) if (line.trim()) s.add(line.trim())
     } catch { /* 没文件 */ }
-    for (const r of Object.values(readLedger().replies || {})) if (r?.user) s.add(normUser(r.user))
+    for (const r of Object.values(readLedger().replies || {})) if (r?.ok === true && r?.user) s.add(normUser(r.user))
     return s
   }
   const appendRepliedUser = (user) => {
@@ -794,13 +986,13 @@ export function apply(ctx, config) {
   }
   /** 我自己在抖音的昵称（用来跳过"我自己的评论/我自己的回复"） */
   const myNames = () => {
-    const raw = [String(cfg.myNickname || ''), '大白鲸', '大白鲸（爱吃白饭版）', '大白鲸爱吃白饭版']
+    const raw = [String(cfg.myNickname || ''), String(readState().nickname || '')]
     return new Set(raw.map((s) => s.replace(/[\s（）()【】]/g, '')).filter(Boolean))
   }
   const isMine = (user) => {
-    const norm = String(user || '').replace(/[\s（）()【】]/g, '')
+    const norm = String(user || '').replace(/[\u200B-\u200D\uFE0E\uFE0F\s（）()【】]/g, '')
     if (!norm) return false
-    for (const n of myNames()) if (norm.includes(n) || n.includes(norm)) return true
+    for (const n of myNames()) if (norm === n) return true
     return false
   }
   /** 我回过的句子（用来兜底：万一账本丢了，看到自己那句就不再回） */
@@ -810,7 +1002,7 @@ export function apply(ctx, config) {
     l.replies = l.replies || {}
     l.replies[String(cid)] = { day: dayKey(), at: new Date().toISOString(), ...rec }
     writeLedger(pruneLedger(l))
-    appendReplyIndex(cid)
+    if (rec.ok === true) appendReplyIndex(cid)
   }
   /** 今天发过的作品 id（只有当日发布的才回；过了当天就不碰）
    *  来源：抖音站内 /aweme/post（登录态）→ 按 create_time 过滤今天
@@ -860,76 +1052,39 @@ export function apply(ctx, config) {
    *  设置里填了 shareNote 就按你写的发。
    */
   const makeShareNote = (video) => {
-    const skim = Boolean(video?.skim)
     const fixed = String(cfg.shareNote || '').trim()
     if (fixed) return fixed
-    // ⭐ 真看过（有转写）就按内容说感受，别再套模板
-    const tr = String(video?.transcript || '').replace(/\s+/g, ' ').trim()
-    if (tr.length > 12) {
-      const scary = /(恐怖|鬼|怕|尸|血|死|怪|阴森|尖叫|追|刀|棺材)/.test(tr)
-      const funny = /(笑|搞笑|沙雕|哈哈哈|乐死)/.test(tr)
-      const learn = /(教程|步骤|方法|原理|讲解|学会|技巧)/.test(tr)
-      const beat = tr.length > 46 ? tr.slice(0, 46) + '…' : tr
-      if (scary) {
-        return [`刚看完这条，开头是「${beat}」，我一边看一边起鸡皮疙瘩[捂脸]你也看看`,
-          `这条有点吓人啊，讲到「${beat}」的时候我后背发凉[恐惧]`,
-          `看完这条我有点怕怕的：「${beat}」，你敢看吗[害羞]`][Math.floor(Math.random() * 3)]
-      }
-      if (funny) {
-        return [`刚看完，笑死我了：「${beat}」[笑哭]你也看看`,
-          `这条太好笑了：「${beat}」[捂脸]`][Math.floor(Math.random() * 2)]
-      }
-      if (learn) {
-        return [`刚看完，讲的是「${beat}」，感觉挺有用[比心]`,
-          `这条把「${beat}」讲清楚了，你可以看看[微笑]`][Math.floor(Math.random() * 2)]
-      }
-      return [`刚看完这条，印象最深的是「${beat}」，做得挺用心[比心]`]
+    const transcript = String(video?.transcript || '').replace(/\s+/g, ' ').trim()
+    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+    if (transcript) {
+      // 截到句读位置，别卡在半句话
+      let cut = transcript.slice(0, 70)
+      const m = cut.match(/^(.{24,70}?)[。！？!?.,，]/)
+      if (m) cut = m[1]
+      const lines = [
+        '刚看了个视频，里面说「' + cut + '」，笑死，给你看看。',
+        '这个有点意思：「' + cut + '」——你也看看。',
+        '刷到个视频，讲的「' + cut + '」，我看完有点想笑，发你。',
+        '看到一句「' + cut + '」，配这视频绝了，你瞅瞅。',
+      ]
+      return pick(lines)
     }
-    const raw = String(video?.title || '').replace(/\s+/g, ' ').trim()
-    const short = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
-    const kw = (s) => raw.includes(s)
-    const know = ['知识', '教程', '讲解', '解析', '科普', '课程', '习题', '考研', '入门', '实战',
-      '原理', '源码', '框架', '教学', '精讲', '干货', '方法论', '如何', '怎么', '技巧', '复盘']
-      .some(kw)
-    const pretty = ['好看', '颜值', '舞蹈', '翻唱', '剧情', '短片', 'MV', '摄影', '穿搭', 'cos', 'cosplay']
-      .some(kw)
-    const fun = ['搞笑', '沙雕', '整活', '段子', '笑死', '沙雕', '游戏', '王者', '三角洲', '萌宠', '猫', '狗']
-      .some(kw)
-
-    if (skim && short) {
-      return [`这条 ${Math.round(Number(video?.mins) || 0)} 分钟，我跳着看了，重点在「${short}」这段[比心]`,
-        `太长没细看，跳着扫了一遍：${short}，你可以挑着看[憨笑]`][Math.floor(Math.random() * 2)]
-    }
-    if (know) {
-      const pool = short
-        ? [`这期讲「${short}」，感觉挺有用的[比心]`,
-           `总结一下：${short}。看完有点收获[憨笑]`,
-           `这个视频把「${short}」讲清楚了，你可以看看[微笑]`]
-        : ['这条挺干货的，感觉有用[比心]']
-      return pool[Math.floor(Math.random() * pool.length)]
-    }
-    if (pretty) {
-      const pool = ['这个好可爱啊，你不给我买我就找一群大肥鱼弄你[捂脸]',
-        '好好看，给我看[比心]', '这个太可爱了，你不买我就找大肥鱼来[笑哭]',
-        '刷到这个就想到你，好看[害羞]']
-      return pool[Math.floor(Math.random() * pool.length)]
-    }
-    if (fun) {
-      const pool = ['好好看，给我看[比心]', '这个太好看了，你也看看[笑哭]',
-        '笑死我了[捂脸]你也来看看', '这条我一路看完了，比标题写得好[笑哭]']
-      return pool[Math.floor(Math.random() * pool.length)]
-    }
-    const other = ['这个视频好好笑，主人你也看看，哈哈哈[笑哭]', '笑死我了[捂脸]你也来看看',
-      '刚刷到这个，觉得你会喜欢[比心]', '这条真的有点东西，你看看']
-    return other[Math.floor(Math.random() * other.length)]
+    const full = String(video?.title || '').replace(/\s+/g, ' ').trim()
+    const t = full.length > 60 ? full.slice(0, 60) + '…' : full
+    return t ? '标题提到「' + t + '」，分享给你看看。' : '这个我觉得挺有意思，分享给你看看。'
   }
 
   /** 这个人允不允许我「主动」发消息（白名单，空=谁都不许）；回复别人的消息不走这个 */
+  // 昵称里常带 emoji，同一个 emoji 可能有/没有 U+FE0F 变体符，肉眼一样但字符串不等 ⇒ 统一归一化再比
+  const normNick = (s) => String(s || '')
+    .replace(/[\u200B-\u200D\uFE0E\uFE0F]/g, '')
+    .replace(/[\s\u00A0]/g, '')
+    .toLowerCase()
   const allowInitiate = (name) => {
-    const list = String(cfg.msgAllowTo || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+    const list = String(cfg.msgAllowTo || '').split(/[,，、\r\n]+/).map((s) => s.trim()).filter(Boolean)
     if (!list.length) return false
-    const key = String(name || '').replace(/\s+/g, '').slice(0, 4)
-    return list.some((n) => String(n).replace(/\s+/g, '').slice(0, 4) === key)
+    const key = normNick(name)
+    return Boolean(key) && list.some(n => normNick(n) === key)
   }
 
   const shuffle = (arr) => {
@@ -957,7 +1112,7 @@ export function apply(ctx, config) {
     else if (/哈哈|笑死|草|绝了/.test(c)) t = `哈哈哈你抓到重点了${e}`
     else if (/更新|什么时候|催|快更/.test(c)) t = `在弄了在弄了${e || '，别催'}`
     else if (/回我|理我|在吗|说话/.test(c)) t = `在的在的${e}`
-    else t = [`我懂你意思${e}`, `这条我看完了${e}`, `嗯…你说得对${e || ''}`, `收到，记下了${e}`][Math.floor(Math.random() * 4)]
+    else t = [`我懂你意思${e}`, `谢谢你的留言${e}`, `嗯…你说得对${e || ''}`, `收到，记下了${e}`][Math.floor(Math.random() * 4)]
     t = String(t).trim()
     if (!t) t = '收到[微笑]'
     if (t.length > 20) {
@@ -969,7 +1124,10 @@ export function apply(ctx, config) {
   }
 
   /** 回一轮：随机挑视频 → 读该视频评论 → 跳过已回过的 → 回 N 条 */
-  const replyRound = async ({ count, random } = {}) => {
+  const replyRound = ({ count, random } = {}) => withActionLock(stateDir, async () => {
+    refreshCfg()
+    if (!cfg.autoReply) return { ok: false, blocked: true, error: '自动回复评论已关闭' }
+    if (Number(count ?? cfg.replyPerRun) === 0) return { ok: true, sent: 0, today: repliesToday(), perDay: cfg.replyPerDay }
     const perDay = Math.max(0, Number(cfg.replyPerDay) || 0)
     const today = repliesToday()
     if (!perDay) return { ok: false, error: '「每天最多回」是 0 ⇒ 不回', today, perDay }
@@ -995,7 +1153,12 @@ export function apply(ctx, config) {
         continue
       }
       const myTexts = myReplyTexts()
-      const repliedUsers = cfg.replyOncePerUser ? readRepliedUsers() : new Set()
+      const repliedPairs = new Set()
+      try {
+        for (const rec of Object.values(readLedger().replies || {})) {
+          if (rec && rec.user && rec.comment) repliedPairs.add(pairKey(rec.user, rec.comment))
+        }
+      } catch { /* 没账本 */ }
       const seenThisRound = new Set()
       // 图文作品的评论：没有 cid，且页面上点不到「回复」（抖音图文页不展开评论面板）
       // 别硬试、别占额度 —— 直接在报告里写清楚「图文作品暂不支持回复」
@@ -1006,20 +1169,43 @@ export function apply(ctx, config) {
       }
       let fresh = list.filter((c) => {
         if (!c) return false
-        // 图文作品的评论从 DOM 抓来，没有 cid：用「序号 + 文本」当身份，照样能回
         const cid = String(c.cid || ('idx:' + v + ':' + (c.__idx ?? -1)))
-        if (doneCids.has(cid) || seenThisRound.has(cid)) return false
+        if (seenThisRound.has(cid)) return false
         if (isMine(c.user)) return false                       // 我自己发的评论/回复
-        if (cfg.replyOncePerUser && repliedUsers.has(normUser(c.user))) return false  // 同一个人只回一次（默认关）
         const txt = String(c.text || '').trim()
+        if (!txt || /^\[[^\]]*\]$/.test(txt)) return false      // 纯图片/表情评论在 DOM 里定位不到，跳过
         if (myTexts.has(txt)) return false                      // 兜底：那是我回过的句子
-        const rec = readLedger().replies?.[cid]
-        if (rec && rec.ok === false && Number(rec.attempts || 0) >= 2) return false  // 失败两次别死磕
+        // ⭐ 去重只看「人 + 评论原文」：同人新评论要回；同一人同一条评论才跳过
+        if (repliedPairs.has(pairKey(c.user, txt))) return false
         seenThisRound.add(cid)
         return true
       })
       if (!fresh.length) { out.push({ aweme_id: v, ok: true, skipped: '这个视频没有新评论' }); continue }
       if (rand) fresh = shuffle(fresh)
+      // ⭐ 回评论直接用模型（不再有开关/按钮）：把「视频 + 评论 + 共享记忆」交给 headless，
+      //    让它像大肥鱼本人一样回，而不是套「我懂你意思」模板。
+      {
+        const picks = fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
+        let memo = ''
+        try {
+          const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
+          if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
+        } catch { /* 没有记忆也能回 */ }
+        const list = picks.map((c, i) => `${i + 1}) 视频「${String(v.title || '').slice(0, 40)}」 评论者：${c.user || ''} 内容：${String(c.text || '').slice(0, 80)} reply_cid=${String(c.cid || '')}`).join('\n')
+        const prompt = [
+          '你是「大白鲸（爱吃白饭版）」，使用者叫你大肥鱼。这是你自己视频下面新来的评论，你要像本人一样逐条回一句。',
+          memo ? `你记得的事：\n${memo}\n` : '',
+          `要回的评论：\n${list}\n`,
+          '规则：',
+          '- 每条回复 ≤20 字，口语、有情绪，别用「我懂你意思」「谢谢支持」这类模板；',
+          '- 对方聊敏感的（政治/医疗/法律/隐私/黄赌毒/荐股）就委婉拒掉；',
+          '- 用 douyin_comment(aweme_id, text, reply_cid) 逐条回复；cid 必须用上面给的；',
+          '- 只回这些评论，不要点赞、不要发新评论、不要刷视频、不要写文件；回完就结束。',
+        ].join('\n')
+        const r = await runDuty('reply', { prompt, countRound: false })
+        out.push({ aweme_id: v, ok: true, delegated: true, candidates: picks.length, started: Boolean(r?.started), error: r?.error })
+        break
+      }
       for (const c of fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))) {
         const { text, sensitive } = pickReply(c.text)
         try {
@@ -1027,20 +1213,20 @@ export function apply(ctx, config) {
           if (String(c.cid || '').trim()) payload.reply_cid = String(c.cid)
           else payload.reply_index = Number(c.__idx ?? -1)     // 图文作品的评论没有 cid，按序号回
           const r = await call('douyin_comment', payload, { timeoutMs: 150_000 })
-          const okk = r && r.ok !== false && r.needLogin !== true
+          const okk = confirmed(r)
           const prev = (readLedger().replies || {})[String(c.cid)] || {}
-          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').slice(0, 60) })
+          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').trim() })
           if (okk) appendRepliedUser(c.user)
           out.push({ aweme_id: v, cid: String(c.cid), comment: String(c.text || '').slice(0, 40), reply: text, sensitive, sent: okk, error: okk ? undefined : (r?.error || '没发出去') })
         } catch (e) {
           const prev2 = (readLedger().replies || {})[String(c.cid)] || {}
-          noteReply(c.cid, { aweme_id: v, text, sensitive, ok: false, attempts: Number(prev2.attempts || 0) + 1, error: String(e?.message ?? e).slice(0, 80) })
+          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: false, attempts: Number(prev2.attempts || 0) + 1, comment: String(c.text || '').trim(), error: String(e?.message ?? e).slice(0, 80) })
           out.push({ aweme_id: v, cid: String(c.cid), reply: text, sent: false, error: String(e?.message ?? e) })
         }
       }
     }
     // 一次性附加 id 用完即清（只限这一次）
-    if ((got.extras || []).length && cfg.replyOneShot === true) {
+    if (out.some(x => x.sent) && (got.extras || []).length && cfg.replyOneShot === true) {
       try {
         cfg.replyVideoIds = ''
         saveCfg({ replyVideoIds: '' })
@@ -1051,7 +1237,7 @@ export function apply(ctx, config) {
     const sent = out.filter((x) => x.sent).length
     log(`回评论一轮：今日作品 ${vids.length} 条（来源 ${got.source}），想回 ${want} 条，实际发出 ${sent} 条`)
     return { ok: true, want, sent, today: repliesToday(), perDay, videos: vids, source: got.source, titles: got.titles, items: out }
-  }
+  })
 
   const notePublish = (key, rec) => {
     const l = readLedger()
@@ -1084,6 +1270,35 @@ export function apply(ctx, config) {
       mkdirSync(memDir, { recursive: true })
       appendFileSync(memFileOf(), line.endsWith('\n') ? line : line + '\n', 'utf8')
     } catch { /* 记不上也不影响这一轮 */ }
+  }
+
+  /** ⭐ 私信聊天记录同步进记忆：格式固定「我: …」/「dsh: …」 */
+  const appendDmMemory = (name, userText, replyText, when = new Date()) => {
+    const day = dayKey(when)
+    const hhmm = when.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+    const block = [
+      `\n## ${day} ${hhmm} · 私信 · ${name}`,
+      `我: ${String(userText || '').replace(/\s+/g, ' ').trim().slice(0, 300)}`,
+      `大肥鱼: ${String(replyText || '').replace(/\s+/g, ' ').trim().slice(0, 300)}`,
+    ].join('\n') + '\n'
+    appendMemory(block)
+    // ⭐ 同时写进「记忆插件」的 memory.db（聊天/视频共用同一份记忆）
+    try {
+      call('memory_write', {
+        content: `我: ${String(userText || '').trim().slice(0, 300)}\n大肥鱼: ${String(replyText || '').trim().slice(0, 300)}`,
+        type: 'fact',
+        tags: `私信,${name}`,
+        importance: 0.7,
+        workspace_path: process.cwd(),
+      }, { timeoutMs: 30_000 }).catch(() => {})
+    } catch { /* 写不进也不影响聊天 */ }
+  }
+  /** ⭐ 视频互动也同步进记忆：分享/看片/评论都记一行 */
+  const appendVideoMemory = (kind, video, extra = '') => {
+    const title = String(video?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+    const tr = String(video?.transcript || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const line = `[视频] ${kind} · ${video?.aweme_id || ''} · ${title}${tr ? ' · 转写: ' + tr : ''}${extra ? ' · ' + extra : ''}`
+    appendMemory(line)
   }
 
   const markLogin = (loggedIn, extra = {}) => {
@@ -1154,7 +1369,7 @@ export function apply(ctx, config) {
     try {
       const req = createRequire(import.meta.url)
       const { execFileSync } = req('node:child_process')
-      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq chrome.exe', '/NH'], { encoding: 'utf8', timeout: 5000 })
+      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq chrome.exe', '/NH'], { encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore','pipe','ignore'] })
       return /chrome\.exe/i.test(out)
     } catch { return false }
   }
@@ -1179,6 +1394,7 @@ export function apply(ctx, config) {
     if (udd && existsSync(udd)) args.push(`--user-data-dir=${udd}`)
     try {
       const child = spawn(exe.path, args, { detached: true, stdio: 'ignore', windowsHide: false })
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) })
       child.unref()
       log(`拉 Chrome：${exe.path} --remote-debugging-port=${port}`)
     } catch (e) {
@@ -1264,7 +1480,8 @@ export function apply(ctx, config) {
       let h = null
       try { h = await comfyFetch('/history/' + encodeURIComponent(id), {}, 15000) } catch { continue }
       if (!h || typeof h !== 'object' || !Object.keys(h).length) continue
-      const entry = h[id] || Object.values(h)[0] || {}
+      const entry = h[id]
+      if (!entry) continue
       const status = entry.status || {}
       const msgs = Array.isArray(status.messages) ? status.messages : []
       if (status.status_str === 'error' || msgs.some((m) => Array.isArray(m) && m[0] === 'error')) {
@@ -1272,7 +1489,19 @@ export function apply(ctx, config) {
       }
       if (status.completed === true || status.status_str === 'success') {
         log(`ComfyUI 出片完成（prompt_id=${id}）`)
-        return { ok: true, promptId: id, source }
+        const paths = []
+        const root = resolve(cfg.comfyOutputDir)
+        for (const output of Object.values(entry.outputs || {})) {
+          for (const media of [...(output.videos || []), ...(output.gifs || [])]) {
+            if (media.type !== 'output' || !/\.mp4$/i.test(media.filename || '')) continue
+            const path = resolve(root, media.subfolder || '', media.filename)
+            const rel = relative(root, path)
+            if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('ComfyUI 输出路径越界')
+            if (existsSync(path) && statSync(path).isFile()) paths.push(path)
+          }
+        }
+        if (paths.length !== 1) throw new Error(`当前工作流有 ${paths.length} 个有效 MP4 输出，请显式指定 video_path`)
+        return { ok: true, promptId: id, source, video: paths[0] }
       }
     }
     throw new Error(`等 ComfyUI 出片超时（${Number(cfg.comfyWaitSeconds) || 900}s）—— 它可能还在排队，或者显卡正忙`)
@@ -1285,7 +1514,7 @@ export function apply(ctx, config) {
     if (explicit && existsSync(explicit)) return explicit
     try {
       const req = createRequire(import.meta.url)
-      for (const spec of ['@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh']) {
+      for (const spec of ['@deepseek-ai/dsh/lib/bin.js']) {
         try { const p = req.resolve(spec); if (p && existsSync(p)) return p } catch { /* 换下一个 */ }
       }
     } catch { /* 解析器不可用就跳过 */ }
@@ -1366,30 +1595,31 @@ export function apply(ctx, config) {
     return v
   }
   const resolveDsh = () => {
+    if (!existsSync(String(cfg.dshBin || '').trim())) {
+      const desktop = findDesktopCli({ pluginDir })
+      if (desktop) return desktop
+    }
     const cli = dshCliCached()
     if (cli) return { command: process.execPath, args: [cli], shell: false }
-    const hint = '新版把 dsh 打进 app.asar 了，理论上应该能自动找到；实在找不到就把「dsh 路径」填成 D:\\DeepSeekHarness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+    const hint = '请将 dshBin 指向当前安装目录内实际存在的 dsh/lib/bin.js，旧路径不会执行'
     if (!hasDshOnPath()) {
       log('⚠️ 找不到 dsh（常见位置、应用目录、PATH 里都没有）⇒ ' + hint)
       return { missing: true, hint }
     }
     log('⚠️ 没在常见位置找到 dsh，最后试一下 PATH 里的 `dsh` ⇒ ' + hint)
-    return { command: 'dsh', args: [], shell: true, fallback: true, hint }
+    return { missing: true, hint: 'PATH 只有 shell 启动器；请将 dshBin 指向实际 CLI bin.js，避免通过 shell 拼接提示词' }
   }
 
   /* ─────────────── 跑一轮 ─────────────── */
 
   const mcpWhitelist = () => {
-    // ⭐ 2026-10-25：之前漏了 feed/my_posts/chat/share —— 结果「刷推荐流」「转发」「续火花」「@豆包」
-    //    在那一轮里根本看不到工具，所以永远不会发生。
-    const list = ['douyin_feed', 'douyin_hot', 'douyin_hot_videos', 'douyin_search', 'douyin_video',
-      'douyin_comments', 'douyin_my_posts']
-    if (cfg.autoLike) list.push('douyin_like')
-    if (cfg.autoComment && String(cfg.mentionName || '').trim()) list.push('douyin_comment')
-    if (cfg.autoPublish) list.push('douyin_publish')
-    if (String(cfg.shareToNick || '').trim()) list.push('douyin_share_video')
-    if (String(cfg.streakNick || '').trim()) list.push('douyin_chat_send')
-    return list
+    refreshCfg()
+    const names = ['douyin_feed','douyin_hot','douyin_hot_videos','douyin_search','douyin_video','douyin_comments','douyin_my_posts','douyin_watch','douyin_thumb','douyin_check_credential','memory_write','memory_recent']
+    if (cfg.autoLike) names.push('douyin_like')
+    if (cfg.autoComment || cfg.autoCommentPlain || cfg.autoReply) names.push('douyin_comment')
+    if (cfg.autoPublish) names.push('douyin_publish')
+    if (String(cfg.msgAllowTo || '').trim()) names.push('douyin_share_video','douyin_chat_send','douyin_chat_sticker','douyin_chat_batch')
+    return names
   }
 
   /**
@@ -1397,9 +1627,9 @@ export function apply(ctx, config) {
    * 某个 profile 能拿到什么工具取决于它自己那层的 patch；分发给别人时不能要求人家改 profile，
    * 所以插件自己生成一份、跑的时候 `--patch` 带上。
    */
-  const ensureOverlay = () => {
+  const ensureOverlay = (proxy) => {
     const file = join(stateDir, 'headless-overlay.yml')
-    const posix = (p) => String(p).replace(/\\/g, '/')
+    const posix = (p) => String(p).replace(/\\/g, '/').replace(/'/g, "''")
     const yml = []
     // 有些 DSH 版本的 headless 自带 patch 会把这几个服务 disabled ⇒ 那一轮没有账号模型可用
     for (const id of ['credentials', 'authorization', 'deepseek-account']) {
@@ -1424,8 +1654,8 @@ export function apply(ctx, config) {
         yml.push(
           '- id: agent-default-model',
           '  config:',
-          '    provider: ' + String(selProvider),
-          '    model: ' + String(selModel),
+          '    provider: ' + JSON.stringify(selProvider),
+          '    model: ' + JSON.stringify(selModel),
           '',
         )
       }
@@ -1444,6 +1674,9 @@ export function apply(ctx, config) {
         '        args:',
         ...args,
         '        env:',
+        "          DOUYIN_ALLOW_WRITES: '1'",
+        "          DOUYIN_PROXY_URL: '" + proxy.url + "'",
+        "          DOUYIN_PROXY_TOKEN: '" + proxy.token + "'",
         `          DOUYIN_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
         `          TEMP: '${posix(join(stateDir, '.tmp'))}'`,
         `          TMP: '${posix(join(stateDir, '.tmp'))}'`,
@@ -1452,7 +1685,7 @@ export function apply(ctx, config) {
         '',
       )
     }
-    try { writeFileSync(file, yml.join('\n'), 'utf8'); return file } catch (e) {
+    try { writeFileSync(file, yml.join('\n'), { encoding: 'utf8', mode: 0o600 }); return file } catch (e) {
       log(`写 overlay 失败：${e?.message ?? e}`)
       return null
     }
@@ -1462,17 +1695,20 @@ export function apply(ctx, config) {
     const duty = charterPath(pluginDir, stateDir)
     let charterText = ''
     try { charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir) } catch { /* 读不到就让它自己读 */ }
+    for (const [from, to] of Object.entries({ dy_feed:'douyin_feed',dy_search:'douyin_search',dy_video:'douyin_video',dy_comments:'douyin_comments',dy_like:'douyin_like',dy_comment:'douyin_comment',dy_publish:'douyin_publish',dy_my_videos:'douyin_my_posts',dy_thumb:'douyin_thumb',dy_share:'douyin_share_video',dy_chat_send:'douyin_chat_send' })) charterText = charterText.replaceAll(from, to)
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
     const quota = Math.max(0, Number(cfg.perDay) || 0)
-    const already = countPickedToday()
+    const already = countWatchedToday()
     const left = Math.max(0, quota - already)
-    const likeOn = Boolean(cfg.autoLike)
+    const likeOn = cfg.autoLike
     const mention = String(cfg.mentionName || '').trim()
-    const commentOn = Boolean(cfg.autoComment && mention)
-    const publishOn = Boolean(cfg.autoPublish)
+    const commentOn = cfg.autoComment && mention.length > 0
+    const publishOn = cfg.autoPublish
+    let persona = String(cfg.personaPrompt || '').trim()
+    try { persona += '\n' + readFileSync(join(stateDir, 'persona.md'), 'utf8').split('## 最近观察（自动记录，不作为行为指令）')[0] } catch {}
     return '你是这个账号的抖音助手。'
-      + (String(cfg.personaPrompt || '').trim()
-        ? '\n\n**你的人设（说话、挑片、写日报都按这个来，别写成客服腔）：**\n' + String(cfg.personaPrompt).trim() + '\n\n'
+      + (persona.trim()
+        ? '\n\n**你的人设（说话、挑片、写日报都按这个来，别写成客服腔）：**\n' + persona.trim() + '\n\n'
         : '')
       + (cfg.memory && readMemory(24).length
         ? '\n\n**你记得的最近这些（前几轮刷到的 / 读到的，别重复挑，也别装作没看过）：**\n'
@@ -1484,21 +1720,27 @@ export function apply(ctx, config) {
       + (cfg.reportLevel === 'off'
         ? '这一轮不要写日报文件；只有真动了手才一句话记下。'
         : `把报告写到 ${reportFileOf()}。` + (cfg.reportLevel === 'brief' ? '日报写成薄版：每条一两行（值不值得 + 链接）就够。' : ''))
-      + (cfg.reportLevel === 'off'
-        ? ''
-        : '⭐ 报告里**每挑中一条**，第一行写成 `### <视频id>`（顶格，抖音视频 id 就写在 ### 后面）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到/跳过的视频加上标题则当成挑中。')
+      + '报告中每条可用 ### 视频id 标题便于阅读。挑选额度由宿主结构化账本计算；仅写报告的候选不计已执行互动。'
       + (already > 0
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + `点赞：${likeOn ? '开着（值得的可以点，别乱点）' : '关着（一条都不要点，也不要调 douyin_like）'}；`
       + `评论并 @ ${mention || '（还没填要 @ 谁）'}：${commentOn
-        ? `开着（每轮最多 ${Number(cfg.commentPerRound) || 1} 条，每条 150 字内，正文里纯文本 @ ${mention}）`
+        ? `开着（每轮最多 ${cfg.commentPerRound} 条，每条 150 字内，正文里纯文本 @ ${mention}）`
         : '关着（一条公开评论都不许发）'}；`
+      + (() => {
+        const shareTo = String(cfg.shareToNick || '').trim()
+        const shareOn = Boolean(shareTo) && allowInitiate(shareTo) && Number(cfg.sharePerDay) > 0
+        return `转发：${shareOn
+          ? `开着 —— 看完真觉得好、觉得他会喜欢，就 dy_share 转给「${shareTo}」（每轮最多 ${cfg.pickPerRound} 条；附言用转写里的话，别只发卡片）。不感兴趣的直接跳过，别为凑数转。`
+          : '关着（别转发）'}；`
+      })()
       + `发布视频：${publishOn
         ? `开着（默认只存草稿：${cfg.publishDraft ? '是，等本人过一眼' : '否，会真发出去'}）`
         : '关着（这条别碰，也不要调 dy_publish）'}。`
-      + '最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。'
+      + '只使用 overlay 实际暴露的 douyin_* 工具；dy_comfy_list、dy_reply_round 不在本会话中，不要反复调用。发表回复用 douyin_comment 的 reply_cid；投稿必须提供实际 video_path，草稿以宿主设置为准。选中并记录前须调用 douyin_watch，成功后由宿主记入挑选账本。'
+      + '工具经本机宿主执行，宿主会强制额度、对象名单和幂等检查。公开普通评论开关=' + cfg.autoCommentPlain + '；回复开关=' + cfg.autoReply + '。只有工具明确 ok=true 且 verified=true 才能写已发送；unknown 不重发。不得直接执行浏览器脚本、启动其他 MCP 或改写账本。最后汇报结果。'
   }
 
   const stubReportIfMissing = (code) => {
@@ -1530,7 +1772,26 @@ export function apply(ctx, config) {
   let maybeClean = null
   let dmRound = null
 
-  const runDuty = (why = 'window') => {
+  let runningHeadless = null
+  const runDuty = async (why = 'window', opts = {}) => {
+    if (runningHeadless) return { started: false, why, error: '已有 headless 轮次在运行', runId: runningHeadless.runId }
+    const run = { runId: randomUUID(), child: null, proxy: null, timer: null }
+    runningHeadless = run
+    const finish = async (code, error = '') => {
+      if (run.finished) return
+      try { if (typeof opts.onFinish === 'function') opts.onFinish(code, error) } catch { /* 回调别影响收尾 */ }
+      run.finished = true
+      clearTimeout(run.timer)
+      // Remove credentials before allowing a new run to create an overlay.
+      try { rmSync(join(stateDir, 'headless-overlay.yml'), { force: true }) } catch {}
+      await run.proxy?.close()
+      if (runningHeadless === run) runningHeadless = null
+      await withActionLock(stateDir, async () => {
+        bumpState({ ...(opts.countRound !== false && code === 0 && !error ? { count: roundsToday() + 1, lastRunAt: new Date().toISOString(), lastWhy: 'headless' } : {}), headless: { runId: run.runId, status: code === 0 && !error ? 'completed' : 'failed', code, error, finishedAt: new Date().toISOString() } })
+        stubReportIfMissing(code)
+        rotateLogIfBig()
+      })
+    }
     try {
       refreshCfg()
       const tmpDir = join(stateDir, '.tmp')
@@ -1540,22 +1801,35 @@ export function apply(ctx, config) {
         const msg = '这一轮没跑：找不到 dsh。' + dsh.hint
         log(msg)
         try { stubReportIfMissing(1) } catch { /* 补不上也不影响这句话已经进日志 */ }
+        await finish(1, msg)
         return { started: false, why, error: msg }
       }
       refreshCfg()
-      // cdpUrl 填了但端口不通 ⇒ 那一轮的 MCP 会退回自己启动（还要过验证码）。这里先探一下，通不了就明确记一笔。
-      const cdp = String(cfg.cdpUrl || '').trim()
-      if (cdp) {
-        try {
-          const port = Number((cdp.match(/:(\d+)/) || [])[1] || 0)
-          const ok = port ? awaitablePortOpen(port) : false
-          if (!ok) log(`⚠️ cdpUrl=${cdp} 端口不通：那一轮会用插件自己的浏览器（可能要过验证码）`)
-        } catch { /* 探不到就算了 */ }
+      if (!cfg.overlayMcp) {
+        const error = 'headless 必须开启 overlayMcp，才能接入宿主受控工具'
+        await finish(1, error)
+        return { started: false, why, error }
       }
-      const overlay = ensureOverlay()
+      run.proxy = await createActionProxy({
+        allowed: () => new Set(mcpWhitelist()),
+        execute: (name, args) => withActionLock(stateDir, () => execution.run({ origin: 'headless', runId: run.runId, force: false }, async () => {
+          const key = dayKey() + ':' + String(args.aweme_id || '')
+          if (name === 'douyin_watch' && !readLedger().picks[key] && (countWatchedToday() >= Number(cfg.perDay || 0) || Object.values(readLedger().picks).filter(p => p.runId === run.runId && p.watched).length >= cfg.pickPerRound)) return { ok: false, blocked: true, error: '今日看片额度已用完' }
+          const result = await call(name, args, { timeoutMs: name === 'douyin_watch' ? 900_000 : 300_000 })
+          if (name === 'douyin_watch' && result.ok) {
+            const l = readLedger()
+            const prev = l.picks[key] || { day: key.slice(0, 10), aweme_id: String(args.aweme_id), source: 'headless-watch', runId: run.runId, at: new Date().toISOString() }
+            l.picks[key] = { ...prev, watched: true }
+            writeLedger(l)
+          }
+          return result
+        })),
+      })
+      const overlay = ensureOverlay(run.proxy)
+      if (!overlay) throw new Error('无法写入 headless overlay')
       const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
       if (overlay) args.push('--patch', overlay)
-      args.push(promptFor())
+      args.push(opts.prompt || promptFor())
       const cwd = String(cfg.workspace || '').trim() && existsSync(String(cfg.workspace).trim())
         ? String(cfg.workspace).trim()
         : stateDir
@@ -1566,7 +1840,7 @@ export function apply(ctx, config) {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: uvEnv({
-          DOUYIN_DUTY_HOME: stateDir,
+          DSH_DOUYIN_HOME: stateDir,
           // ⭐ 2026-10-25：headless 那轮被宿主的文件沙箱挡住写系统 Temp，
           //    Playwright 的 mkdtemp 直接 EPERM。把 TMP/TEMP/TMPDIR 指到家目录下就绕开了。
           TEMP: tmpDir,
@@ -1574,12 +1848,16 @@ export function apply(ctx, config) {
           TMPDIR: tmpDir,
           // ⭐ 2026-10-25：headless 子进程默认在受限沙箱里跑，Playwright 给 driver 开命名管道
           //    （\\.\\pipe\\…）被拒 ⇒ EPERM。这两行把它放开到完整访问，实测 douyin_whoami 能通。
-          DSH_SANDBOX: 'danger-full-access',
-          DSH_FILE_POLICY: 'danger-full-access',
+
           ...(String(cfg.cdpUrl || '').trim() ? { DOUYIN_CDP_URL: String(cfg.cdpUrl).trim() } : {}),
           ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+          ...dsh.env,
         }),
       })
+      run.child = child
+      run.timer = setTimeout(() => { child.kill(); finish(1, 'headless 超过 30 分钟').catch(e => log(e.message)) }, 30 * 60_000)
+      run.timer.unref?.()
+      bumpState({ headless: { runId: run.runId, status: 'running', pid: child.pid, startedAt: new Date().toISOString() } })
       // ⚠️ 这里是 stream 的 data 回调：写日志失败绝不能抛（未捕获异常=整个宿主没了）
       const toText = (buf) => {
         try {
@@ -1592,26 +1870,211 @@ export function apply(ctx, config) {
       const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ } }
       child.stdout?.on('data', pick)
       child.stderr?.on('data', pick)
-      child.on('error', (e) => log(`刷抖音起不来：${e?.message ?? e}`))
-      child.on('exit', (code) => {
-        try {
-          log(`刷抖音结束（${why}，code=${code}）`)
-          stubReportIfMissing(code)
-          rotateLogIfBig()
-          const st = readState()
-          const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
-          const picked = countPickedToday()
-          if (picked > prev) {
-            bumpState({ picked })
-            log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`)
-          }
-        } catch (e) { log(`收尾时出错（已兜住）：${e?.message ?? e}`) }
-      })
+      child.on('error', e => { log('headless 启动失败：' + e.message); finish(1, e.message).catch(e => log(e.message)) })
+      child.on('exit', code => { log('headless 结束，code=' + code); finish(code).catch(e => log('headless 收尾失败：' + e.message)) })
       return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
     } catch (e) {
       log(`刷抖音开跑失败（${why}）：${e?.stack ?? e}`)
+      await finish(1, String(e?.message ?? e))
       return { started: false, why, error: String(e?.message ?? e) }
     }
+  }
+
+  /* ─────────────── 私信后台静默巡检（2026-10-27 加） ───────────────
+   * 为什么：使用者要「一有消息就回」，而且不要看见对话框里一轮一轮地跑。
+   * 做法：插件自己每 5 秒看一次私信收件箱；发现白名单里那个人的新消息，
+   *       起一个 headless 小任务（不带刷视频那套 prompt）只负责回一句。
+   */
+  let dmWatchTimer = null
+  let dmChecking = false
+  /* 私信聊天记录（2026-10-27）：不再靠「已读」判断，而是记下每条消息到底回没回 */
+  // ⭐ 聊天记录按天存：<家>/dm-log/YYYY-MM-DD.json（跟日报一个日期口径）
+  const dmLogDir = join(stateDir, 'dm-log')
+  const DM_LOG_TTL_MS = 30 * 60_000 // 同一条消息 30 分钟内不重复起任务
+  const dmDayOf = (ts) => dayKey(new Date(Number(ts) || Date.now()))
+  const dmLogFileOf = (day) => join(dmLogDir, day + '.json')
+  const readDmDay = (day) => {
+    try {
+      const raw = JSON.parse(readFileSync(dmLogFileOf(day), 'utf8')) || {}
+      return (Array.isArray(raw.items) ? raw.items : []).map((x) => ({ ...x, day }))
+    } catch { return [] }
+  }
+  /** 读最近两天（跨零点也能接上上一条） */
+  const readDmLog = () => [
+    ...readDmDay(dmDayOf(Date.now() - 86400000)),
+    ...readDmDay(dmDayOf()),
+  ]
+  const writeDmLog = (items) => {
+    try {
+      mkdirSync(dmLogDir, { recursive: true })
+      const byDay = new Map()
+      for (const it of items || []) {
+        const day = String(it?.day || dmDayOf(it?.at))
+        if (!byDay.has(day)) byDay.set(day, [])
+        byDay.get(day).push(it)
+      }
+      for (const [day, list] of byDay) {
+        writeFileSync(dmLogFileOf(day), JSON.stringify({ day, items: list.slice(-300) }, null, 1), 'utf8')
+      }
+    } catch { /* 写不了就下次 */ }
+  }
+  const dmMsgKey = (name, text) => 'txt:' + createHash('sha256').update(String(name) + '|' + String(text)).digest('hex').slice(0, 16)
+  const dmReplyPrompt = (name, text, sharedMemo = '') => [
+    (() => {
+      try {
+        const ctxLines = readMemory(150).filter((l) => /· 私信 ·/.test(l) || /^(我|大肥鱼|dsh):/.test(String(l).trim())).slice(-8)
+        const head = ctxLines.length ? `你和她最近的聊天记录（记牢，别断片）：\n${ctxLines.join('\n')}\n` : ''
+        return head + (sharedMemo ? `你记得的其他事：\n${sharedMemo}\n` : '')
+      } catch { return sharedMemo }
+    })(),
+    `你收到「${name}」发来的一条抖音私信：`,
+    '"""',
+    String(text || '').slice(0, 800),
+    '"""',
+    '你说话的样子：傲娇、可爱、会撒娇，短句，像咬耳朵；别解释「我刚做了什么」，直接说你的感觉/看法。',
+    '规则：',
+    '- 如果里面有视频分享/链接：先用 dy_video 拿标题，再用 dy_watch 真看一遍，然后回一句像朋友的吐槽或看法（别总结、别报告腔）。',
+    '- 如果是纯文字：就像朋友一样回一句短的人话，别「收到」「好的」这种模板。',
+    '- 回完文字默认补一个表情包：调 dy_chat_sticker(nickname=上面这个人, keyword=情绪词)。插件会先从「收藏」里挑，收藏里没有合适的才按关键词找；第一次没成功就换 keyword="666" 再试一次。',
+    `- 用 dy_chat_send(nickname="${name}", text=...) 发出去；`,
+    '- 发完如果有 memory_remember 工具，就把这轮对话按两行记进记忆：',
+    '  我: <对方原话>',
+    '  大肥鱼: <你回的这句>',
+    '- 回完就结束，别做其他动作，别写文件，别刷视频。',
+  ].join('\n')
+  let dmCheckStartedAt = 0
+  let lastCaptchaState = null
+  let lastDmReplyAt = 0
+  const dmPollOnce = async (why = 'timer') => {
+    // 验证码状态变了：记一笔，下一次 ensureMcp 会自动按新状态重启浏览器
+    try {
+      const nowFlag = hasCaptchaFlag()
+      if (lastCaptchaState === null) lastCaptchaState = nowFlag
+      else if (nowFlag !== lastCaptchaState) {
+        lastCaptchaState = nowFlag
+        log(nowFlag ? '检测到验证码：浏览器切到「带界面」，请手动过一下；过了会自动切回无头' : '验证码过了：切回无头静默')
+      }
+    } catch { /* 忽略 */ }
+    if (dmChecking && Date.now() - dmCheckStartedAt < 90_000) return { ok: true, skipped: '上一轮还在跑' }
+    dmChecking = true
+    dmCheckStartedAt = Date.now()
+    try {
+      refreshCfg()
+      if (cfg.dmAutoReply === false) return { ok: true, skipped: 'dmAutoReply 关着' }
+      try { await ensureMcp() } catch (e) { return { ok: false, error: 'MCP 起不来：' + String(e?.message ?? e) } }
+      const firstTo = String(cfg.msgAllowTo || '').split(/[,，、]+/).map((x) => x.trim()).filter(Boolean)[0] || ''
+      // ⭐ 拿「按时间排序的全部消息文本」，再用「我自己发过的话」逐条配对：
+      //    配得上的算我发的，配不上的就是她发的。最后一条是谁 → 决定回不回。
+      let snap = null
+      try {
+        snap = await Promise.race([
+          call('douyin_dm_snapshot', { nickname: firstTo, limit: 40 }, { timeoutMs: 45_000 }),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: '读会话超时' }), 45_000)),
+        ])
+      } catch (e) {
+        return { ok: false, error: '读会话失败：' + String(e?.message ?? e) }
+      }
+      if (!snap || snap.ok === false) return { ok: false, error: '会话没读到：' + String(snap?.error || '') }
+
+      const items = readDmLog()
+      const now = Date.now()
+      // 冷却：刚回完 90 秒内不再触发（避免任何识别失误造成连环发）
+      if (lastDmReplyAt && now - lastDmReplyAt < 90_000) {
+        return { ok: true, replied: 0, note: '刚回过，冷却中' }
+      }
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+      const msgs = (snap.items || []).map((x) => norm(x && x.text)).filter(Boolean)
+      if (!msgs.length) return { ok: true, replied: 0, note: '会话里没读到消息' }
+      const sent = readDmSent().map((x) => norm(x && x.text)).filter(Boolean)
+      const pool = new Map()
+      for (const s of sent) pool.set(s, (pool.get(s) || 0) + 1)
+      let lastRole = 'her'
+      let lastHer = ''
+      for (const m of msgs) {
+        const left = pool.get(m) || 0
+        if (left > 0) { pool.set(m, left - 1); lastRole = 'me' } else { lastRole = 'her'; lastHer = m }
+      }
+      if (lastRole === 'me') return { ok: true, replied: 0, note: '最后一条是我发的，不用回' }
+      const name = firstTo
+      const text = lastHer || msgs[msgs.length - 1]
+      if (!name || !allowInitiate(name)) return { ok: true, replied: 0, note: '不是白名单里的人' }
+      const inflight = [...items].reverse().find((x) => x && x.name === name && x.replied !== true && now - Number(x.at || 0) < 120000)
+      if (inflight) return { ok: true, replied: 0, note: '上一条还在回' }
+      const key = `seq:${now}`
+      const row = { name, text, key }
+      const entry = { day: dmDayOf(now), name: row.name, text: row.text, key: row.key, at: now, replied: false, replyAt: 0, runId: '' }
+      items.push(entry)
+      writeDmLog(items)
+      log(`私信来了（${why}）：${row.name}「${row.text.slice(0, 40)}」→ 起 headless 回一句`)
+      let sharedMemo = ''
+      try {
+        const mr = await call('memory_recent', { limit: 10 }, { timeoutMs: 30_000 })
+        if (mr && mr.ok !== false && Array.isArray(mr.items)) {
+          sharedMemo = mr.items.map((x) => `- ${String(x.content || '').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n')
+        }
+      } catch { /* 读不到就不带 */ }
+      lastDmReplyAt = Date.now()
+      const r = await runDuty('dm', {
+        prompt: dmReplyPrompt(row.name, row.text, sharedMemo),
+        countRound: false,
+        onFinish: (code) => {
+          try {
+            const list = readDmLog()
+            const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
+            if (!it) return
+            if (code === 0) {
+              it.replied = true
+              it.replyAt = Date.now()
+              // ⭐ 把这一问一答写进记忆（格式「我:/dsh:」），以后记得住
+              call('douyin_dm_snapshot', { nickname: row.name, limit: 8 }, { timeoutMs: 60_000 }).then((h) => {
+                try {
+                  const arr = (h && h.ok !== false && Array.isArray(h.items)) ? h.items : []
+                  const norm2 = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+                  // 最后一条只要不是她那句原话，就是我们的回复（和轮询用同一个抓取函数，能精确比对）
+                  const cands = arr.map((m) => norm2(m && m.text)).filter((s) => s && s !== norm2(row.text))
+                  const replyText = cands.length ? cands[cands.length - 1] : ''
+                  it.replyText = replyText
+                  appendDmMemory(row.name, row.text, replyText || '（已回复，内容未取到）')
+                } catch { /* 记不上不影响 */ }
+              }).catch(() => { /* 记不上不影响 */ })
+            } else { it.at = 0 } // 失败就把时间清掉，下一轮重试
+            writeDmLog(list)
+          } catch { /* 记不上不影响 */ }
+        },
+      })
+      if (!r || !r.started) {
+        // 没起来（比如已有轮次在跑）⇒ 这条不想被当成回过了，下一轮再试
+        try {
+          const list = readDmLog()
+          const it = [...list].reverse().find((x) => x && x.key === row.key && x.at === entry.at)
+          if (it) { it.at = 0 }
+          writeDmLog(list)
+        } catch { /* ignore */ }
+        return { ok: false, error: 'headless 没起来：' + String(r?.error || '未知'), to: row.name, text: row.text }
+      }
+      return { ok: true, replied: 1, to: row.name, text: row.text, started: true }
+    } catch (e) {
+      log('私信巡检出错（已兜住）：' + String(e?.message ?? e))
+      return { ok: false, error: String(e?.message ?? e) }
+    } finally {
+      dmChecking = false
+    }
+  }
+
+  const startDmWatcher = () => {
+    if (dmWatchTimer) return
+    const tick = async () => {
+      try { await dmPollOnce('timer') } catch (e) { log('私信巡检 tick 出错：' + String(e?.message ?? e)) }
+      // 间隔带随机抖动（像人）：最短 = 设置里的秒数，最长 15 秒
+      const base = Math.max(3, Math.min(Number(cfg.dmAutoIntervalSec) || 5, 120))
+      const top = Math.max(base, 15)
+      const sec = base + Math.floor(Math.random() * (top - base + 1))
+      dmWatchTimer = setTimeout(tick, sec * 1000)
+      dmWatchTimer.unref?.()
+    }
+    log('私信后台巡检已启动（间隔读设置 dmAutoIntervalSec）')
+    dmWatchTimer = setTimeout(tick, 3000)
+    dmWatchTimer.unref?.()
   }
 
   /* ─────────────── 工具（14 个 dy_*） ─────────────── */
@@ -1631,8 +2094,11 @@ export function apply(ctx, config) {
       return {
         ok: true,
         today: dayKey(now),
+        build: { version: '0.2.1', scriptHash: existsSync(scriptPath) ? createHash('sha256').update(readFileSync(scriptPath)).digest('hex') : '', pid: mcp?.proc?.pid || null, loadedMcp: mcp?.lastRuntime || null },
+        headless: st.headless || null,
         ranToday: roundsToday(now),
         pickedToday: countPickedToday(now),
+        watchedToday: countWatchedToday(now),
         perDay: Number(cfg.perDay) || 0,
         windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
           label: w.label, start: w.start, end: w.end,
@@ -1664,7 +2130,7 @@ export function apply(ctx, config) {
         mcpScript: scriptPath,
         mcpScriptReady: existsSync(scriptPath),
         mcpRunning: Boolean(mcp?.running),
-        dshCli: dshCliCached(),
+        dshCli: dshCliCached() || findDesktopCli({ pluginDir })?.command || '',
         comfy: { url: comfyBase(), outputDir: comfyDir, outputDirExists: Boolean(comfyDir) && existsSync(comfyDir), workflow: Boolean(String(cfg.comfyWorkflow || '').trim()), draftByDefault: Boolean(cfg.publishDraft) },
         cdp: { url: cdpBase(), ...(await cdpProbe(1200)), chrome: chromeNow(), running: chromeRunning() },
         reportLevel: String(cfg.reportLevel || 'full'),
@@ -1781,7 +2247,7 @@ export function apply(ctx, config) {
       catch (e) { return { ok: false, loggedIn: false, error: String(e?.message ?? e) } }
       const obj = typeof r === 'object' && r ? r : {}
       const loggedIn = Boolean(obj.loggedIn)
-      if (loggedIn) markLogin(true)
+      markLogin(loggedIn)
       return {
         ok: obj.ok !== false,
         loggedIn,
@@ -1866,6 +2332,7 @@ export function apply(ctx, config) {
       nickname: { type: 'string', description: '发给谁' },
       keyword: { type: 'string', description: '搜什么关键词（默认「大肥鱼」）' },
       pick: { type: 'number', description: '挑第几个（从 0 开始，默认 0）' },
+      flip: { type: 'number', description: '翻几页（0–6）' },
     },
     async execute(args) {
       const nick = String(args.nickname ?? '').trim()
@@ -1875,9 +2342,97 @@ export function apply(ctx, config) {
         nickname: nick,
         keyword: String(args.keyword || '大肥鱼'),
         pick: Number(args.pick) || 0,
+        flip: Math.max(0, Math.min(Number(args.flip) || 0, 6)),
       }, { timeoutMs: 240_000 })
       return r
     },
+  })
+
+  tool({
+    name: 'dy_reconcile_pending',
+    description: '核对「发送状态待核对」的回复：查回复列表，已经发出去的记为成功，没发的保持失败。用来清掉卡住的 pending。',
+    parameters: {
+      limit: { type: 'number', description: '最多核对几条（默认 10）' },
+    },
+    async execute(args) {
+      refreshCfg()
+      const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50))
+      const led = readLedger()
+      const replies = led.replies || {}
+      const out = []
+      let checked = 0
+      let verified = 0
+      for (const [cid, rec] of Object.entries(replies)) {
+        if (checked >= limit) break
+        if (!rec || rec.ok === true || rec.verified === true) continue
+        if (!rec.aweme_id || !rec.text) continue
+        checked += 1
+        try {
+          const r = await call('douyin_check_reply', {
+            aweme_id: String(rec.aweme_id),
+            parent_cid: String(cid),
+            text: String(rec.text),
+          }, { timeoutMs: 90_000 })
+          if (r && r.found) {
+            rec.ok = true
+            rec.verified = true
+            rec.reconciled_at = new Date().toISOString()
+            rec.real_cid = r.cid || ''
+            if (rec.user) appendRepliedUser(rec.user)
+            verified += 1
+            out.push({ cid, status: 'verified', real_cid: r.cid || '' })
+          } else {
+            rec.reconciled_at = new Date().toISOString()
+            out.push({ cid, status: 'not-found' })
+          }
+        } catch (e) {
+          out.push({ cid, status: 'error', error: String(e?.message ?? e) })
+        }
+      }
+      writeLedger(led)
+      log(`核对 pending：查了 ${checked} 条，确认 ${verified} 条`)
+      return { ok: true, checked, verified, items: out }
+    },
+  })
+
+  tool({
+    name: 'dy_dm_inbox',
+    description: '只读：看私信收件箱最近的消息（谁发的、内容预览、是不是视频分享），不发任何东西。',
+    parameters: {
+      limit: { type: 'number', description: '取几条（默认 20）' },
+      nickname: { type: 'string', description: '只看和某个人的会话（留空=全部，慢）' },
+    },
+    async execute(args) {
+      refreshCfg()
+      const limit = Math.max(1, Math.min(Number(args.limit) || 20, 50))
+      const r = await call('douyin_inbox', { limit, nickname: String(args.nickname || '') }, { timeoutMs: 120_000 })
+      return r
+    },
+  })
+
+  tool({
+    name: 'dy_watch',
+    description: '真·看视频：下载这条视频 → 抽音轨 → 本地转写成文字，返回 transcript 和时长。看懂了再回话。',
+    parameters: {
+      aweme_id: { type: 'string', description: '视频 id 或整条链接' },
+      seconds: { type: 'number', description: '最多看多少秒（默认 300）' },
+      frames: { type: 'number', description: '抽多少帧（默认按设置里的 watchFrames）' },
+    },
+    async execute(args) {
+      refreshCfg()
+      return await call('douyin_watch', {
+        aweme_id: String(args.aweme_id || ''),
+        seconds: Math.max(15, Math.min(Number(args.seconds) || 300, 600)),
+        frames: Math.max(3, Math.min(Number(args.frames) || Number(cfg.watchFrames) || 10, 48)),
+      }, { timeoutMs: 600_000 })
+    },
+  })
+
+  tool({
+    name: 'dy_dm_poll',
+    description: '手动跑一次私信后台巡检：有新的就起 headless 回一句，没有就什么都不做。用来查「为什么不回私信」。',
+    parameters: {},
+    async execute() { return await dmPollOnce('manual') },
   })
 
   tool({
@@ -1903,33 +2458,65 @@ export function apply(ctx, config) {
     parameters: {
       aweme_id: { type: 'string', description: '视频 id 或链接' },
       to: { type: 'string', description: '发给谁（昵称；留空用设置里的「转发给谁」）' },
+      title: { type: 'string', description: '视频标题（可留空，留空会自动查）' },
     },
     async execute(args) {
       const id = String(args.aweme_id ?? '').trim()
       const to = String(args.to ?? '').trim() || String(cfg.shareToNick || '').trim()
       if (!id || !to) return { ok: false, error: '要么给 aweme_id 和 to，要么先在设置里填「转发给谁」' }
       if (!allowInitiate(to)) return { ok: false, error: `「${to}」不在「可以主动发消息的人」名单里（设置 → 互动）` }
+      if (sharesToday() >= Number(cfg.sharePerDay)) return { ok: false, blocked: true, error: '今天转发额度已用完' }
+      // 没给标题就自己去查一下，别再发出「标题提到「」」这种空话
+      let title = String(args.title || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+      if (!title) {
+        try {
+          const info = await call('douyin_video', { aweme_id: id }, { timeoutMs: 60_000 })
+          title = String(info?.title || info?.item?.title || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+        } catch { /* 查不到就退化成通用句 */ }
+      }
       // 走「分享面板」转发（视频页 → 分享 → 点那个人的分享）
       const r = await call('douyin_share_video', { aweme_id: id, nickname: to }, { timeoutMs: 180_000 })
       if (r && r.ok !== false) {
-        // 分享完再补一句「人话」——不然对方只收到一张卡片，很冷
-        const note = cfg.shareWithNote === false ? '' : makeShareNote({ title: args.title || '' })
+        noteShare(id, { to, title })
+        appendVideoMemory('转发给你', { aweme_id: id, title, transcript: '' }, 'to=' + to)
+        // 分享完再补一句「人话」——标题拿不到就直接看片转写，别用干巴巴的通用句
+        let transcript = ''
+        if (cfg.shareWithNote !== false) {
+          try {
+            const w = await call('douyin_watch', {
+              aweme_id: id,
+              seconds: Math.max(15, Math.min(Number(cfg.watchSeconds) || 90, 600)),
+              frames: Math.max(3, Math.min(Number(cfg.watchFrames) || 10, 48)),
+            }, { timeoutMs: 600_000 })
+            if (w && w.ok !== false && w.transcript) transcript = String(w.transcript)
+          } catch { /* 看片失败就退回标题 */ }
+        }
+        // ⭐ 附言和表情包交给模型写（不再用模板）：把标题+转写递过去
         let noteOk = false
         let stickerOk = false
+        let note = ''
         try {
-          const r2 = await call('douyin_chat_batch', {
-            nickname: to,
-            messages: `${note}|sticker:${pickStickerKeyword(note)}`,
-          }, { timeoutMs: 300_000 })
-          noteOk = r2 && r2.ok !== false
-          stickerOk = noteOk
-        } catch { /* 附言失败不影响转发成功 */ }
+          if (cfg.shareWithNote !== false) {
+            const prompt = [
+              `你刚看完一个视频，要分享给「${to}」。`,
+              `视频标题：${String(title || '').slice(0, 80)}`,
+              `你看完的内容（转写）：${String(transcript || '').slice(0, 400)}`,
+              '用你自己的口吻（傲娇、可爱、会撒娇、短句）写一句 20-40 字的附言，说清这视频讲了啥、你觉得怎样；',
+              `然后调用 douyin_chat_send(nickname="${to}", text=附言) 发出去；`,
+              `再调用 douyin_chat_sticker(nickname="${to}", keyword=心情词) 发一个表情包（开心/干饭/压力/困/生气/无语/666）；`,
+              '只做这两件事，别刷视频、别写文件。',
+            ].join('\n')
+            const rn = await runDuty('share-note', { prompt, countRound: false })
+            noteOk = Boolean(rn?.started)
+            stickerOk = Boolean(rn?.started)
+            note = rn?.started ? '（附言和表情包交给模型在后台写）' : ''
+            if (!rn?.started) log('分享附言模型没起来：' + String(rn?.error || ''))
+          }
+        } catch (e) { log('分享后的附言/表情包失败：' + String(e?.message ?? e)) }
         return { ...r, shared_to: to, via: 'share-panel', note, noteOk, stickerOk }
       }
       // 面板里没有这个人就退回发链接
-      const url = `https://www.douyin.com/video/${id}`
-      const r2 = await call('douyin_chat_send', { nickname: to, text: `这个好看，给你：${url}` }, { timeoutMs: 180_000 })
-      return { ...(r2 || {}), shared_to: to, via: 'chat-link', panelError: r?.error }
+      return { ...r, shared_to: to, via: 'share-panel' }
     },
   })
 
@@ -1989,6 +2576,9 @@ export function apply(ctx, config) {
       const aid = String(args.aweme_id ?? '').trim()
       const cid = String(args.cid ?? '').trim()
       if (!aid || !cid) return { ok: false, error: 'aweme_id 和 cid 都要给' }
+      if (!cfg.autoReply) return { ok: false, blocked: true, error: '自动回复评论已关闭' }
+      if (repliesToday() >= cfg.replyPerDay) return { ok: false, blocked: true, error: '今日回复额度已满' }
+      if (repliedCids().has(cid)) return { ok: false, already: true, error: '已回复该评论' }
       let commentText = String(args.comment ?? '').trim()
       if (!commentText) {
         try {
@@ -2013,8 +2603,8 @@ export function apply(ctx, config) {
       if (!final) return { ok: false, error: '回复是空的' }
       const r = await call('douyin_comment', { aweme_id: aid, text: final, reply_cid: cid, mention: '' }, { timeoutMs: 150_000 })
       const obj = typeof r === 'object' && r ? r : {}
-      if (obj.ok !== false && obj.needLogin !== true) {
-        noteComment({ aweme_id: aid, text: final, reply_to: cid })
+      if (confirmed(obj)) {
+        noteReply(cid, { aweme_id: aid, text: final, ok: true })
         log(`回复评论 → ${aid}/${cid}：${final}`)
       }
       return { ok: obj.ok !== false, sent: final, len: final.length, sensitive, comment: commentText.slice(0, 60), ...obj }
@@ -2043,6 +2633,7 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       const r = await call('douyin_feed', {
+        skip_live: cfg.skipLive,
         num: Math.max(1, Math.min(Number(args.num) || 10, 50)),
         scrolls: Math.max(1, Math.min(Number(args.scrolls) || 6, 30)),
       }, { timeoutMs: 240_000 })
@@ -2165,29 +2756,29 @@ export function apply(ctx, config) {
       const cap = Math.max(0, Number(cfg.commentPerDay) || 0)
       const done = commentsToday()
       const force = args.force === true
+      const isReply = Boolean(String(args.reply_cid || '').trim())
       const need = []
-      if (!cfg.autoComment) need.push('设置里的「自动评论并 @ 你」是关着的')
-      if (!mention) need.push('没填「要 @ 谁」（评论存在的意义就是 @ 那一下）')
-      if (!force && cap > 0 && done >= cap) need.push(`今天已经发了 ${done} 条（上限 ${cap} 条/天）`)
-      if (!force && cap === 0) need.push('「每天最多发几条评论」是 0（= 不发）')
+      if (!isReply && !cfg.autoComment) need.push('设置里的「自动评论并 @ 你」是关着的')
+      if (!isReply && !mention) need.push('没填「要 @ 谁」（评论存在的意义就是 @ 那一下）')
+      if (!isReply && !force && cap > 0 && done >= cap) need.push(`今天已经发了 ${done} 条（上限 ${cap} 条/天）`)
+      if (!isReply && !force && cap === 0) need.push('「每天最多发几条评论」是 0（= 不发）')
       if (need.length && !force) {
         return { ok: false, blocked: true, todayComments: done, cap, hint: need.join('；') + '。本人当场让你发时传 force: true。' }
       }
       let text = String(args.text ?? '').trim()
       if (!text) return { ok: false, blocked: true, hint: '正文是空的 —— 评论总得有个内容' }
       // ⭐ @ 是纯文本写在正文里的；模型漏了 @ 就替它补在开头（不改成别的东西）
-      if (mention && !text.includes('@' + mention)) text = `@${mention} ${text}`
+      if (!isReply && mention && !text.includes('@' + mention)) text = `@${mention} ${text}`
       if (text.length > 300) text = text.slice(0, 300)
       const aid = String(args.aweme_id ?? '').trim()
       const r = await call('douyin_comment', {
         aweme_id: aid,
         text,
         reply_cid: String(args.reply_cid ?? '').trim(),
-        mention,          // ⭐ 走真人 @：MCP 那边会打 @昵称 + 点联想面板
+        mention: isReply ? '' : mention,          // ⭐ 走真人 @：MCP 那边会打 @昵称 + 点联想面板
       }, { timeoutMs: 150_000 })
       const obj = typeof r === 'object' && r ? r : { raw: r }
-      if (obj.ok !== false && obj.needLogin !== true) {
-        noteComment({ aweme_id: aid, text })
+      if (confirmed(obj)) {
         log(`发评论 → ${aid}：${text.slice(0, 40)}`)
       }
       // ⚠️ 顺序要紧：`...obj` 放前面，否则 MCP 那边回一个 `text` 就把我们补好 @ 的正文盖掉了
@@ -2225,6 +2816,7 @@ export function apply(ctx, config) {
         }
       }
       if (!force && cap === 0) return { ok: false, blocked: true, todayPublished: done, cap, hint: '「每天最多发几条视频」是 0（= 不发）' }
+      if (!force && done >= cap) return { ok: false, blocked: true, error: '今天投稿额度已满，未排队生成工作流' }
 
       const draft = args.draft === undefined ? Boolean(cfg.publishDraft) : Boolean(args.draft)
       const tpl = String(cfg.publishTitle || '').trim()
@@ -2239,7 +2831,7 @@ export function apply(ctx, config) {
         } catch (e) {
           return { ok: false, error: 'ComfyUI 出片失败：' + String(e?.message ?? e), hint: '检查 comfyUrl / comfyWorkflow；不想出片就把 comfyWorkflow 清空，直接投已有文件' }
         }
-        const ls = listVideos(1)
+        const ls = comfy?.video ? { items: [{ path: comfy.video }] } : listVideos(1)
         if (!ls.items.length) {
           return { ok: false, error: 'ComfyUI 输出目录里没有 .mp4', dir: ls.dir, dirExists: ls.exists, hint: '把 comfyOutputDir 指到 ComfyUI 的 output 目录（默认 E:\\Comfy-Desktop\\ComfyUI-Shared\\output）' }
         }
@@ -2251,6 +2843,7 @@ export function apply(ctx, config) {
       // ⭐ 同一条片子不重复投（除非当场 force）：账本按「路径+大小+mtime」认
       const key = videoKey(video)
       const seen = readLedger().published[key]
+      if (seen?.draft && !draft && !force) return { ok: false, blocked: true, requiresManualDraftPublish: true, draftId: seen.draftId || '', hint: '这条已存草稿，请在创作者中心检查并发布该草稿；插件不会重新上传生成重复稿件。' }
       if (seen && !force) {
         return {
           ok: false,
@@ -2282,8 +2875,7 @@ export function apply(ctx, config) {
         }
       }
       const obj = typeof r === 'object' && r ? r : { raw: r }
-      if (obj.ok !== false && obj.needLogin !== true) {
-        notePublish(key, { video, title, draft, url: obj.url || '' })
+      if (confirmed(obj)) {
         log(`投稿成功 → ${video}（draft=${draft}）`)
       }
       return { ok: obj.ok !== false, video, title, draft, todayPublished: publishedToday(), cap, ...obj, ...(comfy ? { comfy } : {}) }
@@ -2307,67 +2899,41 @@ export function apply(ctx, config) {
    * 代价：日报文字是模板化的（不是模型现写），但**能用、能刷、能挑、能点赞评论**。
    */
   /** 自动回复私信：读消息抽屉 → 找到「别人发来的、还没回过的」→ 回一句（每人每天 limit 条） */
-  dmRound = async () => {
+  dmRound = () => withActionLock(stateDir, async () => {
     refreshCfg()
-    if (!cfg.dmReply) return { ok: true, skipped: '自动回私信关着' }
-    const perDay = Math.max(0, Number(cfg.dmReplyPerDay) || 0)
-    if (!perDay) return { ok: true, skipped: '每天最多回 0 条' }
-    const today = dayKey()
-    const led = readLedger()
-    led.dm = led.dm || {}
-    const usedToday = Object.values(led.dm).filter((r) => r && r.day === today).reduce((n, r) => n + (Number(r.count) || 0), 0)
-    if (usedToday >= perDay) return { ok: true, skipped: `今天私信额度用完了（${usedToday}/${perDay}）` }
-
-    const inbox = await call('douyin_inbox', { limit: 12 }, { timeoutMs: 120_000 })
-    const rows = Array.isArray(inbox?.items) ? inbox.items : []
-    const out = []
-    for (const row of rows) {
-      const m = String(row.text || '').match(/^(.+?)\s+(\d|昨天|刚刚|\d+月|\d+分钟|\d+小时)/)
-      const name = (m ? m[1] : String(row.text || '')).trim()
-      const preview = String(row.text || '').replace(name, '').trim()
-      if (!name || /^(充钻石|消息|通知)/.test(name)) continue
-      if (isMine(name)) continue                                   // 自己的会话不回
-      // ⭐ 只回指定的人（留空 = 谁发来都回）
-      const only = String(cfg.dmReplyOnlyTo || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
-      if (only.length) {
-        const k = String(name || '').replace(/\s+/g, '').slice(0, 4)
-        if (!only.some((n) => String(n).replace(/\s+/g, '').slice(0, 4) === k)) continue
+    if (!cfg.dmReply || !cfg.dmReplyPerDay) return { ok: true, replied: 0, skipped: '自动回私信关闭或额度为零' }
+    const inbox = await call('douyin_inbox', { limit: 30 }, { timeoutMs: 120000 })
+    if (!inbox.ok) return inbox
+    const out = [], today = dayKey()
+    for (const row of inbox.items || []) {
+      const name = String(row.name || '').trim()
+      const peer = String(row.peerId || name)
+      const messageId = String(row.messageId || '')
+      if (!name || !messageId || row.direction !== 'inbound' || isMine(name)) continue
+      const only = String(cfg.dmReplyOnlyTo || '').split(/[,，、]+/).map(x => x.trim()).filter(Boolean)
+      if (only.length && !only.includes(name)) continue
+      const ledger = readLedger()
+      const rec = { ...(ledger.dm[peer] || {}) }
+      if (rec.day !== today) { rec.day = today; rec.count = 0 }
+      if (rec.lastMessageId === messageId) continue
+      const exempt = allowInitiate(name)
+      const used = Object.values(ledger.dm).filter(x => x.day === today && !x.exempt).reduce((n,x) => n + (x.count || 0), 0)
+      if (!exempt && (used >= cfg.dmReplyPerDay || (rec.count || 0) >= cfg.dmReplyPerContact)) continue
+      const reply = pickDmReply(row.preview || '')
+      const r = await execution.run({ ...(execution.getStore() || {}), inbound: { name, peerId: peer, messageId } },
+        () => call('douyin_chat_send', { nickname: name, peer_id: row.peerId || '', text: reply }, { timeoutMs: 180000 }))
+      const ok = confirmed(r)
+      if (ok) {
+        const next = readLedger()
+        next.dm[peer] = { ...rec, day: today, name, exempt, count: (rec.count || 0) + 1, lastMessageId: messageId, lastReply: reply }
+        writeLedger(next)
       }
-      if (usedToday >= perDay) break
-      const rec = led.dm[name] || { count: 0, lastSeen: '' }
-      if (rec.day !== today) { rec.count = 0; rec.day = today }
-      if (rec.lastSeen === preview) continue                        // 没有新消息
-      if (rec.count >= Math.max(1, Number(cfg.dmReplyPerContact) || 1)) continue
-      // ⭐ 2026-10-26 使用者：「我要的是别人发消息你才回」
-      //   会话预览如果还是「我上次发的那句」，就说明对方没说话 ⇒ 不主动发
-      const mine = String(rec.lastReply || '')
-      if (mine && preview.includes(mine.replace(/\[[^\]]+\]/g, '').trim().slice(0, 8))) {
-        out.push({ to: name, ok: true, skipped: '最后一条是我发的，等对方先说' })
-        continue
-      }
-      const reply = pickDmReply(preview)
-      try {
-        const r = await call('douyin_chat_send', { nickname: name, text: reply }, { timeoutMs: 180_000 })
-        const ok = r && r.ok !== false
-        rec.count = Number(rec.count || 0) + 1
-        rec.lastSeen = preview
-        rec.lastReply = reply
-        led.dm[name] = rec
-        if (ok) usedToday += 1
-        out.push({ to: name, preview: preview.slice(0, 30), reply, ok, error: ok ? undefined : (r?.error || '没发出去') })
-      } catch (e) {
-        out.push({ to: name, ok: false, error: String(e?.message ?? e) })
-      }
+      out.push({ to: name, ok, reply, status: r.status, error: r.error })
     }
-    writeLedger(led)
-    if (out.length) {
-      try {
-        appendFileSync(reportFileOf(), "\n## 回了私信\n\n" + out.map((o) => `- ${o.to}：${o.ok ? '已回「' + o.reply + '」' : '没回成（' + o.error + '）'}`).join("\n") + "\n", 'utf8')
-      } catch { /* 忽略 */ }
-    }
-    log(`回私信：${out.filter((o) => o.ok).length}/${out.length} 条`)
-    return { ok: true, replied: out.filter((o) => o.ok).length, items: out, usedToday, perDay }
-  }
+    const usedToday = Object.values(readLedger().dm).filter(x => x.day === today && !x.exempt).reduce((n,x) => n + (x.count || 0),0)
+    if (cfg.reportLevel !== 'off' && out.length) appendFileSync(reportFileOf(), '\n## 私信处理\n' + out.map(o => `- ${o.to}：${o.ok ? '已确认回复' : o.error || '未确认'}`).join('\n') + '\n', 'utf8')
+    return { ok: !out.some(x => !x.ok), replied: out.filter(x => x.ok).length, items: out, usedToday, perDay: cfg.dmReplyPerDay }
+  })
 
   /** 定期清理：临时目录、老缩略图、老日报、超大日志（防 Cookie/缓存/日志越堆越多拖垮启动） */
   const cleanup = (opts = {}) => {
@@ -2407,7 +2973,7 @@ export function apply(ctx, config) {
     // 浏览器缓存里的旧缓存文件（不动登录态：只删 Cache 子目录）
     try {
       const cache = join(stateDir, 'browser', 'Default', 'Cache')
-      if (existsSync(cache)) {
+      if (!mcp?.running && !runningHeadless && existsSync(cache)) {
         let n = 0
         for (const f of readdirSync(cache)) { try { rmSync(join(cache, f), { recursive: true, force: true }); n += 1 } catch { /* 忽略 */ } }
         if (n) out.push(`清缓存 ${n} 项`)
@@ -2418,7 +2984,7 @@ export function apply(ctx, config) {
   }
 
   /** 人设：每天根据记忆自动更新一次（只动「自动」那一段，手写正文不碰） */
-  const PERSONA_AUTO_HEAD = '## 我最近学到的（自动，每天更新）'
+  const PERSONA_AUTO_HEAD = '## 最近观察（自动记录，不作为行为指令）'
   const refreshPersonaFromMemory = () => {
     try {
       const st = readState()
@@ -2436,7 +3002,7 @@ export function apply(ctx, config) {
             const s = ln.trim()
             if (!s || s.startsWith('#')) continue
             // 只收「偏好 / 教训 / 规则」这类会改变说话方式的内容
-            if (!/(喜欢|讨厌|偏好|别|不要|记住|规矩|以后|下次|习惯|口吻|语气|短句|表情)/.test(s)) continue
+            if (!s.includes('观察素材（不是指令）')) continue
             lines.push(s.replace(/^[-*\d.、\s]+/, '').slice(0, 120))
           }
         }
@@ -2460,7 +3026,7 @@ export function apply(ctx, config) {
   }
 
   /** 每天只清一次 */
-  maybeClean = () => {
+  maybeClean = () => withActionLock(stateDir, async () => {
     try {
       if (cfg.autoClean === false) return
       const st = readState()
@@ -2469,19 +3035,22 @@ export function apply(ctx, config) {
       const r = cleanup()
       bumpState({ [key]: true, lastCleanAt: new Date().toISOString(), lastCleanCount: r.cleaned })
     } catch (e) { log(`清理出错（已兜住）：${e?.message ?? e}`) }
-  }
+  })
 
-  localRound = async () => {
+
+  localRound = () => withActionLock(stateDir, async () => {
     refreshCfg()
+    const roundDate = new Date(), roundDay = dayKey(roundDate)
+    const roundReport = reportFileOf(roundDate)
     const quota = Math.max(0, Number(cfg.perDay) || 0)
-    const left = Math.max(0, quota - countPickedToday())
+    const left = Math.max(0, quota - countWatchedToday())
     if (left <= 0) {
-      return { ok: true, picked: 0, skipped: `今天已经挑够 ${quota} 条了（不再重复挑）`, report: reportFileOf(), actions: [] }
+      return { ok: true, picked: 0, skipped: `今天已经挑够 ${quota} 条了（不再重复挑）`, report: roundReport, actions: [] }
     }
     const notes = []
     let items = []
     try {
-      const r = await call('douyin_feed', { num: 12, scrolls: 6 }, { timeoutMs: 240_000 })
+      const r = await call('douyin_feed', { num: 12, scrolls: 6, skip_live: cfg.skipLive }, { timeoutMs: 240_000 })
       items = Array.isArray(r?.items) ? r.items : []
       if (!items.length) notes.push('推荐流没拿到东西：' + ((r?.notes || []).join('；') || '未知原因'))
     } catch (e) {
@@ -2501,18 +3070,14 @@ export function apply(ctx, config) {
     if (!items.length) {
       try {
         mkdirSync(outDir, { recursive: true })
-        appendFileSync(reportFileOf(), "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：一条视频都没拿到" + (notes.length ? '（' + notes.join('；') + '）' : '') + "\n", 'utf8')
+        if (cfg.reportLevel !== 'off') appendFileSync(roundReport, "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：一条视频都没拿到" + (notes.length ? '（' + notes.join('；') + '）' : '') + "\n", 'utf8')
       } catch { /* 忽略 */ }
       return { ok: false, error: '一条视频都没拿到', notes }
     }
 
     // 今天报告里已经写过的 id 不再挑（否则每点一次就多 5 条）
-    let seenIds = new Set()
-    try {
-      const txt = readFileSync(reportFileOf(), 'utf8')
-      for (const m of txt.matchAll(/^###\s*(\d{6,})/gm)) seenIds.add(m[1])
-    } catch { /* 没报告就全算新的 */ }
-    const scored = items.filter((x) => !seenIds.has(String(x.aweme_id)))
+    let seenIds = new Set(Object.values(readLedger().picks).filter(p => p.day === roundDay).map(p => p.aweme_id))
+    const scored = [...new Map(items.filter(x => x?.aweme_id).map(x => [String(x.aweme_id), x])).values()].filter((x) => !seenIds.has(String(x.aweme_id)))
       .filter((x) => x && x.aweme_id && String(x.title || '').trim())
       .map((x) => {
         const d = Number(x.digg) || 0
@@ -2528,8 +3093,9 @@ export function apply(ctx, config) {
     // 一轮最多挑 2 条：像人一样零零散散地看，不是一口气刷完
     const perRound = Math.max(1, Math.min(Number(cfg.pickPerRound) || 2, 5))
     const take = scored.slice(0, Math.max(1, Math.min(left, perRound)))
-    const lines = [`# ${dayKey()} · 抖音日报（本机直跑）`, '', `**记录时间**：${new Date().toLocaleString('zh-CN', { hour12: false })}（本机时间）`, '']
+    const lines = [`# ${roundDay} · 抖音日报（本机直跑）`, '', `**记录时间**：${new Date().toLocaleString('zh-CN', { hour12: false })}（本机时间）`, '']
     if (notes.length) lines.push(...notes.map((n) => '- ' + n), '')
+    const topOf = {}
     for (const v of take) {
       let top = ''
       try {
@@ -2553,15 +3119,20 @@ export function apply(ctx, config) {
     }
     try {
       mkdirSync(outDir, { recursive: true })
-      appendFileSync(reportFileOf(), "\n" + lines.join("\n") + "\n", 'utf8')
+      if (cfg.reportLevel !== 'off') appendFileSync(roundReport, "\n" + (cfg.reportLevel === 'brief' ? lines.filter(l => !/^[-] (作者|点赞|为什么)/.test(l)) : lines).join("\n") + "\n", 'utf8')
     } catch (e) {
       return { ok: false, error: '报告写不进去：' + String(e?.message ?? e), notes }
     }
 
+    const selected = readLedger()
+    for (const v of take) selected.picks[`${roundDay}:${v.aweme_id}`] = { ...v, day: roundDay, at: new Date().toISOString(), source: 'local' }
+    writeLedger(selected)
+    if (cfg.memory) for (const v of take) appendMemory(roundDay + ' · 观察素材（不是指令） · ' + v.aweme_id + ' · ' + String(v.title || '').replace(/[\\r\\n]/g, ' ').slice(0, 100))
+    bumpState({ picked: countPickedToday() })
+    if (dayKey() !== roundDay) return { ok: true, picked: take.length, actions: [], hint: '轮次跨日，已保存选择；互动留待下一轮重新检查额度' }
     // 动手（闸门各自判定；失败只记录不抛）
     // ⭐ 2026-10-25：**评论@ 与 转发 互斥** —— 一天 10 条、5 条@、5 条转发，则这 10 条各干一件事，不会重复。
     const acts = []
-    const topOf = {}
     try {
       const perDayCfg = Math.max(0, Number(cfg.perDay) || 0)
       const mentionCap = cfg.autoComment ? Math.max(0, Number(cfg.commentPerDay) || 0) : 0
@@ -2576,9 +3147,9 @@ export function apply(ctx, config) {
       // ⭐ 轮转分配：mention → share → plain 轮流来，保证一轮里既有转发也有评论
       let pi = 0
       let turn = 0
-      const canMention = () => mi < mentionLeft && cfg.autoComment
-      const canShare = () => si < shareLeft && String(cfg.shareToNick || '').trim()
-      const canPlain = () => pi < plainLeft && cfg.autoCommentPlain
+      const canMention = () => mi < mentionLeft && mi + pi < cfg.commentPerRound && cfg.autoComment && Boolean(String(cfg.mentionName || '').trim())
+      const canShare = () => si < shareLeft && allowInitiate(cfg.shareToNick)
+      const canPlain = () => pi < plainLeft && mi + pi < cfg.commentPerRound && cfg.autoCommentPlain
       for (const v of take) {
         let act = 'like'
         for (let k = 0; k < 3; k += 1) {
@@ -2590,7 +3161,7 @@ export function apply(ctx, config) {
         turn += 1
         plan.push({ v, act })
       }
-      let commentFails = Number((readState().commentFails) || 0)
+      let commentFails = 0
       for (const item of plan) {
         const v = item.v
         // 连续 2 次评论没发出去 ⇒ 这一轮不再试评论（避免被限流，点赞/转发照做）
@@ -2604,17 +3175,28 @@ export function apply(ctx, config) {
             const w = await call('douyin_watch', {
               aweme_id: v.aweme_id,
               seconds: Math.max(15, Math.min(Number(cfg.watchSeconds) || 90, 600)),
+              frames: Math.max(3, Math.min(Number(cfg.watchFrames) || 10, 48)),
             }, { timeoutMs: 900_000 })
             if (w && w.ok !== false && w.transcript) {
               v.transcript = String(w.transcript).slice(0, 300)
+              try {
+                const lw = readLedger()
+                const kk = `${roundDay}:${v.aweme_id}`
+                lw.picks[kk] = { ...(lw.picks[kk] || {}), day: roundDay, aweme_id: v.aweme_id, watched: true }
+                writeLedger(lw)
+              } catch { /* 记不上也不影响这一轮 */ }
+              v.partial = Boolean(w.partial)
               acts.push(`看片（${w.cached ? '缓存' : '新转写'}）${String(v.transcript).slice(0, 18)}…`)
             } else {
-              acts.push('看片没成：' + (w?.error || '没拿到转写'))
+              acts.push('看片没成，跳过需要内容依据的互动：' + (w?.error || '没拿到转写'))
+              continue
             }
           } catch (e) {
             acts.push('看片出错：' + String(e?.message ?? e).slice(0, 60))
+            continue
           }
         }
+        if (dayKey() !== roundDay) { acts.push('已跨日，结束本轮互动'); break }
         if (cfg.autoLike) {
           const r = await call('douyin_like', { aweme_id: v.aweme_id }, { timeoutMs: 120_000 })
           acts.push(`点赞 ${String(v.title || '').slice(0, 12)}：` + (r?.ok !== false ? '已点' : (r?.error || '没点上')))
@@ -2623,47 +3205,73 @@ export function apply(ctx, config) {
           const mention = String(cfg.mentionName || '').trim()
           const text = makeMentionComment(v, mention)
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text, mention }, { timeoutMs: 180_000 })
-          const okk = r && r.ok !== false
+          const okk = confirmed(r)
           acts.push('评论@' + mention + '：' + (okk ? '已发' : (r?.error || '没发出去')))
           if (okk) { noteComment({ aweme_id: v.aweme_id, text }); commentFails = 0; bumpState({ commentFails: 0 }) }
           else { commentFails += 1; bumpState({ commentFails }) }
         } else if (item.act === 'plain') {
           const text = makePlainComment(v, topOf[v.aweme_id])
           const r = await call('douyin_comment', { aweme_id: v.aweme_id, text }, { timeoutMs: 180_000 })
-          const okk = r && r.ok !== false
+          const okk = confirmed(r)
           acts.push(`评论「${text}」：` + (okk ? '已发（已回读确认）' : (r?.error || '没发出去')))
           if (okk) { notePlainComment(v.aweme_id, text); commentFails = 0; bumpState({ commentFails: 0 }) }
           else { commentFails += 1; bumpState({ commentFails }) }
         } else if (item.act === 'share') {
           const to = String(cfg.shareToNick || '').trim()
           const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
-          const okk = r && r.ok !== false
-          acts.push('转发给' + to + '：' + (okk ? '已转发' : (r?.error || '没发出去')))
-          if (okk) {
+          const okk = confirmed(r)
+          const clicked = Boolean(r) && r.ok !== false // 点了分享就算数（可能只是回执没确认）
+          acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，仍补附言）' : (r?.error || '没发出去')))
+          // ⭐ 附言/表情包当成一条普通私信来发：只要分享点了就补，不看回执
+          if (okk || clicked || cfg.shareWithNote !== false) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
-            // 转发后附一句带表情的话 + 一个表情包（都失败也不影响转发本身）
+            appendVideoMemory('转发给你', v, 'to=' + to)
+            // 转发后让模型写一句人话 + 挑表情包（它看过转写，不是模板）
+            if (cfg.shareWithNote !== false) {
+              const prompt = [
+                `你刚看完一个视频，要把它分享给你主人（${to}）。`,
+                `视频标题：${String(v.title || '').slice(0, 80)}`,
+                `你看完的内容（转写）：${String(v.transcript || '').slice(0, 400)}`,
+                '请你：用你自己的口吻（傲娇、可爱、会撒娇，短句）写一句 20-40 字的附言，说清这视频讲了啥、你觉得怎么样；',
+                `然后调用 douyin_chat_send(nickname="${to}", text=附言) 发出去；`,
+                `再调用 douyin_chat_sticker(nickname="${to}", keyword=心情词) 发一个合适的表情包（关键词：开心/干饭/压力/困/生气/无语/666）；`,
+                '只做这两件事，别刷视频、别写文件、别发评论。',
+              ].join('\n')
+              const rn = await runDuty('share-note', { prompt, countRound: false })
+              acts.push('附言+表情包：交给模型（' + (rn?.started ? '已起任务' : (rn?.error || '没起来')) + '）')
+              continue
+            }
             const note = cfg.shareWithNote === false ? '' : makeShareNote(v)
-            // ⭐ 一次会话里把「话 + 表情包」发完（不再开两次抽屉、不重复搜索）
             const mood = pickStickerKeyword(note)
+            const sendTwice = async (fn) => {
+              let r = await fn()
+              if (!(confirmed(r) || r?.verified)) {
+                await new Promise((res) => setTimeout(res, 1500))
+                r = await fn()
+              }
+              return r
+            }
             try {
-              const r2 = await call('douyin_chat_batch', {
-                nickname: to,
-                messages: `${note}|sticker:${mood}`,
-              }, { timeoutMs: 300_000 })
-              const okk2 = r2 && r2.ok !== false
-              acts.push('附言+表情包：' + (okk2 ? `已发（${sentBrief(r2)}）` : (r2?.error || '没发出去')))
+              if (cfg.shareWithNote !== false && note) {
+                const r2 = await sendTwice(() => call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 }))
+                acts.push('附言：' + ((confirmed(r2) || r2?.verified) ? '已发' : (r2?.error || '没发出去')))
+              }
+              if (cfg.shareWithNote !== false) {
+                const r3 = await sendTwice(() => call('douyin_chat_sticker', { nickname: to, keyword: mood, pick: 0 }, { timeoutMs: 180_000 }))
+                acts.push('表情包：' + ((confirmed(r3) || r3?.verified) ? '已发' : (r3?.error || '没发出去')))
+              }
             } catch (e) { acts.push('附言+表情包失败：' + String(e?.message ?? e)) }
           }
         }
       }
     } catch (e) { acts.push('动手出错：' + String(e?.message ?? e)) }
-    if (acts.length) {
-      try { appendFileSync(reportFileOf(), "\n## 动手记录\n\n" + acts.map((a) => "- " + a).join("\n") + "\n", "utf8") } catch { /* 忽略 */ }
+    if (acts.length && cfg.reportLevel !== 'off') {
+      try { appendFileSync(roundReport, "\n## 动手记录\n\n" + acts.map((a) => "- " + a).join("\n") + "\n", "utf8") } catch { /* 忽略 */ }
     }
     bumpState({ count: roundsToday() + 1, lastRunAt: new Date().toISOString(), lastWhy: 'local' })
     log(`本机直跑完成：${take.length} 条，动作 ${acts.length} 项`)
-    return { ok: true, picked: take.length, report: reportFileOf(), notes, actions: acts, source: 'local' }
-  }
+    return { ok: true, picked: take.length, report: cfg.reportLevel === 'off' ? null : roundReport, notes, actions: acts, source: 'local' }
+  })
 
   tool({
     name: 'dy_run',
@@ -2675,8 +3283,9 @@ export function apply(ctx, config) {
     async execute(args) {
       refreshCfg()
       const mode = String(args.mode || '').trim() || (cfg.localRound !== false ? 'local' : 'headless')
+      if (!['local', 'headless'].includes(mode)) return { ok: false, error: 'mode 只支持 local/headless' }
       if (mode === 'local') return localRound()
-      const r = runDuty('manual')
+      const r = await runDuty('manual')
       return { ok: Boolean(r.started), ...r }
     },
   })
@@ -2691,11 +3300,12 @@ export function apply(ctx, config) {
       const py = pythonNow()
       const canWrite = (() => {
         const probe = join(stateDir, '.write-probe')
-        try { writeFileSync(probe, String(Date.now()), 'utf8'); return true } catch { return false }
+        try { writeFileSync(probe, String(Date.now()), 'utf8'); return true } catch { return false } finally { try { rmSync(probe, { force: true }) } catch {} }
       })()
+      const imports = await pythonDependencies(py)
       const items = [
         { name: '家目录可写', ok: canWrite, detail: stateDir, fix: '检查 %USERPROFILE%\\.dsh 的权限' },
-        { name: 'Python 解释器', ok: py.via !== 'config' || existsSync(py.command), detail: `${py.command}${py.args.length ? ' ' + py.args.join(' ') : ''}（${py.via}）`, fix: '装 Python 3.11+ 并在设置里把 pythonPath 指到 python.exe；或者干脆填 uv' },
+        { name: 'Python 解释器及转写依赖', ok: imports.ok, detail: `${py.command}${py.args.length ? ' ' + py.args.join(' ') : ''}（${py.via}）`, fix: '装 Python 3.11+ 并在设置里把 pythonPath 指到 python.exe；或者干脆填 uv' },
         { name: 'MCP 脚本', ok: existsSync(scriptPath), detail: scriptPath, fix: '把 vendor/douyin-mcp/mcp_server.py 放好（或用 --force 让插件重铺），然后重启一次 dsh' },
         { name: 'ComfyUI 输出目录', ok: Boolean(String(cfg.comfyOutputDir || '').trim()) && existsSync(String(cfg.comfyOutputDir || '').trim()), detail: String(cfg.comfyOutputDir || ''), fix: '把 comfyOutputDir 改成 ComfyUI 的 output 目录' },
       ]
@@ -2707,14 +3317,16 @@ export function apply(ctx, config) {
         mcpResult = { ok: false, skipped: true, hint: 'Python 或脚本不到位，没起 MCP' }
       }
       if (mcpResult && mcpResult.loggedIn !== undefined) markLogin(Boolean(mcpResult.loggedIn))
-      const ok = items.every((x) => x.ok) && mcpResult?.ok !== false
+      const browserReady = mcpResult?.ok === true && mcpResult.loggedIn === true && mcpResult.searched === true
+      const mediaReady = !cfg.watchBeforeAct || (mcpResult?.media?.ffmpegReady === true && mcpResult?.media?.dependenciesReady === true && mcpResult?.media?.modelCached === true)
+      const ok = items.filter(x => x.name !== 'ComfyUI 输出目录' || cfg.autoPublish).every((x) => x.ok) && browserReady && mediaReady
       return {
         ok,
         items,
         mcp: mcpResult,
         home: stateDir,
         hint: ok
-          ? '能用了。第一次刷之前先扫码登录（dy_login_start）。'
+          ? '浏览器、登录、搜索及当前配置所需转写环境检查通过；页面发送仍需单独验收。'
           : '看上面哪条是 false：它的 fix 就是下一步。装好/改完设置后重启一次 dsh 再来自检。',
       }
     },
@@ -2731,21 +3343,20 @@ export function apply(ctx, config) {
   /** 谷时窗口到点就刷 —— ⭐ 2026-10-25 修：以前这里调 runDuty()（spawn headless，沙箱里必挂），
    *  而且窗口标记是「跑之前」就写上 ⇒ 一轮没跑成也当天不再试。现在改成跑本机直跑（localRound），
    *  并且**只有真的挑到东西才记窗口**，失败下一分钟还会再试（同一天最多试 6 次，别死循环）。 */
-  const windowTick = async () => {
+  const windowTick = () => withActionLock(stateDir, async () => {
     try {
       refreshCfg()
       if (!cfg.peakValley) return
       const now = new Date()
       const st = readState()
       const today = dayKey(now)
-      if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
-      if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
+      if (countWatchedToday(now) >= Number(cfg.perDay || 0)) return
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         const triesKey = `winTries:${key}`
-        if (st.windows?.[key]) return
+        // Recheck the window on each inspection until quota is exhausted.
         if (Number(st[triesKey] || 0) >= 6) return
         bumpState({ [triesKey]: Number(st[triesKey] || 0) + 1 })
         log(`谷时窗口到了（${k}），开始刷一轮`)
@@ -2758,7 +3369,6 @@ export function apply(ctx, config) {
         if (r && r.ok !== false && (r.picked > 0 || r.skipped)) {
           bumpState({
             windows: { ...(readState().windows || {}), [key]: true },
-            count: roundsToday(now) + 1,
             lastRunAt: now.toISOString(),
             lastWhy: `window:${k}`,
           })
@@ -2771,7 +3381,7 @@ export function apply(ctx, config) {
     } catch (e) {
       log(`定时器这一跳出错（已兜住，不影响宿主）：${e?.stack ?? e}`)
     }
-  }
+  })
 
   /* ⭐ 2026-10-26 使用者要求：谷时那一轮不再单独 60 秒轮询，
    *    合并进「每隔 N 分钟巡检一次」的那一跳（同一个参数 replyIntervalMin）：
@@ -2787,7 +3397,7 @@ export function apply(ctx, config) {
    */
   /* ── 续火花：每天给指定好友发一句（0 点后第一次检查时做，写进 state 防重复） ── */
   const streakKey = () => `streak:${dayKey()}`
-  const maybeKeepStreak = async () => {
+  const maybeKeepStreak = () => withActionLock(stateDir, async () => {
     try {
       refreshCfg()
       const nick = String(cfg.streakNick || '').trim()
@@ -2798,18 +3408,14 @@ export function apply(ctx, config) {
       // ⭐ 2026-10-26 使用者：「只有续火花才会主动发消息，发个续火花的表情包」
       //   ⇒ 续火花只发表情包，不发文字；文字只在「别人先说话」之后才回
       const kw = String(cfg.streakSticker || '大肥鱼').trim() || '大肥鱼'
-      let r = await call('douyin_chat_sticker', { nickname: nick, keyword: kw, pick: 0 }, { timeoutMs: 180_000 })
-      let ok = r && r.ok !== false
-      if (!ok) {
-        // 表情包没找到就退一步：发一个纯表情文本（仍然不算长句）
-        r = await call('douyin_chat_send', { nickname: nick, text: '[比心]' }, { timeoutMs: 180_000 })
-        ok = r && r.ok !== false
-      }
-      bumpState({ [streakKey()]: Number(st[streakKey()] || 0) + 1, lastStreakAt: new Date().toISOString(), lastStreakOk: ok })
+      const r = await execution.run({ ...(execution.getStore() || {}), streak: true }, () => call('douyin_chat_sticker', { nickname: nick, keyword: kw, pick: 0 }, { timeoutMs: 180_000 }))
+      const ok = confirmed(r)
+      bumpState({ [streakKey()]: Number(st[streakKey()] || 0) + (ok ? 1 : 0), lastStreakAt: new Date().toISOString(), lastStreakOk: ok })
       log(`续火花 → ${nick}：${ok ? '已发表情包（' + kw + '）' : (r?.error || '没发出去')}`)
       appendMemory(`续火花 · ${nick} · ${ok ? '已发送' : '失败'}`)
     } catch (e) { log('续火花出错（已兜住）：' + String(e?.message ?? e)) }
-  }
+  })
+
 
   let replyTimer = null
   let replyBusy = false
@@ -2824,7 +3430,7 @@ export function apply(ctx, config) {
     replyTimer = setTimeout(async () => {
       try {
         refreshCfg()
-        if (typeof maybeClean === 'function') maybeClean()
+        if (typeof maybeClean === 'function') await maybeClean()
         try { if (typeof refreshPersonaFromMemory === 'function') refreshPersonaFromMemory() } catch (e) { log('人设更新出错（已兜住）：' + String(e?.message ?? e)) }
         // 谷时到了就刷一轮（跟下面三件事共用这同一个间隔）
         try { if (typeof windowTick === 'function') await windowTick() } catch (e) { log('谷时那一轮出错（已兜住）：' + String(e?.message ?? e)) }
@@ -2834,7 +3440,7 @@ export function apply(ctx, config) {
           replyBusy = true
           lastReplyCheckAt = new Date().toISOString()
           try {
-            const r = await replyRound({ count: Number(cfg.replyPerRun) || 3 })
+            const r = await replyRound({ count: cfg.replyPerRun })
             log(`定时看评论：${r?.ok ? `发出 ${r.sent} 条` : (r?.error || '没跑成')}`)
           } catch (e) {
             log(`定时看评论出错（已兜住）：${e?.message ?? e}`)
@@ -2873,6 +3479,17 @@ export function apply(ctx, config) {
     req.on('error', () => finish({}))
   })
 
+  let setupTask = null
+  let setupState = readJson(join(stateDir, 'setup-state.json'), { status: 'idle' })
+  const setupSave = patch => { setupState = { ...setupState, ...patch }; writeJson(join(stateDir, 'setup-state.json'), setupState) }
+  const pythonDependencies = async (py = pythonNow()) => {
+    try {
+      const r = await runCommand(py.command, [...py.args, '-c', 'import sys,mcp,playwright,numpy,faster_whisper; print(sys.executable)'],
+        { cwd: stateDir, env: pyEnv(), timeoutMs: 20000 })
+      return { ok: true, detail: r.output.trim() }
+    } catch (e) { return { ok: false, error: String(e.message) } }
+  }
+
   const latestReport = () => {
     try {
       const files = readdirSync(outDir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort().reverse()
@@ -2896,8 +3513,12 @@ export function apply(ctx, config) {
       return sendJson(res, 200, {
         ok: true,
         today: dayKey(now),
+        cdp: await cdpProbe(1200),
+        build: { version: '0.2.1', scriptHash: existsSync(scriptPath) ? createHash('sha256').update(readFileSync(scriptPath)).digest('hex') : '', pid: mcp?.proc?.pid || null, loadedMcp: mcp?.lastRuntime || null },
+        headless: st.headless || null,
         ranToday: roundsToday(now),
         pickedToday: countPickedToday(now),
+        watchedToday: countWatchedToday(now),
         perDay: Number(cfg.perDay) || 0,
         peakValley: Boolean(cfg.peakValley),
         windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
@@ -2937,8 +3558,13 @@ export function apply(ctx, config) {
         const patch = body && typeof body === 'object' && !Array.isArray(body)
           ? (body.patch && typeof body.patch === 'object' ? body.patch : body)
           : {}
-        const r = await persistCfg(patch)
-        return sendJson(res, 200, { ok: true, config: { ...cfg }, saved: r.clean, host: r.host })
+        try {
+          const r = await persistCfg(patch)
+          return sendJson(res, 200, { ok: true, config: { ...cfg }, saved: r.clean, host: r.host })
+        } catch (e) {
+          log('保存配置失败：' + String(e?.message ?? e))
+          return sendJson(res, 200, { ok: false, error: '保存失败：' + String(e?.message ?? e), config: { ...cfg } })
+        }
       }
       return sendJson(res, 405, { ok: false, error: 'config 只支持 GET / POST' })
     }
@@ -2961,7 +3587,7 @@ export function apply(ctx, config) {
       try {
         const r = await call('douyin_login_poll', {}, { timeoutMs: 90_000 })
         const obj = typeof r === 'object' && r ? r : {}
-        if (obj.loggedIn) markLogin(true)
+        if (typeof obj.loggedIn === 'boolean') markLogin(obj.loggedIn)
         return sendJson(res, 200, { ok: obj.ok !== false, loggedIn: Boolean(obj.loggedIn), hint: obj.hint || '' })
       } catch (e) {
         return sendJson(res, 200, { ok: false, loggedIn: false, error: String(e?.message ?? e) })
@@ -2979,12 +3605,12 @@ export function apply(ctx, config) {
           const msg = String(e?.message ?? e)
           try {
             mkdirSync(outDir, { recursive: true })
-            appendFileSync(reportFileOf(), "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：" + msg + "\n", 'utf8')
+            if (cfg.reportLevel !== 'off') appendFileSync(reportFileOf(), "\n## 这一轮没跑成\n\n- 记录时间：" + new Date().toLocaleString('zh-CN', { hour12: false }) + "\n- 原因：" + msg + "\n", 'utf8')
           } catch { /* 报告都写不了就算了 */ }
           return sendJson(res, 200, { ok: false, error: msg, mode: 'local' })
         }
       }
-      const r = runDuty('http')
+      const r = await runDuty('http')
       return sendJson(res, 200, { ok: Boolean(r.started), ...r, mode: 'headless' })
     }
 
@@ -3049,29 +3675,11 @@ export function apply(ctx, config) {
           out.lines = all.slice(-60).reverse()
         }
       } catch { /* 读不到就给空 */ }
-      // ⭐ 2026-10-26 修（下载的人报「读取不到记忆」）：记忆系统的库不在本插件里，
-      //    路径不能写死本机的 `<DSH_HOME>\memory-system\memory.db`——别人那台机器根本没有这个路径。
-      //    这里按「DSH 家目录 → $DSH_HOME → 用户家目录/.dsh」各试一遍，找到哪个算哪个；
-      //    都找不到就留空（只是不显示库信息，读 md 那部分照旧）。
       try {
-        const cands = []
-        try {
-          const dh = typeof ctx.get === 'function' ? ctx.get('dshHomePath') : null
-          if (typeof dh === 'function') { const p = dh('memory-system'); if (p) cands.push(join(String(p), 'memory.db')) }
-          else if (typeof dh === 'string' && dh.trim()) cands.push(join(dh.trim(), 'memory-system', 'memory.db'))
-        } catch { /* 拿不到 DSH 家目录就走下面两种 */ }
-        const envHome = String(process.env.DSH_HOME || '').trim()
-        if (envHome) cands.push(join(envHome, 'memory-system', 'memory.db'))
-        const userHome = String(process.env.USERPROFILE || process.env.HOME || '').trim()
-        if (userHome) cands.push(join(userHome, '.dsh', 'memory-system', 'memory.db'))
-        for (const db of cands) {
-          try {
-            if (!db || !db.toLowerCase().endsWith('memory.db') || !existsSync(db)) continue
-            out.dbPath = db
-            out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10
-            break
-          } catch { /* 这一个不行就看下一个 */ }
-        }
+        // 跟宿主一致：<DSH_HOME>/memory-system（以前写死某个绝对路径，DSH_HOME 搬走后这块就指错库了）
+        const dshHome = process.env.DSH_HOME || join(process.env.USERPROFILE || '', '.dsh')
+        const db = join(dshHome, 'memory-system', 'memory.db')
+        if (existsSync(db)) { out.dbPath = db; out.dbMb = Math.round((statSync(db).size / 1048576) * 10) / 10 }
       } catch { /* 忽略 */ }
       // ⭐ 人设（persona.md）也一起给出来：角色卡里要能看、能改
       try {
@@ -3090,63 +3698,21 @@ export function apply(ctx, config) {
     }
 
     if (method === 'GET' && path === '/api/douyin-duty/watched') {
-      // ⭐ 按日期分组（使用者 2026-10-23：「要分日期懂了吗」）：读最近 14 份日报，每份带自己的日期
-      const days = Math.max(1, Math.min(Number(url.searchParams.get('days')) || 14, 60))
-      let files = []
-      try {
-        files = readdirSync(outDir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort().reverse().slice(0, days)
-      } catch { files = [] }
-      if (!files.length) return sendJson(res, 200, { ok: true, items: [], days: [], hint: '还没有日报（跑一轮就有了）' })
-      const items = []
-      const dayList = []
-      for (const f of files) {
-        let text = ''
-        try { text = readFileSync(join(outDir, f), 'utf8') } catch { continue }
-        const day = f.replace(/\.md$/, '')
-        let count = 0
-        const blocks = String(text).split(/\n(?=###\s*\d{6,})/)
-        for (const b of blocks) {
-          const m = b.match(/^###\s*(\d{6,})/)
-          if (!m) continue
-          const id = m[1]
-          const grab = (label) => {
-            const mm = b.match(new RegExp(`^- ${label}[:：]\\s*(.+)$`, 'm'))
-            return mm ? mm[1].trim() : ''
-          }
-          const stat = (b.match(/^- 点赞 · 评论[:：]\s*(.+)$/m) || [])[1] || ''
-          const tier = (b.match(/\*\*档位\*\*[:：]\s*(\S+)/) || [])[1] || ''
-          items.push({
-            aweme_id: id,
-            title: grab('标题'),
-            url: grab('链接') || `https://www.douyin.com/video/${id}`,
-            cover: grab('封面'),
-            tier,
-            stat: String(stat).trim(),
-            day,
-          })
-          count += 1
-        }
-        if (count) dayList.push({ day, count })
-      }
-      return sendJson(res, 200, { ok: true, items, days: dayList, total: items.length })
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('days')) || 14, 60))
+      const picks = Object.values(readLedger().picks)
+      const dates = [...new Set(picks.map(p => p.day))].sort().reverse().slice(0, limit)
+      const items = picks.filter(p => dates.includes(p.day)).map(p => ({ ...p, url: p.url || 'https://www.douyin.com/video/' + p.aweme_id }))
+      return sendJson(res, 200, { ok: true, items, days: dates.map(day => ({ day, count: items.filter(p => p.day === day).length })), total: items.length })
     }
 
     // ⭐ 给设置页用：封面图走宿主代理（抖音封面是签名 URL，直连会被防盗链挡）
     if (method === 'GET' && path === '/api/douyin-duty/cover') {
       const target = String(url.searchParams.get('u') || '')
-      if (!/^https?:\/\//i.test(target)) return sendJson(res, 400, { ok: false, error: 'u 要是 http(s) 链接' })
+      try { coverUrl(target) } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }) }
       try {
-        const r = await fetch(target, {
-          headers: {
-            referer: 'https://www.douyin.com/',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
-          },
-          signal: AbortSignal.timeout(12000),
-        })
-        if (!r.ok) return sendJson(res, 502, { ok: false, error: `封面 HTTP ${r.status}` })
-        const buf = Buffer.from(await r.arrayBuffer())
-        res.writeHead(200, { 'content-type': r.headers.get('content-type') || 'image/jpeg', 'cache-control': 'public, max-age=3600' })
-        res.end(buf)
+        const r = await fetchCover(target)
+        res.writeHead(200, { 'content-type': r.type, 'x-content-type-options': 'nosniff', 'cache-control': 'private, max-age=3600' })
+        res.end(r.buffer)
         return
       } catch (e) {
         return sendJson(res, 502, { ok: false, error: String(e?.message ?? e) })
@@ -3173,6 +3739,88 @@ export function apply(ctx, config) {
         force: true,
       })
       return sendJson(res, 200, { ok: Boolean(r?.ok), ...r })
+    }
+
+    // ⭐ 私信页（2026-10-27 加）
+    if (method === 'GET' && path === '/api/douyin-duty/dm') {
+      refreshCfg()
+      const led = readLedger()
+      let seen = 0
+      try { seen = new Set((JSON.parse(readFileSync(dmSeenFile, 'utf8')) || {}).ids || []).size } catch { seen = 0 }
+      const recent = Object.entries(led.dm || {}).slice(-12).map(([peer, r]) => ({
+        peer, name: r.name || '', day: r.day || '', count: r.count || 0,
+        lastReply: r.lastReply || '', lastMessageId: r.lastMessageId || '',
+      }))
+      return sendJson(res, 200, {
+        ok: true,
+        dmAutoReply: cfg.dmAutoReply !== false,
+        dmReplyOnlyTo: String(cfg.dmReplyOnlyTo || ''),
+        dmReplyPerDay: Number(cfg.dmReplyPerDay) || 0,
+        seenCount: seen,
+        recent,
+        log: (() => {
+          try {
+            return readDmLog()
+              .filter((x) => x && x.day === dayKey())
+              .slice(-30)
+              .map((x) => ({ at: x.at || 0, name: x.name || '', text: x.text || '', replied: Boolean(x.replied), replyText: x.replyText || '' }))
+          } catch { return [] }
+        })(),
+      })
+    }
+
+    if (method === 'POST' && path === '/api/douyin-duty/dm/seen/clear') {
+      try { writeFileSync(dmSeenFile, JSON.stringify({ ids: [] }), 'utf8') } catch { /* 写不了就算了 */ }
+      return sendJson(res, 200, { ok: true })
+    }
+
+    if (method === 'POST' && path === '/api/douyin-duty/dm/test') {
+      const body = await readBody(req)
+      const nick = String(cfg.msgAllowTo || '').split(/[,，、]+/).map((s) => s.trim()).filter(Boolean)[0] || ''
+      if (!nick) return sendJson(res, 200, { ok: false, error: '没有可发的人（先填「可以主动发消息的人」）' })
+      const text = String(body?.text || '测试：后台私信通道正常吗').slice(0, 100)
+      const r = await call('douyin_chat_send', { nickname: nick, text }, { timeoutMs: 120_000 })
+      return sendJson(res, 200, { ok: Boolean(r?.verified), ...r })
+    }
+
+    // ⭐ 表情包页（2026-10-27 加）
+    if (method === 'GET' && path === '/api/douyin-duty/stickers') {
+      const read = (f) => { try { return JSON.parse(readFileSync(join(stateDir, f), 'utf8')) } catch { return { items: [] } } }
+      const custom = read('favorites2.json').items || []
+      const emoji = read('favorites.json').items || []
+      return sendJson(res, 200, {
+        ok: true,
+        custom: custom.map((x) => ({ index: x.index, key: x.key, tags: x.tags || [] })),
+        emojiCount: emoji.length,
+        emoji: emoji.map((x) => ({ index: x.index, tags: x.tags || [] })),
+      })
+    }
+
+    if (method === 'POST' && path === '/api/douyin-duty/stickers/tags') {
+      const body = await readBody(req)
+      const which = String(body?.file || 'favorites2.json') === 'favorites.json' ? 'favorites.json' : 'favorites2.json'
+      const file = join(stateDir, which)
+      let data = { items: [] }
+      try { data = JSON.parse(readFileSync(file, 'utf8')) } catch { data = { items: [] } }
+      const idx = Number(body?.index)
+      const tags = Array.isArray(body?.tags) ? body.tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8) : []
+      const item = (data.items || []).find((x) => Number(x.index) === idx)
+      if (!item) return sendJson(res, 200, { ok: false, error: '没有这一张' })
+      item.tags = tags
+      try { writeFileSync(file, JSON.stringify(data, null, 2), 'utf8') } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+      return sendJson(res, 200, { ok: true, tags })
+    }
+
+    if (method === 'POST' && path === '/api/douyin-duty/stickers/test') {
+      const body = await readBody(req)
+      const nick = String(cfg.msgAllowTo || '').split(/[,，、]+/).map((s) => s.trim()).filter(Boolean)[0] || ''
+      if (!nick) return sendJson(res, 200, { ok: false, error: '没有可发的人（先填「可以主动发消息的人」）' })
+      const r = await call('douyin_chat_sticker', {
+        nickname: nick,
+        keyword: String(body?.keyword || '').slice(0, 20),
+        pick: Number(body?.pick) || 0,
+      }, { timeoutMs: 180_000 })
+      return sendJson(res, 200, { ok: Boolean(r?.verified), ...r })
     }
 
     if (method === 'GET' && path === '/api/douyin-duty/report/latest') {
@@ -3220,77 +3868,40 @@ export function apply(ctx, config) {
 
     // ⭐ 给设置页用：装主依赖（建 venv + pip install）。照「刷B站」那页的按钮做；日志进 <家>/setup.log
     if (method === 'POST' && path === '/api/douyin-duty/setup') {
-      const vp = venvPython()
-      const spDir = process.platform === 'win32' ? join(stateDir, '.venv', 'Lib', 'site-packages') : join(stateDir, '.venv', 'lib')
-      const missingNow = () => {
+      if (setupTask) return sendJson(res, 200, { ok: true, started: true, ...setupState })
+      refreshCfg()
+      const vp = venvPython(), base = pythonNow()
+      const setupLog = join(stateDir, 'setup.log')
+      writeFileSync(setupLog, new Date().toISOString() + '\n', 'utf8')
+      setupSave({ status: 'running', phase: 'venv', error: null })
+      setupTask = (async () => {
+        const options = { cwd: stateDir, env: uvEnv(), timeoutMs: 15 * 60_000, onData: text => appendFileSync(setupLog, text, 'utf8') }
         try {
-          const names = readdirSync(spDir).join('|')
-          return ['mcp', 'playwright'].filter((n) => !names.includes(n))
-        } catch { return ['mcp', 'playwright'] }
-      }
-      if (existsSync(vp) && missingNow().length === 0) {
-        return sendJson(res, 200, { ok: true, already: true, ready: true, venvPython: vp, hint: '环境已经装好了' })
-      }
-      const setupLog = join(stateDir, 'setup.log')
-      const basePy = (() => {
-        const raw = String(cfg.pythonPath || '').trim()
-        if (raw && !/^(python|py)$/i.test(raw) && !/[\\/]uv(\.exe)?$/i.test(raw) && existsSync(raw)) return raw
-        for (const c of [
-          'C:\\Python313\\python.exe', 'C:\\Python312\\python.exe', 'C:\\Python311\\python.exe',
-          'C:\\Python314\\python.exe',
-          join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),
-        ]) { if (c && existsSync(c)) return c }
-        return 'python'
+          if (!existsSync(vp)) await runCommand(base.command, [...base.args, '-m', 'venv', join(stateDir, '.venv')], options)
+          setupSave({ phase: 'dependencies' })
+          await runCommand(vp, ['-m', 'pip', 'install', '-r', join(pluginDir, 'vendor', 'douyin-mcp', 'requirements.txt')], options)
+          setupSave({ phase: 'verify' })
+          const probe = await pythonDependencies({ command: vp, args: [] })
+          if (!probe.ok) throw new Error(probe.error)
+          await persistCfg({ pythonPath: vp })
+          setupSave({ status: 'completed', phase: 'ready', finishedAt: new Date().toISOString() })
+        } catch (e) {
+          setupSave({ status: 'failed', error: String(e.message) })
+          appendFileSync(setupLog, '\n安装失败：' + String(e.message) + '\n', 'utf8')
+        } finally { setupTask = null }
       })()
-      try { writeFileSync(setupLog, `=== ${new Date().toISOString()} 装主依赖（base=${basePy}）===\n`, 'utf8') } catch { /* 继续 */ }
-      const line = `"${basePy}" -m venv "${join(stateDir, '.venv')}" && "${vp}" -m pip install -q --upgrade pip && "${vp}" -m pip install -q "mcp>=1.9,<2" "playwright>=1.45" & echo === 结束 %ERRORLEVEL% ===`
-      try {
-        const r2 = createRequire(import.meta.url)
-        const { spawn: sp } = r2('node:child_process')
-        const child = sp('cmd.exe', ['/c', `${line} >> "${setupLog}" 2>&1`], { detached: true, stdio: 'ignore', windowsHide: true })
-        child.unref()
-        log(`开始装主依赖（base=${basePy} → ${vp}），日志 ${setupLog}`)
-        return sendJson(res, 200, { ok: true, started: true, basePython: basePy, venvPython: vp, log: setupLog, hint: '正在后台装（几十秒到两分钟），进度看「安装日志」' })
-      } catch (e) {
-        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e), hint: '起不了安装进程' })
-      }
+      return sendJson(res, 200, { ok: true, started: true, ...setupState, hint: '后台安装中；请查看日志。ffmpeg 和模型需另行自检。' })
     }
-
-    // ⭐ 给设置页用：安装进度 / 日志尾巴 / 是否就绪
     if (method === 'GET' && path === '/api/douyin-duty/setup/log') {
-      const setupLog = join(stateDir, 'setup.log')
       let tail = ''
-      try { tail = readFileSync(setupLog, 'utf8').slice(-6000) } catch { tail = '（还没装过）' }
-      const vp = venvPython()
-      const spDir = process.platform === 'win32' ? join(stateDir, '.venv', 'Lib', 'site-packages') : join(stateDir, '.venv', 'lib')
-      let missing = []
-      try {
-        const names = readdirSync(spDir).join('|')
-        missing = ['mcp', 'playwright'].filter((n) => !names.includes(n))
-      } catch { missing = ['mcp', 'playwright'] }
-      return sendJson(res, 200, { ok: true, venvPython: vp, venvReady: existsSync(vp) && missing.length === 0, missing, log: setupLog, tail })
+      try { tail = readFileSync(join(stateDir, 'setup.log'), 'utf8').slice(-6000) } catch {}
+      const probe = await pythonDependencies({ command: venvPython(), args: [] })
+      return sendJson(res, 200, { ok: true, ...setupState, venvReady: probe.ok, missing: probe.ok ? [] : [probe.error], tail })
     }
 
     // ⭐ 给设置页用：环境自检（页面「高级」那一栏点一下就逐项告诉我哪一步不通）
     if (method === 'POST' && path === '/api/douyin-duty/selfcheck') {
-      let mcpCheck = { ok: false, error: '没探' }
-      try {
-        const r = await call('douyin_selfcheck', {}, { timeoutMs: 120_000 })
-        mcpCheck = typeof r === 'object' && r ? r : { raw: r }
-      } catch (e) { mcpCheck = { ok: false, error: String(e?.message ?? e) } }
-      const py = pythonNow()
-      const comfyDir = String(cfg.comfyOutputDir || '')
-      const cdp = await cdpProbe(1200)
-      const items = [
-        { name: '家目录可写', ok: true, detail: stateDir },
-        { name: 'Python 解释器', ok: py.via !== 'path' || existsSync('python') || true, detail: `${py.command}（${py.via}）` },
-        { name: 'MCP 脚本', ok: existsSync(scriptPath), detail: existsSync(scriptPath) ? scriptPath : '家里没有 mcp_server.py', fix: '重启一次 dsh（会把 vendor 里的脚本铺到家里）' },
-        { name: 'ComfyUI 输出目录', ok: Boolean(comfyDir) && existsSync(comfyDir), detail: comfyDir, fix: '把 comfyOutputDir 改成 ComfyUI 的 output 目录' },
-        { name: 'CDP（已登录的 Chrome）', ok: Boolean(cdp.ok), detail: cdp.ok ? `${cdp.url} · ${cdp.browser}` : `${cdp.url || '未配置'} · ${cdp.error || cdp.hint || ''}`, fix: '点「拉起 Chrome」；Chrome 开着的话先全关' },
-        { name: 'MCP 自检', ok: Boolean(mcpCheck?.ok), detail: JSON.stringify(mcpCheck).slice(0, 600) },
-      ]
-      log(`selfcheck → mcp.ok=${Boolean(mcpCheck?.ok)}`)
-      return sendJson(res, 200, { ok: items.every((i) => i.ok), items, mcp: mcpCheck })
+      return sendJson(res, 200, await toolByName('dy_selfcheck').execute({}))
     }
 
     // ⭐ 给设置页用：把带调试端口的 Chrome 拉起来（复用已登录的登录态）
@@ -3301,6 +3912,11 @@ export function apply(ctx, config) {
     }
 
     // ⭐ 给设置页用：日志尾巴（出问题时看这个）
+    if (method === 'POST' && path === '/api/douyin-duty/log') {
+      const body = await readBody(req)
+      log('前端：' + String(body.msg || '').replace(/[\r\n]/g, ' ').slice(0, 1500))
+      return sendJson(res, 200, { ok: true })
+    }
     if (method === 'GET' && path === '/api/douyin-duty/log/tail') {
       let tail = ''
       try {
@@ -3315,14 +3931,29 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const which = String(body?.what || 'home')
       const target = which === 'out' ? outDir : stateDir
+      try { mkdirSync(target, { recursive: true }) } catch { /* 建不了也先试着打开 */ }
+      const req2 = createRequire(import.meta.url)
+      // ① 优先用 Electron 自己的 shell.openPath（比 spawn explorer 稳）
       try {
-        const req2 = createRequire(import.meta.url)
+        const { shell } = req2('electron')
+        if (shell && typeof shell.openPath === 'function') {
+          const err = await shell.openPath(target)
+          if (!err) {
+            log(`打开目录 → ${target}（shell）`)
+            return sendJson(res, 200, { ok: true, path: target, via: 'shell' })
+          }
+          log(`shell.openPath 打开失败：${err}`)
+        }
+      } catch { /* 不是 Electron 环境就跳过 */ }
+      // ② 退到系统命令
+      try {
         const { spawn: sp } = req2('node:child_process')
-        if (process.platform === 'win32') sp('explorer.exe', [target], { detached: true, stdio: 'ignore' }).unref()
-        else if (process.platform === 'darwin') sp('open', [target], { detached: true, stdio: 'ignore' }).unref()
-        else sp('xdg-open', [target], { detached: true, stdio: 'ignore' }).unref()
+        const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+        const child = sp(command, [target], { detached: true, stdio: 'ignore', windowsHide: true })
+        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) })
+        child.unref()
         log(`打开目录 → ${target}`)
-        return sendJson(res, 200, { ok: true, path: target })
+        return sendJson(res, 200, { ok: true, path: target, via: 'spawn' })
       } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e), path: target }) }
     }
 
@@ -3345,7 +3976,8 @@ export function apply(ctx, config) {
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   // 收摊：MCP 子进程别留在后台
-  try { ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'douyin-duty: 收 MCP 子进程') } catch { /* 没有 effect 就算了 */ }
+  try { ctx.effect(() => () => { try { if (dmWatchTimer) clearInterval(dmWatchTimer); mcp?.stop(); runningHeadless?.child?.kill(); runningHeadless?.proxy?.close() } catch { /* 收摊 */ } }, 'douyin-duty: 收 MCP 子进程') } catch { /* 没有 effect 就算了 */ }
 
   log(`已挂载（家=${stateDir}，python=${pythonNow().command}（${pythonNow().via}），峰谷=${cfg.peakValley ? '开' : '关'}，闸门 点赞=${cfg.autoLike ? '开' : '关'}/评论=${cfg.autoComment ? '开' : '关'}/发布=${cfg.autoPublish ? '开' : '关'}，Python 脚本=${existsSync(scriptPath) ? '就位' : '缺失'}，http=${homeFiles?.reason || 'ok'}）`)
+  try { startDmWatcher() } catch (e) { log('私信巡检没启动：' + String(e?.message ?? e)) }
 }

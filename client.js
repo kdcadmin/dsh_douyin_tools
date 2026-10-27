@@ -125,8 +125,10 @@ window.__ModuleLoader__.load({
 
     const TABS = [
       ['daily', '日常'],
-      ['pref', '偏好'],
+      ['pref', '刷视频'],
       ['like', '互动'],
+      ['dm', '私信'],
+      ['sticker', '表情包'],
       ['adv', '高级'],
     ]
 
@@ -167,13 +169,14 @@ window.__ModuleLoader__.load({
           setSt(r)
           const c = r.config || {}
           setDraft({
+            ...c,
             peakValley: Boolean(c.peakValley), noon: Boolean(c.noon), night: Boolean(c.night),
             perDay: Number(c.perDay) || 0,
             keywords: Array.isArray(c.keywords) ? c.keywords.join('、') : '',
             reportLevel: String(c.reportLevel || 'full'),
             personaPrompt: String(c.personaPrompt || ''),
             autoReply: Boolean(c.autoReply), replyPerRun: c.replyPerRun ?? 3, replyPerDay: c.replyPerDay ?? 10,
-            replyRandom: c.replyRandom !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareWithNote: c.shareWithNote !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmReply: c.dmReply !== false, dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: c.autoCommentPlain !== false, plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakSticker: String(c.streakSticker || '大肥鱼'), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
+            replyRandom: c.replyRandom !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareWithNote: c.shareWithNote !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmAutoReply: c.dmAutoReply !== false, dmAutoIntervalSec: Number(c.dmAutoIntervalSec) || 15, dmReply: Boolean(c.dmReply), dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: Boolean(c.autoCommentPlain), plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakSticker: String(c.streakSticker || '大肥鱼'), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
             autoLike: Boolean(c.autoLike), autoComment: Boolean(c.autoComment),
             autoPublish: Boolean(c.autoPublish), publishDraft: Boolean(c.publishDraft),
             commentPerDay: Number(c.commentPerDay) || 0, publishPerDay: Number(c.publishPerDay) || 0,
@@ -182,11 +185,18 @@ window.__ModuleLoader__.load({
             pythonPath: String(c.pythonPath || ''), dshBin: String(c.dshBin || ''),
             comfyUrl: String(c.comfyUrl || ''), comfyOutputDir: String(c.comfyOutputDir || ''),
             comfyWorkflow: String(c.comfyWorkflow || ''),
-            cdpUrl: String(c.cdpUrl || ''), cdpPort: Number(c.cdpPort) || 9222,
+            cdpUrl: String(c.cdpUrl || ''), cdpPort: Number(c.cdpPort) || 9222, watchFrames: Number(c.watchFrames) || 10,
           })
         } catch (e) { setMsg('读状态失败：' + String(e.message || e)); setTone('warn') }
       }
       React.useEffect(() => { load() }, [])
+      const [dmInfo, setDmInfo] = React.useState(null)
+      const [stk, setStk] = React.useState(null)
+      const [stkKeyword, setStkKeyword] = React.useState('干饭')
+      React.useEffect(() => {
+        if (tab === 'dm') jget('/dm').then((r) => setDmInfo(r)).catch(() => {})
+        if (tab === 'sticker') jget('/stickers').then((r) => setStk(r)).catch(() => {})
+      }, [tab])
 
       /* ⭐ 二维码一出来就自己盯着登录态：扫完自动变「已登录」，不用再点「我扫完了」
          （使用者 2026-10-23：「我扫完登录了没反应」—— 之前只出码不轮询，看着就像没反应） */
@@ -220,6 +230,7 @@ window.__ModuleLoader__.load({
         setBusy('save'); setMsg('')
         try {
           const patch = {
+            ...draft,
             peakValley: draft.peakValley, noon: draft.noon, night: draft.night,
             perDay: Number(draft.perDay) || 0,
             keywords: String(draft.keywords || '').split(/[、,，\s]+/).map((s) => s.trim()).filter(Boolean),
@@ -227,14 +238,14 @@ window.__ModuleLoader__.load({
             autoLike: draft.autoLike, autoComment: draft.autoComment,
             autoReply: draft.autoReply, replyPerRun: Number(draft.replyPerRun) || 0,
             replyPerDay: Number(draft.replyPerDay) || 0, replyRandom: draft.replyRandom !== false,
-            replyVideoIds: String(draft.replyVideoIds || ''), replyIntervalMin: Number(draft.replyIntervalMin) || 30, replyOncePerUser: Boolean(draft.replyOncePerUser), skipLive: draft.skipLive !== false, shareToNick: String(draft.shareToNick || ''), replyWorksDays: Number(draft.replyWorksDays) || 3, autoClean: draft.autoClean !== false, shareWithNote: draft.shareWithNote !== false, shareNote: String(draft.shareNote || ''), msgAllowTo: String(draft.msgAllowTo || ''), dmReply: draft.dmReply !== false, dmReplyOnlyTo: String(draft.dmReplyOnlyTo || ''), dmReplyPerContact: Number(draft.dmReplyPerContact) || 1, dmReplyPerDay: Number(draft.dmReplyPerDay) || 0, sharePerDay: Number(draft.sharePerDay) || 0, autoCommentPlain: draft.autoCommentPlain !== false, plainCommentPerDay: Number(draft.plainCommentPerDay) || 0, pickPerRound: Number(draft.pickPerRound) || 2, skipOverMin: Number(draft.skipOverMin) || 60, skimOverMin: Number(draft.skimOverMin) || 5, streakNick: String(draft.streakNick || ''), streakSticker: String(draft.streakSticker || '大肥鱼'), streakPerDay: Number(draft.streakPerDay) || 0, askDoubao: Boolean(draft.askDoubao),
+            replyVideoIds: String(draft.replyVideoIds || ''), replyIntervalMin: Number(draft.replyIntervalMin) || 30, replyOncePerUser: Boolean(draft.replyOncePerUser), skipLive: draft.skipLive !== false, shareToNick: String(draft.shareToNick || ''), replyWorksDays: Number(draft.replyWorksDays) || 3, autoClean: draft.autoClean !== false, shareWithNote: draft.shareWithNote !== false, shareNote: String(draft.shareNote || ''), msgAllowTo: String(draft.msgAllowTo || ''), dmReply: Boolean(draft.dmReply), dmReplyOnlyTo: String(draft.dmReplyOnlyTo || ''), dmReplyPerContact: Number(draft.dmReplyPerContact) || 1, dmReplyPerDay: Number(draft.dmReplyPerDay) || 0, sharePerDay: Number(draft.sharePerDay) || 0, autoCommentPlain: Boolean(draft.autoCommentPlain), plainCommentPerDay: Number(draft.plainCommentPerDay) || 0, pickPerRound: Number(draft.pickPerRound) || 2, skipOverMin: Number(draft.skipOverMin) || 60, skimOverMin: Number(draft.skimOverMin) || 5, streakNick: String(draft.streakNick || ''), streakSticker: String(draft.streakSticker || '大肥鱼'), streakPerDay: Number(draft.streakPerDay) || 0, askDoubao: Boolean(draft.askDoubao),
             autoPublish: draft.autoPublish, publishDraft: draft.publishDraft,
             commentPerDay: Number(draft.commentPerDay) || 0, publishPerDay: Number(draft.publishPerDay) || 0,
             publishTitle: draft.publishTitle, publishTags: draft.publishTags,
             mentionName: draft.mentionName, commentPerRound: Number(draft.commentPerRound) || 0,
             pythonPath: draft.pythonPath, dshBin: draft.dshBin,
             comfyUrl: draft.comfyUrl, comfyOutputDir: draft.comfyOutputDir, comfyWorkflow: draft.comfyWorkflow,
-            cdpUrl: draft.cdpUrl, cdpPort: Number(draft.cdpPort) || 9222,
+            cdpUrl: draft.cdpUrl, cdpPort: Number(draft.cdpPort) || 9222, watchFrames: Math.max(3, Math.min(Number(draft.watchFrames) || 10, 48)),
           }
           const r = await jpost('/config', patch)
           setMsg(r.host && r.host.ok === false ? '已存到插件自己那份（宿主设置层没写成，不影响使用）' : '已保存')
@@ -250,8 +261,10 @@ window.__ModuleLoader__.load({
           const r = await jpost('/run', {})
           if (r.ok) {
             const acts = Array.isArray(r.actions) ? r.actions : []
+            if (r.started) { setMsg('headless 会话已启动，工具经宿主检查后执行；完成状态请查看运行状态和日报。'); setTone('warn'); setBusy(''); return }
+            if (r.skipped) { setMsg(r.skipped); setTone('warn'); setBusy(''); await load(); return }
             setMsg(`刷完一轮：挑了 ${r.picked ?? 0} 条${acts.length ? '，' + acts.join('；') : ''}`)
-            setTone(acts.some((a) => /没|失败/.test(a)) ? 'warn' : 'good')
+            setTone(acts.some((a) => /没|失败|未|待核对|额度|跳过|关闭/.test(a)) ? 'warn' : 'good')
             setWatched(null); setReport(null)
             await load()
             await loadWatched().catch(() => {})
@@ -351,7 +364,7 @@ window.__ModuleLoader__.load({
       const replyNow = async () => {
         setBusy('reply'); setMsg('正在读我自己视频的评论…'); setTone('')
         try {
-          const r = await jpost('/reply/round', { count: Number(draft.replyPerRun) || 3, random: draft.replyRandom !== false })
+          const r = await jpost('/reply/round', { count: Number(draft.replyPerRun) || 0, random: draft.replyRandom !== false })
           if (r.ok) {
             const sent = Number(r.sent) || 0
             setMsg(`回了一轮：发出 ${sent} 条（今天已回 ${r.today}/${r.perDay}）`)
@@ -428,18 +441,19 @@ window.__ModuleLoader__.load({
 
       const win = st.nextWindow || {}
       const cdpOk = Boolean(st.cdp && st.cdp.ok)
-      const pyOk = st.python && st.python.via !== 'path' ? true : true
+      const pyOk = st.mcpRunning === true || st.build?.loadedMcp != null
 
       return h('div', { 'data-dy-page': '' },
         /* ── 顶部：徽章 + 现在跑一轮 ── */
         h('div', { 'data-dy-top': '' },
           h('div', { 'data-dy-badges': '', 'data-dy-grow': '' },
-            h('span', { 'data-dy-badge': '' }, `今天已挑 ${st.pickedToday ?? 0}/${st.perDay ?? 0} 条`),
-            h('span', { 'data-dy-badge': '', 'data-good': pyOk ? '' : undefined }, pyOk ? '环境已就绪' : '环境未装'),
+            h('span', { 'data-dy-badge': '' }, `今天看过 ${st.watchedToday ?? 0}/${st.perDay ?? 0} 条`),
+            h('span', { 'data-dy-badge': '', 'data-good': pyOk ? '' : undefined }, pyOk ? 'MCP 已启动' : '环境待自检'),
             h('span', { 'data-dy-badge': '', 'data-good': st.loggedIn ? '' : undefined, 'data-warn': st.loggedIn ? undefined : '' },
               st.loggedIn ? '抖音已登录' : '抖音未登录'),
-            h('span', { 'data-dy-badge': '' }, 'v0.1.0')),
-          h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'run' ? '' : undefined, onClick: runNow }, '现在跑一轮')),
+            h('span', { 'data-dy-badge': '' }, 'v' + (st.build?.version || '未知')),
+            st.headless ? h('span', { 'data-dy-badge': '' }, 'headless: ' + st.headless.status) : null),
+          h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'run'), onClick: runNow }, '现在跑一轮')),
 
         /* ── tabs ── */
         h('div', { 'data-dy-tabs': '' }, TABS.map(([id, label]) => h('button', {
@@ -452,6 +466,14 @@ window.__ModuleLoader__.load({
         /* ══════════ 日常 ══════════ */
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'daily', 'data-dy-away': tab === 'daily' ? undefined : '' },
 
+          h('div', { 'data-dy-sec': '', 'data-dy-overview': '' },
+            h('div', { 'data-dy-label': '' }, '今天'),
+            h('div', { 'data-dy-note': '' },
+              `跑了 ${st.ranToday ?? 0} 轮 · 看片 ${st.watchedToday ?? st.pickedToday ?? 0}/${st.perDay ?? 0} 条 · 回复 ${st.doing?.todayReplies ?? 0} 条`),
+            h('div', { 'data-dy-note': '' },
+              `登录：${st.loggedIn ? '✅' : '❌ 未登录'} · 浏览器：${st.cdp?.ok ? '✅ 连得上' : '⚠️ 没连上'} · 额度和窗口以左边提示为准`),
+            h('div', { 'data-dy-note': '' }, `家目录：${st.home || ''}`)),
+
           /* ⭐ 账号摆在第一页最上面：登录入口要一眼看见（使用者 2026-10-23「你要有给登录入口啊」） */
           h('div', { 'data-dy-sec': '', 'data-dy-account': '' },
             h('div', { 'data-dy-row': '' },
@@ -460,25 +482,25 @@ window.__ModuleLoader__.load({
                 Note(st.loggedIn
                   ? '登录态留在这个 Chrome 里，之后不用再扫'
                   : '不登录也能看热榜 / 详情 / 评论；搜索、点赞、评论、投稿要登录')),
-              h('button', { 'data-dy-btn': '', 'data-primary': st.loggedIn ? undefined : '', disabled: busy === 'login' ? '' : undefined, onClick: loginStart },
+              h('button', { 'data-dy-btn': '', 'data-primary': st.loggedIn ? undefined : '', disabled: Boolean(busy === 'login'), onClick: loginStart },
                 st.loggedIn ? '重新扫码' : '扫码登录'),
-              h('button', { 'data-dy-btn': '', disabled: busy === 'poll' ? '' : undefined, onClick: loginPoll }, '我扫完了'),
-              h('button', { 'data-dy-btn': '', disabled: busy === 'sms' ? '' : undefined, onClick: () => { setShowSms((v) => !v); setMsg('') } },
+              h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'poll'), onClick: loginPoll }, '我扫完了'),
+              h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'sms'), onClick: () => { setShowSms((v) => !v); setMsg('') } },
                 showSms ? '收起收验证码' : '收验证码登录')),
             showSms ? h('div', { 'data-dy-row': '', 'data-dy-sms': '' },
               h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '150px' }, placeholder: '手机号',
                 value: smsPhone, onChange: (e) => setSmsPhone(e.target.value.replace(/\D/g, '').slice(0, 11)) }),
-              h('button', { 'data-dy-btn': '', disabled: busy === 'sms' ? '' : undefined, onClick: sendSms }, '发验证码'),
+              h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'sms'), onClick: sendSms }, '发验证码'),
               h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '110px' }, placeholder: '验证码',
                 value: smsCode, onChange: (e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6)) }),
-              h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'sms' ? '' : undefined, onClick: submitSms }, '提交验证码'),
+              h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'sms'), onClick: submitSms }, '提交验证码'),
               Note(st.loggedIn ? '已经登录了；换号时才需要这一步' : '扫码之后如果抖音要短信验证，就走这里：发验证码 → 把收到的 6 位填进来 → 提交')) : null,
             qr?.qr ? h('div', { 'data-dy-qr': '' },
               h('img', { src: qr.qr, alt: '抖音登录二维码' }),
               h('div', { 'data-dy-note': '' }, '手机抖音 → 扫一扫 → 选「长期 / 记住我」。', h('br'), '扫完点「我扫完了」。')) : null),
 
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'save' ? '' : undefined, onClick: save }, '保存'),
+            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存'),
             Note('改完记得点这一下（其它 tab 的改动也会一起存）')),
 
           h('div', { 'data-dy-sec': '' },
@@ -495,7 +517,7 @@ window.__ModuleLoader__.load({
 
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-label': '' }, '每天最多挑几条'),
+              h('div', { 'data-dy-label': '' }, '每天最多看几条（真转写过才算）'),
               Note('填 0 = 不自动刷（还是能手动跑）')),
             h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '80px' },
               value: draft.perDay ?? 5, onChange: (e) => set('perDay', e.target.value.replace(/[^0-9]/g, '')) })),
@@ -520,7 +542,7 @@ window.__ModuleLoader__.load({
 
           h('div', { 'data-dy-h': '' }, '它刷过的视频'),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'watched' ? '' : undefined, onClick: loadWatched },
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'watched'), onClick: loadWatched },
               watched !== null ? '收起' : '看它刷过的视频'),
             h('button', { 'data-dy-btn': '', onClick: () => openDir('out') }, '打开报告文件夹'),
             Note(watched === null
@@ -579,7 +601,7 @@ window.__ModuleLoader__.load({
         /* ══════════ 偏好 ══════════ */
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'pref', 'data-dy-away': tab === 'pref' ? undefined : '' },
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'save' ? '' : undefined, onClick: save }, '保存')),
+            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存')),
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' },
               h('div', { 'data-dy-label': '' }, '关注关键词'),
@@ -595,18 +617,19 @@ window.__ModuleLoader__.load({
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' },
               h('div', { 'data-dy-label': '' }, '人设提示词'),
-              Note('想让它用什么口气说话就写在这儿；留空 = 中性'))),
+              Note('模型模式的人设说明；本机模式使用转写素材生成短句，不提供自由模型推理'))),
           h('textarea', { 'data-dy-input': '', 'data-dy-area': '', value: draft.personaPrompt ?? '',
             onChange: (e) => set('personaPrompt', e.target.value) })),
 
         /* ══════════ 互动 ══════════ */
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'like', 'data-dy-away': tab === 'like' ? undefined : '' },
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'save' ? '' : undefined, onClick: save }, '保存'),
+            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存'),
             Note('这三件事都是拿你的号动手，默认全关；要用就自己开')),
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动回我自己视频的评论'),
-              Note('随机挑视频、随机挑评论；每条不超过 20 字，敏感话题婉拒')),
+            h('div', { 'data-dy-h': '' }, '回复我自己作品的评论'),
+          h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动回我自己视频的评论'),
+              ),
             Sw({ on: Boolean(draft.autoReply), onChange: (v) => set('autoReply', v) })),
           draft.autoReply ? h('div', { 'data-dy-sub': '' },
             h('div', { 'data-dy-row': '' },
@@ -615,16 +638,17 @@ window.__ModuleLoader__.load({
                 value: draft.replyPerRun ?? 3, onChange: (e) => set('replyPerRun', e.target.value.replace(/[^0-9]/g, '')) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每天最多回几条'),
-                Note(`今天已回 ${st.doing?.todayReplies ?? 0} 条`)),
+                ),
               h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric',
                 value: draft.replyPerDay ?? 10, onChange: (e) => set('replyPerDay', e.target.value.replace(/[^0-9]/g, '')) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '遇到直播就跳过')),
               Sw({ on: draft.skipLive !== false, onChange: (v) => set('skipLive', v) })),
             h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '转发给谁（留空=不转发）'),
-                Note('把好看的视频私信发给他，正文是视频链接')),
-              h('input', { 'data-dy-input': '', style: { width: '190px' }, defaultValue: draft.shareToNick ?? '',
+              h('div', { 'data-dy-h': '' }, '转发'),
+          h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '转发给谁'),
+                Note('留空=不转发')),
+              h('input', { 'data-dy-input': '', style: { width: '190px' }, value: draft.shareToNick ?? '',
                 placeholder: '对方昵称', onChange: (e) => set('shareToNick', e.target.value) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每天最多转发几条'),
@@ -634,7 +658,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '可以主动发消息的人'),
                 Note('昵称，逗号分隔；留空=谁都不主动发（回复别人的消息不受限）')),
-              h('input', { 'data-dy-input': '', style: { width: '220px' }, defaultValue: draft.msgAllowTo ?? '',
+              h('input', { 'data-dy-input': '', style: { width: '220px' }, value: draft.msgAllowTo ?? '',
                 placeholder: '一个人名，或 甲, 乙', onChange: (e) => set('msgAllowTo', e.target.value) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '回评论看几天内的作品'),
@@ -646,36 +670,20 @@ window.__ModuleLoader__.load({
                 Note('清临时垃圾 / 30天前缩略图 / 超大日志轮转 / 浏览器 Cache（不动登录态）')),
               Sw({ on: draft.autoClean !== false, onChange: (v) => set('autoClean', v) })),
             h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只回谁的私信'),
-                Note('填一个人的昵称就只回这个人；填多个（逗号分隔）就只回这几个人；不填 = 谁发来都回。只会回「别人发来的新消息」，不主动发。')),
-              h('input', { 'data-dy-input': '', style: { width: '220px' }, defaultValue: draft.dmReplyOnlyTo ?? '',
-                placeholder: '一个人名，或 甲, 乙', onChange: (e) => set('dmReplyOnlyTo', e.target.value) })),
-            h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动回私信'),
-                Note('别人（含陌生人）发来消息就回一句；默认每人和每天各有限额')),
-              Sw({ on: draft.dmReply !== false, onChange: (v) => set('dmReply', v) })),
-            draft.dmReply !== false ? h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每个联系人每天回几条')), h('span', null,
-                h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '70px' },
-                  value: draft.dmReplyPerContact ?? 1, onChange: (e) => set('dmReplyPerContact', e.target.value.replace(/[^0-9]/g, '')) }),
-                '  每天合计 ',
-                h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '70px' },
-                  value: draft.dmReplyPerDay ?? 5, onChange: (e) => set('dmReplyPerDay', e.target.value.replace(/[^0-9]/g, '')) }))) : null,
-            h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '转发后跟一条消息 + 表情包'),
                 Note('一个开关管两件事：转发完是否立刻发「一句话 + 一个表情包」（同一条会话，不重复找人）。关掉就只转发不吱声')),
               Sw({ on: draft.shareWithNote !== false, onChange: (v) => set('shareWithNote', v) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '续火花：每天给谁发一个表情包'),
                 Note('留空 = 不续。只发表情包，不主动发文字')),
-              h('input', { 'data-dy-input': '', style: { width: '150px' }, defaultValue: draft.streakNick ?? '',
+              h('input', { 'data-dy-input': '', style: { width: '150px' }, value: draft.streakNick ?? '',
                 placeholder: '对方昵称', onChange: (e) => set('streakNick', e.target.value) }),
               h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '80px' },
                 value: draft.streakPerDay ?? 1, onChange: (e) => set('streakPerDay', e.target.value.replace(/[^0-9]/g, '')) })),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '遇到不会的视频：评论里 @ 豆包'),
-                Note('默认关；开了会在评论里 @豆包 求解答')),
-              Sw({ on: Boolean(draft.askDoubao), onChange: (v) => set('askDoubao', v) })),
+                Note('当前本机模式未接入此动作；此项暂不执行，等待明确授权后接线')),
+              h('span', { 'data-dy-badge': '' }, '暂未接入')),
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '同一个人只回一次'),
                 Note('开着的话，同一个人后来的新评论也不回；默认关（每条评论回一次）')),
@@ -684,8 +692,8 @@ window.__ModuleLoader__.load({
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '随机挑（关掉=按顺序）')),
               Sw({ on: draft.replyRandom !== false, onChange: (v) => set('replyRandom', v) })),
             h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每隔多少分钟巡检一次'),
-                Note('默认 30 分钟，±20% 抖动（24~36 分钟）。到点做四件事：谷时窗口内刷一轮（一次挑几条）+ 续火花（每天 1 次）+ 看私信（只回名单里的人）+ 看评论（自动回开着才回）')),
+              h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '整个工作流多久跑一次（分钟）'),
+              Note('刷视频 + 转发吐槽 + 回自己视频评论，都在这一条里；默认 30 分钟一次，和私信秒回完全分开')),
               h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '80px' },
                 value: draft.replyIntervalMin ?? 30,
                 onChange: (e) => set('replyIntervalMin', e.target.value.replace(/[^0-9]/g, '')) })),
@@ -696,10 +704,11 @@ window.__ModuleLoader__.load({
                 placeholder: '7698403173999992485, 7699518545823148977',
                 onChange: (e) => set('replyVideoIds', e.target.value.replace(/[^0-9, ]/g, '')) })),
             h('div', { 'data-dy-row': '' },
-              h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'reply' ? '' : undefined, onClick: replyNow }, '现在回一轮'),
+              h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'reply'), onClick: replyNow }, '现在回一轮'),
               Note('你不用先保存，按当前填的条数就回'))) : null,
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动点赞'),
+            h('div', { 'data-dy-h': '' }, '互动闸门：点赞 / 评论 / 投稿'),
+          h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动点赞'),
               Note('值得的才点；要登录')),
             Sw({ on: Boolean(draft.autoLike), onChange: (v) => set('autoLike', v) })),
           h('div', { 'data-dy-row': '' },
@@ -709,7 +718,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动评论（不 @ 人）'),
               Note('就是普通评论一句，比如「这条我笑了[笑哭]」；和 @、转发 互斥，一个视频只做一件事')),
-            Sw({ on: draft.autoCommentPlain !== false, onChange: (v) => set('autoCommentPlain', v) })),
+            Sw({ on: Boolean(draft.autoCommentPlain), onChange: (v) => set('autoCommentPlain', v) })),
           draft.autoCommentPlain !== false ? h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每天最多几条普通评论')),
             h('input', { 'data-dy-input': '', 'data-dy-num': '', inputMode: 'numeric', style: { width: '70px' },
@@ -724,7 +733,7 @@ window.__ModuleLoader__.load({
               h('input', { 'data-dy-input': '', 'data-dy-num': '', type: 'number', min: 0, max: 20,
                 value: draft.commentPerRound ?? 1, onChange: (e) => set('commentPerRound', e.target.value.replace(/[^0-9]/g, '')) }))) : null,
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动发布视频'),
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '允许手动工具 / headless 投稿'),
               Note('片子从 ComfyUI 出（下面「高级」里配它的输出目录）；默认只存草稿，等你看一眼')),
             Sw({ on: Boolean(draft.autoPublish), onChange: (v) => set('autoPublish', v) })),
           draft.autoPublish ? h('div', { 'data-dy-sub': '' },
@@ -754,23 +763,106 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '默认话题'), Note('空格或逗号分隔，投稿时带上'))),
           h('input', { 'data-dy-input': '', value: draft.publishTags ?? '', placeholder: 'AI、日常',
             onChange: (e) => set('publishTags', e.target.value) }),
+        ),
 
+
+        /* ══════════ 私信 ══════════ */
+        h('div', { 'data-dy-sec': '', 'data-dy-group': 'dm', 'data-dy-away': tab === 'dm' ? undefined : '' },
+          h('div', { 'data-dy-h': '' }, '后台自动回复'),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'comfy' ? '' : undefined, onClick: listComfy },
-              comfyList !== null ? '收起成片列表' : '看 ComfyUI 最新成片'),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'publish' ? '' : undefined, onClick: publishLatest },
-              '把最新那条发出去'),
-            Note('「发出去」= 你自己点的，所以会真的走一遍投稿；草稿开关照样生效')),
-          comfyList !== null ? h('div', { 'data-dy-list': '' },
-            (comfyList.length ? comfyList : [{ name: '（输出目录里没有 .mp4）', mtimeText: '' }]).map((v, i) => h('div', { key: String(v.path || i), 'data-dy-item': '' },
-              h('div', { 'data-dy-item-t': '' }, String(v.name || '')),
-              h('div', { 'data-dy-item-n': '' }, `${v.mtimeText || ''}${v.size ? ' · ' + Math.round(v.size / 1024 / 1024) + 'MB' : ''}`)))) : null),
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '后台静默回私信'),
+              Note('每 5 秒看一次收件箱，有新消息就自动回；不占对话窗口')),
+            Sw({ on: Boolean(draft.dmAutoReply !== false), onChange: (v) => set('dmAutoReply', v) })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '多久看一次（秒）'),
+              Note('默认 15 秒；这就是「跟我聊天」这条，和下面的陌生人巡检完全分开')),
+            h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '90px' }, value: draft.dmAutoIntervalSec ?? 15,
+              onChange: (e) => set('dmAutoIntervalSec', Number(e.target.value) || 15) })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只回谁（昵称）')),
+            h('input', { 'data-dy-input': '', style: { width: '220px' }, value: draft.dmReplyOnlyTo ?? '',
+              onChange: (e) => set('dmReplyOnlyTo', e.target.value) })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '条数'),
+              Note('跟你聊天不设上限（白名单随便聊）'))),
+          h('div', { 'data-dy-row': '' },
+            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'dmtest'), onClick: async () => {
+              setBusy('dmtest'); setMsg('')
+              try {
+                const r = await jpost('/dm/test', { text: '测试：后台私信通道正常吗' })
+                setMsg(r.ok ? '测试消息已确认送达' : ('没发出去：' + String(r.error || '未知')))
+                setTone(r.ok ? 'good' : 'warn')
+              } catch (e) { setMsg('失败：' + String(e.message || e)); setTone('warn') } finally { setBusy('') }
+            } }, '发一条测试消息'),
+            Note('会真的发到「可以主动发消息的人」那里')),
+          h('div', { 'data-dy-h': '' }, '陌生人巡检（另一条，不影响上面）'),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动回陌生人私信'),
+              Note('就是原来那个「半小时巡检」；现在关着。开了只走主页面，不占聊天专用页')),
+            Sw({ on: Boolean(draft.dmReply), onChange: (v) => set('dmReply', v) })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每隔多少分钟巡一次')),
+            h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '90px' }, value: draft.replyIntervalMin ?? 30,
+              onChange: (e) => set('replyIntervalMin', Number(e.target.value) || 30) })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '陌生人每天最多回几条')),
+            h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '90px' }, value: draft.dmReplyPerDay ?? 0,
+              onChange: (e) => set('dmReplyPerDay', Number(e.target.value) || 0) })),
+
+          h('div', { 'data-dy-h': '' }, '今天的聊天记录'),
+          !dmInfo ? Note('切到这一页时读取…')
+            : (!dmInfo.log || !dmInfo.log.length
+              ? Note('今天还没有私信记录')
+              : h('div', { 'data-dy-list': '' }, dmInfo.log.slice().reverse().map((x, i) => h('div', { key: i, 'data-dy-item': '' },
+                h('div', { 'data-dy-item-t': '' }, `${x.name}：${String(x.text || '').slice(0, 30)}`),
+                h('div', { 'data-dy-item-n': '' }, '我: ' + String(x.text || '').slice(0, 40)),
+                h('div', { 'data-dy-item-n': '' }, (x.replied ? '大肥鱼: ' + String(x.replyText || '（已回，内容未记录）').slice(0, 40) : '⏳ 还没回') + ' · ' + new Date(x.at || 0).toLocaleTimeString()))))),
+
+          h('div', { 'data-dy-h': '' }, '最近回过的'),
+          !dmInfo ? Note('切到这一页时读取…')
+            : (dmInfo.recent && dmInfo.recent.length
+              ? h('div', { 'data-dy-list': '' }, dmInfo.recent.map((x) => h('div', { key: x.peer, 'data-dy-item': '' },
+                h('div', { 'data-dy-item-t': '' }, String(x.name || x.peer || '')),
+                h('div', { 'data-dy-item-n': '' }, `${x.day || ''} · 回了 ${x.count || 0} 次 · 最后一句：${String(x.lastReply || '').slice(0, 30)}`))))
+              : Note('还没有回过私信')),
+          h('div', { 'data-dy-row': '' },
+            h('button', { 'data-dy-btn': '', onClick: async () => {
+              try { await jpost('/dm/seen/clear', {}); setMsg('已清空已读记录'); setTone('good') } catch (e) { setMsg('清空失败：' + String(e.message || e)); setTone('warn') }
+            } }, '清空已读记录'),
+            Note('清空后，之前回过的消息可能被当成新消息再处理一次')),
+        ),
+
+        /* ══════════ 表情包 ══════════ */
+        h('div', { 'data-dy-sec': '', 'data-dy-group': 'sticker', 'data-dy-away': tab === 'sticker' ? undefined : '' },
+          h('div', { 'data-dy-h': '' }, '收藏的表情包（大肥鱼 17 张）'),
+          !stk ? Note('读取中…')
+            : (stk.custom && stk.custom.length
+              ? h('div', { 'data-dy-list': '' }, stk.custom.map((x) => h('div', { key: String(x.key || x.index), 'data-dy-item': '' },
+                h('div', { 'data-dy-item-t': '' }, `#${x.index}`),
+                h('div', { 'data-dy-item-n': '' }, (x.tags || []).join(' / ') || '（还没标签）'))))
+              : Note('没读到收藏表情（favorites2.json）')),
+          Note(`通用表情 ${stk?.emojiCount ?? '?'} 张也已逐张打标签，关键词命中就会用到`),
+          h('div', { 'data-dy-h': '' }, '按心情发一个试试'),
+          h('div', { 'data-dy-row': '' },
+            h('input', { 'data-dy-input': '', style: { width: '240px' }, placeholder: '心情词，比如 干饭 / 压力 / 666',
+              value: stkKeyword, onChange: (e) => setStkKeyword(e.target.value) }),
+            h('button', { 'data-dy-btn': '', 'data-primary': '', onClick: async () => {
+              setMsg('')
+              try {
+                const r = await jpost('/stickers/test', { keyword: stkKeyword })
+                setMsg(r.ok ? '表情包已发出（已确认）' : ('没发出去：' + String(r.error || '未知')))
+                setTone(r.ok ? 'good' : 'warn')
+              } catch (e) { setMsg('失败：' + String(e.message || e)); setTone('warn') }
+            } }, '发这个'),
+            Note('发到「可以主动发消息的人」那里')),
+        ),
 
         /* ══════════ 高级 ══════════ */
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'adv', 'data-dy-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'save' ? '' : undefined, onClick: save }, '保存'),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'check' ? '' : undefined, onClick: selfcheck }, '环境自检'),
+            h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'check'), onClick: selfcheck }, '环境自检'),
             h('button', { 'data-dy-btn': '', onClick: showLog }, logTail !== null ? '收起日志' : '看日志')),
 
           checks && checks.length ? h('div', { 'data-dy-list': '' }, checks.map((x) => h('div', { key: x.name, 'data-dy-item': '' },
@@ -779,12 +871,38 @@ window.__ModuleLoader__.load({
             x.ok ? null : h('div', { 'data-dy-item-n': '' }, '怎么办：' + (x.fix || '把诊断信息发给作者'))))) : null,
           logTail !== null ? h('pre', { 'data-dy-pre': '' }, logTail) : null,
 
+          h('div', { 'data-dy-h': '' }, '执行与转写'),
+          Note('两种模式都经宿主检查额度、对象名单和重复发送。未确认发送会显示待核对，不自动重发。'),
+          [['localRound','本机运行'],['watchBeforeAct','互动前先看片转写'],['memory','记录记忆'],['overlayMcp','headless 挂 MCP'],['replyOneShot','指定回复作品只用一次']].map(([k, label]) => h('div', { key: k, 'data-dy-row': '' },
+            h('span', null, label),
+            Sw({ on: Boolean(draft[k]), onChange: v => set(k, v) }))),
+
+          h('div', { 'data-dy-h': '' }, '路径与运行参数'),
+          Note('一般不用动；留空就让插件自己找。'),
+          [
+            ['pythonPath', 'Python 路径', '转写/依赖用的解释器，留空=自动找'],
+            ['dshBin', 'DSH 启动脚本', '只有 headless 模式用，留空=自动找当前安装'],
+            ['headlessProfile', 'headless 用的 profile', '默认 headless'],
+            ['headlessModel', 'headless 用的模型', '留空=跟随默认模型'],
+            ['workspace', 'headless 工作目录', '留空=用插件家目录'],
+            ['chromePath', 'Chrome 路径', '留空=自动找系统 Chrome'],
+            ['cdpUrl', 'CDP 地址', '留空=用插件自己的浏览器（推荐）；想复用你已登录的 Chrome 才填'],
+            ['cdpPort', 'CDP 端口', '默认 9222'],
+            ['watchSeconds', '看片最多听多少秒', '默认 90 秒'],
+            ['watchFrames', '看片抽多少帧', '默认 10 帧；按整片均匀抽，越多越慢'],
+            ['pickPerRound', '一轮挑几条', '默认 2'],
+            ['myNickname', '我的昵称', '回读评论时用来认出自己'],
+          ].map(([k, label, hint]) => h('div', { key: k, 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, label), hint ? Note(hint) : null),
+            h('input', { 'data-dy-input': '', style: { width: '300px' }, value: draft[k] ?? '',
+              onChange: e => set(k, ['cdpPort','watchSeconds','watchFrames','pickPerRound'].includes(k) ? Number(e.target.value) : e.target.value) }))),
+
           /* ⭐ 主依赖（照「刷B站」那页：装主依赖 + 安装日志） */
           h('div', { 'data-dy-h': '' }, '主依赖（Python 半边：MCP + Playwright）'),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'setup' ? '' : undefined, onClick: doSetup }, '装主依赖（建 venv）'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'setup'), onClick: doSetup }, '装主依赖（建 venv）'),
             h('button', { 'data-dy-btn': '', onClick: showSetupLog }, setupLog !== null ? '收起安装日志' : '看安装日志'),
-            Note('装的是 mcp<2 + playwright（用系统 Chrome，不下载浏览器）')),
+            Note('安装 MCP、Playwright、numpy、faster-whisper；ffmpeg 和模型状态需再运行环境自检。')),
           setupLog !== null ? h('pre', { 'data-dy-pre': '' }, setupLog) : null,
 
           /* ⭐ 它的地盘（家目录 / 今天的报告 / 打开文件夹） */
@@ -792,7 +910,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-dy-note': '' }, `家目录：${st.home}`),
           h('div', { 'data-dy-note': '' }, `今天的报告：${st.report}`),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'report' ? '' : undefined, onClick: showReport }, report !== null ? '收起报告' : '看今天的报告'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'report'), onClick: showReport }, report !== null ? '收起报告' : '看今天的报告'),
             h('button', { 'data-dy-btn': '', onClick: () => openDir('out') }, '打开报告文件夹'),
             h('button', { 'data-dy-btn': '', onClick: () => openDir('home') }, '打开家目录'),
             h('button', { 'data-dy-btn': '', onClick: () => { try { navigator.clipboard && navigator.clipboard.writeText(String(st.report || '')); setMsg('报告路径已复制'); setTone('good') } catch (e) { setMsg('复制失败') } } }, '复制报告路径')),
@@ -800,26 +918,13 @@ window.__ModuleLoader__.load({
 
           h('div', { 'data-dy-h': '' }, '账号与浏览器'),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'login' ? '' : undefined, onClick: loginStart }, '扫码登录'),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'poll' ? '' : undefined, onClick: loginPoll }, '我扫完了'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'login'), onClick: loginStart }, '扫码登录'),
+            h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'poll'), onClick: loginPoll }, '我扫完了'),
             Note(st.loggedIn ? '已经登录了' : '没登录也能用：热榜 / 视频详情 / 评论；搜索、点赞、评论、投稿要登录')),
           qr?.qr ? h('div', { 'data-dy-qr': '' },
             h('img', { src: qr.qr, alt: '抖音登录二维码' }),
             h('div', { 'data-dy-note': '' }, '手机抖音 → 扫一扫。', h('br'), '确认时选「长期 / 记住我」那张。')) : null,
-
-          h('div', { 'data-dy-h': '' }, 'ComfyUI（片子从哪儿来）'),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '地址')),
-            h('input', { 'data-dy-input': '', style: { width: '240px' }, value: draft.comfyUrl ?? '',
-              onChange: (e) => set('comfyUrl', e.target.value) })),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '输出目录（取最新的 .mp4）'),
-              Note(st.comfy?.outputDirExists ? '目录存在' : '目录不存在，发布前改对')),
-            h('input', { 'data-dy-input': '', style: { width: '300px' }, value: draft.comfyOutputDir ?? '',
-              onChange: (e) => set('comfyOutputDir', e.target.value) })),
-          h('div', { 'data-dy-row': '' }, h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '工作流 JSON（可选，填了就先生成再发）'))),
-          h('textarea', { 'data-dy-input': '', 'data-dy-area': '', value: draft.comfyWorkflow ?? '',
-            placeholder: '留空 = 直接发输出目录里最新的那个 mp4', onChange: (e) => set('comfyWorkflow', e.target.value) })),
+        ),
       )
     }
 
@@ -913,31 +1018,16 @@ window.__ModuleLoader__.load({
           const conn = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) || ctx.connection
           if (!conn?.rpc?.call) throw new Error('没有 connection.rpc')
           const raw = await conn.rpc.call('/api', 'memory.' + method, params || {})
+          if (raw && typeof raw === 'object' && raw.ok === false) throw new Error(String(raw.error?.message || raw.error || raw.message || '记忆服务返回失败'))
           if (raw && typeof raw === 'object' && 'ok' in raw) return raw.value !== undefined ? raw.value : raw
           return raw
-        }
-
-        // ⭐ 2026-10-26 修（下载的人报「读取不到记忆」）：
-        //   「记忆」页里的 图谱 / 角色卡 / 时间线 用的是**记忆系统插件**的 memory.* RPC。
-        //   别人只装这个抖音插件、没装记忆系统时，那几条 RPC 根本不存在 ⇒ 页面直接红字「读取失败」。
-        //   这里先探一次并缓存结论：装了 = 完整记忆页；没装 = 退回本插件自己的 <家>/memory/*.md，
-        //   只给「原始记录」+ 人设，绝不报错。
-        let memSysState = 'unknown'   // unknown | on | off
-        const memSysProbe = async (force) => {
-          if (force) memSysState = 'unknown'
-          if (memSysState !== 'unknown') return memSysState === 'on'
-          try {
-            const r = await memCall('stats', {})
-            if (r == null || (typeof r === 'object' && r.ok === false)) throw new Error('memory-system 没装')
-            memSysState = 'on'
-          } catch { memSysState = 'off' }
-          return memSysState === 'on'
         }
 
         const MemTabs = [
           { id: 'graph', label: '图谱' },
           { id: 'character', label: '角色卡' },
           { id: 'timeline', label: '时间线' },
+          { id: 'clean', label: '清理' },
           { id: 'raw', label: '原始记录' },
         ]
 
@@ -956,19 +1046,16 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dym-k' }, k), h('span', null, String(v ?? '—')))
 
         // 真正兜住渲染异常：Comp 在 React 里被调用时才会执行，所以必须在组件内部 try
-        const Guard = ({ Comp, props, label }) => {
-          try {
-            return h(Comp, props || {})
-          } catch (e) {
-            try {
-              fetch('/api/douyin-duty/log', {
-                method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ msg: 'memory render failed @' + (label || '?') + ': ' + String(e && e.message), stack: String((e && e.stack) || '') }),
-              }).catch(() => {})
-            } catch { /* 忽略 */ }
-            return h('div', { className: 'dym-card', style: { color: '#e06', whiteSpace: 'pre-wrap' } },
-              '【' + (label || '组件') + '】渲染出错：' + String((e && e.message) || e) + '\n' + String((e && e.stack) || '').split('\n').slice(0, 4).join('\n'))
+        class Guard extends React.Component {
+          constructor(props) { super(props); this.state = { error: null } }
+          static getDerivedStateFromError(error) { return { error } }
+          componentDidCatch(error) {
+            fetch('/api/douyin-duty/log', { method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msg: '记忆组件渲染失败：' + String(error) }) }).catch(() => {})
+          }
+          render() {
+            if (this.state.error) return h('div', { className: 'dym-card', role: 'alert' }, '页面读取失败：' + String(this.state.error.message || this.state.error))
+            return h(this.props.Comp, this.props.props || {})
           }
         }
 
@@ -1171,7 +1258,7 @@ window.__ModuleLoader__.load({
                 background: 'transparent', color: 'inherit' },
             }),
             h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '8px' } },
-              h('button', { className: 'dym-tab on', disabled: busy2 ? '' : undefined, onClick: save }, busy2 ? '保存中…' : '保存人设'),
+              h('button', { className: 'dym-tab on', disabled: Boolean(busy2), onClick: save }, busy2 ? '保存中…' : '保存人设'),
               msg ? h('span', { style: { fontSize: '12px', opacity: 0.8 } }, msg) : null))
         }
 
@@ -1216,6 +1303,10 @@ window.__ModuleLoader__.load({
                 constraints: String(val(refCons) || '').split('\n').map((s) => s.trim()).filter(Boolean),
               }
               await memCall('character', { action: 'update', updates })
+              const checked = await memCall('character', { action: 'read' })
+              const actual = checked?.character || checked
+              if (actual?.identity?.name !== updates.identity.name || actual?.preferences?.communication_style !== updates.preferences.communication_style ||
+                  JSON.stringify(actual?.constraints || []) !== JSON.stringify(updates.constraints)) throw new Error('回读与保存内容不一致')
               setMsg('已保存（已回读核对）')
               if (onSaved) onSaved()
             } catch (e) { setBad(true); setMsg('保存失败：' + String((e && e.message) || e)) } finally { setSaving(false) }
@@ -1284,6 +1375,100 @@ window.__ModuleLoader__.load({
               : h(Card, null, busy ? '读取中…' : (q ? '没有匹配的记忆' : '（还没有回忆条目）')))
         }
 
+        // 清理：按工作区列出记忆条目，能单条删、也能整区清空（走 memory.forget）
+        const Cleanup = () => {
+          const [list, setList] = React.useState(null)
+          const [open, setOpen] = React.useState('')
+          const [items, setItems] = React.useState({})
+          const [msg, setMsg] = React.useState('')
+          const [busy3, setBusy3] = React.useState(false)
+
+          const loadWs = async () => {
+            try { setList(await memCall('workspaces', {})) } catch (e) { setMsg('读工作区失败：' + String(e && e.message || e)) }
+          }
+          React.useEffect(() => { loadWs() }, [])
+
+          const loadItems = async (wid) => {
+            if (items[wid]) return
+            try {
+              const r = await memCall('workspace_detail', { workspace_id: wid, limit: 300 })
+              setItems({ ...items, [wid]: (r && r.items) || [] })
+            } catch (e) { setMsg('读条目失败：' + String(e && e.message || e)) }
+          }
+
+          const delOne = async (wid, id) => {
+            setBusy3(true); setMsg('')
+            try {
+              await memCall('forget', { id })
+              setItems({ ...items, [wid]: (items[wid] || []).filter((x) => x.id !== id) })
+              setMsg('已删除 1 条')
+              loadWs()
+            } catch (e) { setMsg('删除失败：' + String(e && e.message || e)) } finally { setBusy3(false) }
+          }
+
+          const delAll = async (wid, label) => {
+            setBusy3(true); setMsg('')
+            try {
+              let deleted = 0
+              const failed = new Set()
+              for (let page = 0; page < 100; page++) {
+                const r = await memCall('workspace_detail', { workspace_id: wid, limit: 500 })
+                if (!Array.isArray(r?.items)) throw new Error('记忆服务条目格式无效')
+                const rows = r.items.filter(x => !failed.has(x.id))
+                if (!rows.length) break
+                let progress = 0
+                for (const it of rows) {
+                  try { await memCall('forget', { id: it.id }); deleted++; progress++ } catch { failed.add(it.id) }
+                }
+                if (!progress) break
+              }
+              const after = await memCall('workspace_detail', { workspace_id: wid, limit: 500 })
+              if (!Array.isArray(after?.items)) throw new Error('删除后无法回读')
+              setItems(prev => ({ ...prev, [wid]: after.items }))
+              setMsg('已删除 ' + deleted + ' 条；失败 ' + failed.size + ' 条；当前仍可读到 ' + after.items.length + ' 条')
+              await loadWs()
+            } catch (e) { setMsg('清理未完成：' + String(e && e.message || e)) } finally { setBusy3(false) }
+          }
+
+          if (!list) return h('div', { className: 'dym-card' }, '工作区读取中…')
+          const wss = list.workspaces || list.results || list || []
+          return h('div', null,
+            h('div', { className: 'dym-card', style: { fontSize: '12px', opacity: 0.85 } },
+              '想清掉哪些记忆就点开对应工作区；删掉后会同步删每日 md 里那一行（记忆插件自己做的）。'),
+            msg ? h('div', { className: 'dym-card', style: { color: '#0a0' } }, msg) : null,
+            (wss || []).map((w) => {
+              const wid = w.id || w.workspace_id || ''
+              const label = w.label || wid || '（未命名）'
+              const count = w.count ?? w.total ?? 0
+              const isOpen = open === wid
+              return h('div', { key: wid, className: 'dym-card' },
+                h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+                  h('button', {
+                    className: 'dym-tab' + (isOpen ? ' on' : ''),
+                    onClick: () => { const nx = isOpen ? '' : wid; setOpen(nx); if (nx) loadItems(nx) },
+                  }, isOpen ? '收起' : '展开'),
+                  h('span', { style: { fontWeight: 600 } }, label),
+                  h('span', { className: 'dym-chip' }, count + ' 条'),
+                  h('span', { style: { marginLeft: 'auto' } },
+                    h('button', {
+                      className: 'dym-tab', disabled: Boolean(busy3),
+                      onClick: () => delAll(wid, label),
+                    }, '整区清空'))),
+                isOpen ? h('div', { style: { marginTop: '8px' } },
+                  (items[wid] || []).length
+                    ? (items[wid] || []).map((it) => h('div', {
+                        key: it.id, style: { display: 'flex', gap: '8px', alignItems: 'flex-start',
+                          padding: '6px 0', borderTop: '1px dashed rgba(128,128,128,.2)' },
+                      },
+                      h('span', { style: { fontSize: '11px', opacity: 0.5, minWidth: '64px' } }, String(it.created_at || '').slice(5, 16)),
+                      h('span', { style: { flex: 1, fontSize: '12px' } }, String(it.content || '').slice(0, 160)),
+                      h('button', { className: 'dym-tab', disabled: Boolean(busy3),
+                        onClick: () => delOne(wid, it.id) }, '删')))
+                    : h('div', { style: { fontSize: '12px', opacity: 0.6 } }, '（这一区没有条目了）'))
+                : null)
+            }))
+        }
+
         const MemoryPage = () => { try {
           const [tab, setTab] = React.useState('graph')
           const [char, setChar] = React.useState(null)
@@ -1293,29 +1478,18 @@ window.__ModuleLoader__.load({
           const [stats, setStats] = React.useState(null)
           const [err, setErr] = React.useState('')
           const [busy, setBusy] = React.useState(false)
-          const [memOn, setMemOn] = React.useState(null)   // null=还没探完 / true=有记忆系统插件 / false=没装
-
-          // 「原始记录」= 本插件自己的 <家>/memory/*.md，不依赖任何别的插件，永远能读
-          const rawFallback = async () => {
-            try {
-              const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
-              setRaw(await r.json())
-            } catch {
-              setRaw({ ok: false, lines: [], files: [], hint: '读 <家>/memory/*.md 失败（可能是权限或插件还没激活）' })
-            }
-          }
 
           const load = React.useCallback(async (force) => {
             setBusy(true); setErr('')
-            const on = await memSysProbe(Boolean(force))
-            setMemOn(on)
             try {
-              if (!on) { await rawFallback(); return }   // 没装记忆系统 ⇒ 只读本地 md，不报错
               if (force || stats === null) { try { setStats(await memCall('stats', {})) } catch { /* 忽略 */ } }
               if (tab === 'character' && (force || char === null)) setChar(await memCall('character', { action: 'read' }))
               if (tab === 'timeline' && (force || tl === null)) setTl(await memCall('recall', { limit: 80 }))
               if (tab === 'graph' && (force || g === null)) setG(await memCall('graph', { limit: 60, min_importance: 0.03 }))
-              if (tab === 'raw' && (force || raw === null)) await rawFallback()
+              if (tab === 'raw' && (force || raw === null)) {
+                const r = await fetch('/api/douyin-duty/memory', { credentials: 'same-origin' })
+                setRaw(await r.json())
+              }
             } catch (e) { setErr(String((e && e.message) || e)) } finally { setBusy(false) }
           }, [tab, char, tl, g, raw, stats])
           React.useEffect(() => { load(false) }, [tab])
@@ -1335,31 +1509,22 @@ window.__ModuleLoader__.load({
           return h('div', { className: 'dym-root' },
             h('div', { className: 'dym-head' },
               h('span', { className: 'dym-title' }, '记忆'),
-              h('span', { className: 'dym-badge' }, memOn === false ? '本地 memory/*.md' : 'memory-system'),
+              h('span', { className: 'dym-badge' }, 'memory-system'),
               h('div', { className: 'dym-chips' },
-                memOn === true
-                  ? h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆')
-                  : h('span', { className: 'dym-chip' }, h('b', null, (raw && raw.lines || []).length || '–'), ' 条本地记录'),
-                memOn === true ? h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点') : null,
-                memOn === true ? h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系') : null)),
+                h('span', { className: 'dym-chip' }, h('b', null, stats?.total_memories ?? '–'), ' 条记忆'),
+                h('span', { className: 'dym-chip' }, h('b', null, (g?.nodes || []).length || '–'), ' 节点'),
+                h('span', { className: 'dym-chip' }, h('b', null, (g?.edges || []).length || '–'), ' 关系'))),
             h('div', { className: 'dym-tabs' },
-              (memOn === true ? MemTabs : [{ id: 'raw', label: '原始记录' }]).map((t2) => h('button', {
-                key: t2.id,
-                className: 'dym-tab' + ((memOn === true ? tab : 'raw') === t2.id ? ' on' : ''),
-                onClick: () => setTab(t2.id),
+              MemTabs.map((t2) => h('button', {
+                key: t2.id, className: 'dym-tab' + (tab === t2.id ? ' on' : ''), onClick: () => setTab(t2.id),
               }, t2.label)),
               h('button', { className: 'dym-tab', onClick: () => load(true) }, busy ? '刷新中…' : '刷新')),
-            err && memOn === true ? h(Card, null, '读取失败：' + err) : null,
-            memOn === null ? h(Card, null, busy ? '读取中…' : '点「刷新」重试') : null,
-            memOn === false ? h(Card, null,
-              h('div', null, '没装「记忆系统」插件：图谱 / 角色卡 / 时间线这三样是它提供的，所以这一页现在只显示本插件自己攒的记忆（<家>/memory/*.md）。'),
-              h('div', { style: { opacity: 0.62, marginTop: '6px', fontSize: '12px' } },
-                '想让这里变成完整记忆面板，装一下 可选记忆插件 插件再回来点「刷新」；不装也完全不影响刷抖音。')) : null,
-            memOn === true && tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
-            memOn === true && tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
-            memOn === true && tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
-            (memOn === false || (memOn === true && tab === 'raw')) ? rawBody() : null,
-            memOn === false ? h(PersonaBox, null) : null,
+            err ? h(Card, null, '读取失败：' + err) : null,
+            tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
+            tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
+            tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
+            tab === 'clean' ? h(Guard, { Comp: Cleanup, props: {}, label: '清理' }) : null,
+            tab === 'raw' ? rawBody() : null,
           )
         } catch (e) {
           try {
@@ -1377,24 +1542,7 @@ window.__ModuleLoader__.load({
       }
 
         // 兜底：任何渲染异常都画成红字，不再白屏（2026-10-26 使用者连续两次看到空白）
-        const MemorySafe = () => {
-          try {
-            return h(MemoryPage)
-          } catch (e) {
-            try { console.error('[douyin-memory] render failed', e) } catch { /* 忽略 */ }
-            try {
-              fetch('/api/douyin-duty/log', {
-                method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ msg: 'memory render failed: ' + String(e && e.message), stack: String(e && e.stack || '') }),
-              }).catch(() => {})
-            } catch { /* 忽略 */ }
-            return h('div', { className: 'dym-root', style: { padding: '12px' } },
-              h('div', { className: 'dym-title' }, '记忆页渲染出错'),
-              h('div', { className: 'dym-card', style: { color: '#e06', whiteSpace: 'pre-wrap' } },
-                String((e && e.stack) || (e && e.message) || e)))
-          }
-        }
+        const MemorySafe = () => h(Guard, { Comp: MemoryPage, label: '记忆页' })
 
         slots.inject('settings.section', () => slots.register(
           { name: 'settings.section', id: 'douyin-memory', order: 32, label: '记忆' },

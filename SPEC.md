@@ -5,6 +5,19 @@
 
 本文件是**唯一接口契约**。两个实现方（MCP 半边 / 宿主半边）都按它写，不得擅自改名字。
 
+## 0.2.1 当前约束（优先于下方历史说明）
+
+- 宿主公开 31 个 dy_* 工具；客户端设置页使用相同的受控入口。
+- 写动作需要 ok=true 且 verified=true。pending/unknown 保留额度且不自动重发；明确失败才允许重试。
+- headless 的 MCP 受白名单与 DOUYIN_ALLOW_WRITES 控制，并经 DOUYIN_PROXY_URL 的带凭证回环入口执行；宿主重新核对开关、完整昵称、作品所有权、额度和幂等性。headless 不能传 force 绕过检查。
+- 账本 schemaVersion=2，保留 published/comments/replies/shares/plainComments/dm/actions/picks。JSON 原子替换；并发跨入口使用账号锁。
+- 报告是展示文件；picks 是选择事实。首次迁移旧报告时按日期+视频 ID 去重，之后编辑报告不影响额度。state.count 是轮数。
+- 评论确认需要本次提交后请求的 POST 回执、匹配的作品/父评论 ID 和 CID；私信、表情和分享需要新增出站消息证据。
+- 公开普通评论、自动私信在新安装中默认关闭。已有显式设置保留。
+- 本机使用转写摘录模板；persona.md 与 personaPrompt 用于模型模式。@豆包和本机自动投稿暂未接线。草稿转发布当前要求在创作者中心人工确认，不重新上传同一素材。
+- 临时音轨在任务结束清理；Whisper 在可终止子进程中运行；缓存 v2 按视频、取样预算和模型区分。
+- 代码修复与线上进程加载分开验收，状态 build.loadedMcp 返回实际进程 PID、脚本路径、源码 hash。没有调用过新版 MCP 时该项可能为空。
+
 ## 0. 目录
 
 ```
@@ -27,7 +40,7 @@
 
 ## 1. 家目录
 
-`%USERPROFILE%\.dsh\douyin-duty\`（Windows）或 `$DSH_HOME/douyin-duty/`
+`%USERPROFILE%\.dsh\douyin-duty\`（Windows）或 `~/.dsh/douyin-duty/`，仅 DSH_DOUYIN_HOME 可显式覆盖
 
 ```
 config.json            # 宿主写；loadCfg 读
@@ -131,7 +144,7 @@ export function apply(ctx, config) { ... }
 - 地址 `comfyUrl`（默认 `http://127.0.0.1:8188`）。
 - `dy_comfy_list`：读 `comfyOutputDir`（默认 `E:\Comfy-Desktop\ComfyUI-Shared\output`）里最近 N 个 `.mp4`（按 mtime）。
 - `dy_publish(latest: true)`：取最新一个 mp4 → 调 `douyin_publish`。
-- 可选 `comfyWorkflow`：给了就先 `POST /prompt` 排队、轮询 `/history/<id>` 等出片，再取最新文件。
+- 可选 `comfyWorkflow`：给了就先 `POST /prompt` 排队、轮询 `/history/<id>` 等出片，只取该 prompt_id 的唯一有效 MP4 输出。
   ⚠️ 显卡在采样时不要做重活；这里只排队和读文件，不做转码。
 
 ## 5. duty.md 口径
@@ -146,6 +159,6 @@ export function apply(ctx, config) { ... }
 
 1. `node --check index.js`、`python -m py_compile vendor/douyin-mcp/mcp_server.py` 通过。
 2. `python vendor/douyin-mcp/mcp_server.py --selftest` 能在没有登录的情况下跑完并打印 JSON（`needLogin`）。
-3. 宿主半边能用 stub ctx 冒烟：注册出 14 个工具、HTTP 路由挂上、`dy_status` 返回结构正确。
+3. 宿主半边能用 stub ctx 冒烟：注册出 31 个工具、HTTP 路由挂上、`dy_status` 返回结构正确。
 4. 装进 `<DSH_HOME>\profiles\desktop`：`dependencies` 加 `link:D:/jev-decision-kit/plugins/dsh-douyin-life`，
    `dsh.profile.bundles` 加 `dsh-douyin-life`，`node_modules` 里建到源码目录的 junction。**重启 dsh 后生效。**

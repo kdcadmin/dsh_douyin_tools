@@ -35,6 +35,7 @@
     "cordis.patch.yml",
     "lib/",
     "prompts/",
+    "docs/AGENT_ONBOARDING.md",
     "vendor/douyin-mcp/mcp_server.py",
     "vendor/douyin-mcp/requirements.txt",
     "README.md",

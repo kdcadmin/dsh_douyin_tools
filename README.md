@@ -4,38 +4,54 @@
 > 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
 > 另一头接他自己的 **ComfyUI** 出片，把成片发到抖音。
 
-**装法**：从插件市场 / npm 装，或把源码目录 link 进 profile。设置页有「刷抖音」一页（**日常 / 偏好 / 互动 / 高级** 四个 tab），左侧还有「记忆」一页（本插件自己攒的 `memory/*.md`；装了 `可选记忆插件` 才升级成完整记忆面板）。
+**装法**：从插件市场 / npm 装，或把源码目录 link 进 profile。设置页有「刷抖音」一页（**日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级** 六个 tab），左侧还有「记忆」一页（**插件自带**记忆 `<家>/memory/*.md` + 人设 `persona.md`，不依赖任何记忆插件）。
+
+![封面](assets/cover.png)
 
 接口契约见 [`SPEC.md`](./SPEC.md)。发布说明见 [`PUBLISH.md`](./PUBLISH.md)。
+
+## 第一次用：把这份交给你的 agent
+
+装好后别自己在设置页瞎点。把下面这句发给你的 AI：
+
+> 读一下 `dsh-douyin-life` 的 `docs/AGENT_ONBOARDING.md`（在你本机 DSH 的插件目录 `node_modules/dsh-douyin-life/docs/` 里），按它把登录、记忆/人设、私信和表情包配好。
+
+那份文档是**写给 agent 看的**：Chrome 怎么检测/安装/自动打开、扫码和短信验证码怎么登、
+默认记忆/人设怎么用（不用装记忆插件）、收藏表情包怎么巡检、没有收藏时怎么用关键字兜底、
+哪些写动作默认关着不许碰、出问题怎么排查。
 
 ---
 
 ## 界面
 
-设置页在 **DSH → 设置 → 刷抖音**，四个 tab：日常 / 偏好 / 互动 / 高级。
+设置页在 **DSH → 设置 → 刷抖音**，六个 tab：日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级。
 
-> **「记忆」页是单独一块，不依赖别的插件**：只装这个抖音插件时，它显示本插件自己攒的
-> `<家>/memory/*.md` + 人设（`persona.md`）；装了 `可选记忆插件` 插件后，才会多出
-> 图谱 / 角色卡 / 时间线 这些标签。**没装记忆插件不会再报「读取失败 / 读取不到记忆」。**
+> **记忆和人设是插件自带的，不依赖任何记忆插件**：默认记忆写在 `<家>/memory/YYYY-MM.md`，
+> 人设是 `<家>/persona.md`（+ `personaPrompt`），下一轮开头会带上最近记忆。
+> 需要的话可以接入你自己的记忆系统（见 [`docs/AGENT_ONBOARDING.md`](./docs/AGENT_ONBOARDING.md) 的「记忆与人设」一节）；
+> 不接也完全不影响使用。
 
 ### 日常
 ![日常](docs/screenshots/01-日常.png)
 
-### 偏好
-![偏好](docs/screenshots/02-偏好.png)
+### 刷视频
+![刷视频](docs/screenshots/02-刷视频.png)
 
 ### 互动
 ![互动上](docs/screenshots/03-互动-上.png)
 
 ![互动下](docs/screenshots/04-互动-下.png)
 
-![投稿](docs/screenshots/05-互动-投稿.png)
+### 私信
+![私信](docs/screenshots/05-私信.png)
+
+### 表情包
+![表情包](docs/screenshots/06-表情包.png)
 
 ### 高级
-![高级](docs/screenshots/06-高级.png)
+![高级上](docs/screenshots/07-高级-上.png)
 
-### 它刷过的视频（按日期分组，卡片可点进原片）
-![刷过的视频](docs/screenshots/07-刷过的视频.png)
+![高级下](docs/screenshots/08-高级-下.png)
 
 ## 1. 装
 
@@ -48,8 +64,9 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 # 之后重启一次 dsh 才生效
 ```
 
-首次启用后跑一次 `dy_login_start` 扫码登录（或 `dy_login_sms` 验证码登录）。
-登录态只落在插件自己的浏览器 profile 里，不上传任何地方。
+首次启用后：先 `dy_chrome_open` 拉起一个带调试端口的 Chrome（默认 http://127.0.0.1:9222），首次在里面扫码 / 验证码登录；
+连不上就退回插件自己的 profile，用 `dy_login_start` 出二维码 PNG 扫码。完整步骤见 [`docs/AGENT_ONBOARDING.md`](docs/AGENT_ONBOARDING.md)。
+登录态只落在本机，不上传任何地方。
 
 **「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright`（用系统 Chrome，不下载浏览器）→ `环境自检`。
 
@@ -66,6 +83,10 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `duty.log` | 一行一件事（每次工具调用、每轮结果都有一行） |
 | `out/YYYY-MM-DD.md` | 每轮日报（按 `### <视频id>` 记） |
 | `ledger.json` | 账本：回过的评论 cid、发过的评论、转发过的视频、私信次数 |
+| `memory/YYYY-MM.md` | **默认记忆**（视频观察、私信对话、续火花…） |
+| `persona.md` | 人设（手写正文 + 每天自动补的「最近观察」段） |
+| `dm-log/YYYY-MM-DD.json` | 私信聊天记录（谁、说了什么、回没回） |
+| `.need-captcha` | 验证码标记：有它时浏览器切「带界面」 |
 | `replied-cids.txt` / `replied-users.txt` | 去重索引（评论 cid / 已回过的用户） |
 | `thumbs/` | 缩略图（卡片用，30 天自动清） |
 | `media/` | 看片时抽的音轨 + 转写缓存 `*.json`（音轨每天清，json 留着省得重下） |
@@ -80,7 +101,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 
 ---
 
-## 3. 工具（30 个 `dy_*`）
+## 3. 工具（35 个 `dy_*`）
 
 ### 读 / 看
 | 工具 | 干什么 |
@@ -106,7 +127,9 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `dy_share` | **转发视频给某人**（悬停出分享面板→点那行的「分享」），随后同一会话发「一句话 + 一个表情包」 | 名字在「可以主动发消息的人」里，或 `force: true` |
 | `dy_chat_send` | 私信发一句（续火花用） | 同上 |
 | `dy_chat_sticker` | 私信发表情包（关键词联想，可 `flip` 换一批） | 同上 |
-| `dy_dm_round` | 看一遍私信：谁发来新消息就回一句（每人/每天限额） | `dmReply` |
+| `dy_dm_inbox` | **只读**私信收件箱（谁发的、内容预览） | — |
+| `dy_dm_poll` | 手动跑一次后台秒回巡检（有新的就回一句） | `dmAutoReply` |
+| `dy_dm_round` | 旧的「看一遍私信回一句」：模板短句 + 每日额度 | `dmReply` |
 | `dy_reply_round` | 回我自己视频下的新评论 | `autoReply` |
 | `dy_reply` | 回复某一条指定评论 | `autoReply` |
 | `dy_publish` | 投稿（`video_path` 或 `latest: true`）；自动勾「内容由 AI 生成」，默认存草稿 | `autoPublish` 或 `force: true` |
@@ -166,7 +189,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 
 ---
 
-## 6. 设置字段（四个 tab）
+## 6. 设置字段（六个 tab）
 
 ### 日常
 | 字段 | 默认 | 说明 |
@@ -199,12 +222,13 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `autoLike` | false | 自动点赞 |
 | `autoComment` + `mentionName` | false / `''` | 评论并 @ 你 |
 | `commentPerDay` | 10 | 每天最多几条 @ 评论 |
-| `autoCommentPlain` / `plainCommentPerDay` | true / 10 | 自动评论（**不 @ 人**）/ 每天最多几条 |
+| `autoCommentPlain` / `plainCommentPerDay` | false / 10 | 自动评论（**不 @ 人**）/ 每天最多几条 |
 | `shareToNick` / `sharePerDay` | `''` / 10 | 转发给谁 / 每天最多转发几条（与评论互斥） |
 | `shareNote` | `''` | 转发时附带的一句话（空 = 按看片内容/类型自动生成） |
 | `msgAllowTo` | `''` | **可以主动发消息的人**（昵称逗号分隔；空 = 谁都不主动发） |
 | `dmReplyOnlyTo` | `''` | **只回谁的私信**（昵称，逗号分隔，可多人；空 = 谁发来都回） |
-| `dmReply` | true | 自动回私信 |
+| `dmReply` | false | 自动回**陌生人**私信（模板短句） |
+| `dmAutoReply` / `dmAutoIntervalSec` | true / 15 | 后台秒回**白名单**私信 / 多少秒看一次 |
 | `dmReplyPerContact` / `dmReplyPerDay` | 1 / 5 | 每个联系人每天回几条 / 每天合计 |
 | `streakNick` / `streakPerDay` | `''` / 1 | 续火花发给谁 / 每天几次 |
 | `askDoubao` | false | 遇到不会的视频在评论里 @ 豆包 求解答 |
@@ -256,7 +280,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | 抖音没登录 | `{ok:false, needLogin:true, hint}` |
 | 评论发不出去 | **回读确认**不到就报失败；连续失败 2 次当轮停止评论（点赞/转发照做） |
 | ComfyUI 目录不存在 / 出片超时 | `dy_comfy_list` 给 `exists:false`；`dy_publish` 给 `ok:false` + 怎么改 |
-| 设置 → 记忆 报「读取失败 / 读取不到记忆」（0.2.0 及更早） | 那几版把 图谱 / 角色卡 / 时间线 当成「记忆系统」插件的功能却直接去调 `memory.*`，没装就报错。**0.2.1 起：没装记忆插件就自动退回本地 `memory/*.md` + 人设，不再报错**；装了 `可选记忆插件` 会变成完整面板。更新后重启一次 dsh |
+| 设置 → 记忆 报「读取失败 / 读取不到记忆」（0.2.0 及更早） | 那几版把 图谱 / 角色卡 / 时间线 当成「记忆系统」插件的功能却直接去调 `memory.*`，没装就报错。**0.2.1 起：没装可选记忆插件就自动退回本地 `memory/*.md` + 人设，不再报错**。更新后重启一次 dsh |
 
 加载路径每一步都包 `try/catch`：**插件加载失败比少个功能糟得多**。
 
@@ -265,7 +289,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 ## 9. 自检
 
 ```bash
-node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（30 个）/ 路由通 / 结构对 / 闸门默认关
+node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（35 个）/ 路由通 / 结构对 / 闸门默认关
 ```
 
 ---
@@ -274,12 +298,11 @@ node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（30 个）
 
 > 只做补充说明，前面章节的结构和内容没动。
 
-**记忆页：没装记忆系统插件不再报「读取不到记忆」（2026-10-26 修）**
+**记忆页：没装可选记忆插件也能用（2026-10-26 修）**
 
-- `client.js`：`memory.*` RPC 先探一次（结论缓存，点「刷新」可重探）。没装 `可选记忆插件` 时只显示
-  「原始记录」+ 人设编辑，不再红字「读取失败」；装了记忆插件就自动升级成 图谱 / 角色卡 / 时间线。
-- `index.js`：`/api/douyin-duty/memory` 不再写死本机的 `<DSH_HOME>\memory-system\memory.db`（别人机器上没这路径），
-  改成按 **DSH 家目录 → `$DSH_HOME` → `%USERPROFILE%\.dsh`** 去找，找不到就不显示库信息，读 md 照旧。
+- `client.js`：`memory.*` RPC 先探一次（结论缓存，点「刷新」可重探）。没装可选记忆插件时只显示
+  「原始记录」+ 人设编辑，不再红字「读取失败」；装了就会自动升级成 图谱 / 角色卡 / 时间线。
+- `index.js`：`/api/douyin-duty/memory` 不再写死某台机器的库路径，改成按 **DSH 家目录 → `$DSH_HOME` → `%USERPROFILE%\.dsh`** 去找，找不到就不显示库信息，读 md 照旧。
 - 顺手把 `package.json` 里的 `repository` / `homepage` 指回本仓库（原来指向 `jev-decision-kit/plugins/...`，那目录是 gitignore 的，点进去 404）。
 
 **节奏：谷时那一轮并入巡检定时器（只有一个间隔参数）**

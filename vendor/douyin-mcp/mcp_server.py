@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextvars import ContextVar
 import base64
 import hashlib
+import functools
+import inspect
 import json
 import os
 import re
@@ -118,14 +121,16 @@ def j(obj) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+RUNTIME = {"version": "0.2.1", "pid": os.getpid(), "script": str(Path(__file__).resolve()), "scriptHash": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+
 def _ok(**kw):
-    d = {"ok": True}
+    d = {"ok": True, "runtime": RUNTIME}
     d.update(kw)
     return d
 
 
 def _err(msg: str, **kw):
-    d = {"ok": False, "error": msg}
+    d = {"ok": False, "error": msg, "runtime": RUNTIME}
     d.update(kw)
     return d
 
@@ -266,6 +271,8 @@ class BrowserManager:
         self._ctx = None
         self._browser = None
         self._own_page = None
+        self._chat_page = None
+        self.owned_pages = set()
         self.mode = "profile"          # profile | cdp
         self.cdp_note = ""
         self.lock = asyncio.Lock()
@@ -282,7 +289,10 @@ class BrowserManager:
     async def context(self):
         if self._ctx is not None:
             try:
-                _ = self._ctx.pages  # 活着就不会抛
+                if self._browser is not None and not self._browser.is_connected():
+                    raise RuntimeError("CDP 已断连")
+                if self._browser is None and not self._ctx.pages:
+                    raise RuntimeError("浏览器上下文已关闭")
                 return self._ctx
             except Exception:
                 self._ctx = None
@@ -302,6 +312,8 @@ class BrowserManager:
         #    抢输的那个 launch 直接 TargetClosedError ⇒ 读不到 cookie ⇒ 报告里写成 "needLogin"（其实是锁冲突）。
         #    解法：插件自己固定一个调试端口；端口通就连它（共享同一个浏览器），不通才由本进程拉起。
         try:
+            if CDP_URL:
+                raise RuntimeError("优先使用显式 CDP 地址")
             self._browser = await self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{SHARED_PORT}", timeout=3000)
             self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context(locale="zh-CN")
             self._ctx.set_default_timeout(15000)
@@ -348,14 +360,13 @@ class BrowserManager:
                 log(f"已连上本人 Chrome：{CDP_URL}（登录态直接用）")
                 return self._ctx
             except Exception as exc:  # noqa: BLE001
-                self.cdp_note = f"CDP 连不上（{type(exc).__name__}: {exc}）⇒ 退回插件自己的 profile"
-                log(self.cdp_note)
                 try:
                     await self._pw.stop()
                 except Exception:
                     pass
-                self._pw = await async_playwright().start()
+                self._pw = None
                 self._browser = None
+                raise RuntimeError(f"显式 CDP 地址不可用，未切换账号：{CDP_URL}") from exc
         try:
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(PROFILE_DIR),
@@ -387,20 +398,22 @@ class BrowserManager:
         log(f"Chrome 起来了：profile={PROFILE_DIR} headless={HEADLESS}")
         return self._ctx
 
+    async def page_chat(self):
+        """私信/聊天专用的第二个标签页：刷视频那一页在跑的时候，回消息不抢同一个页面。"""
+        ctx = await self.context()
+        if self._chat_page is not None and not self._chat_page.is_closed():
+            return self._chat_page
+        self._chat_page = await ctx.new_page()
+        return self._chat_page
+
     async def page(self):
         ctx = await self.context()
-        # cdp / shared 模式：浏览器可能是别人的，别去动人家的标签页，自己开一个
-        if self.mode in ("cdp", "shared"):
-            if self._own_page is not None and not self._own_page.is_closed():
-                return self._own_page
-            self._own_page = await ctx.new_page()
+        if self._own_page is not None and not self._own_page.is_closed():
             return self._own_page
-        for p in ctx.pages:
-            if p.url and not p.url.startswith("about:"):
-                return p
-        if ctx.pages:
-            return ctx.pages[0]
-        return await ctx.new_page()
+        self.owned_pages.discard(self._own_page)
+        self._own_page = await ctx.new_page()
+        self.owned_pages.add(self._own_page)
+        return self._own_page
 
     async def close(self) -> None:
         # cdp / shared 模式：只关我们开的那一个标签页 + 断开连接，
@@ -409,9 +422,12 @@ class BrowserManager:
         try:
             if shared and self._own_page is not None and not self._own_page.is_closed():
                 await self._own_page.close()
+            if shared and self._chat_page is not None and not self._chat_page.is_closed():
+                await self._chat_page.close()
         except Exception:
             pass
         self._own_page = None
+        self.owned_pages.clear()
         try:
             if self._ctx is not None and not shared:
                 await self._ctx.close()
@@ -435,25 +451,68 @@ class BrowserManager:
 _browser = BrowserManager()
 
 
-async def _guard(factory, timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """拿锁 + 超时 + 异常兜底。factory 是一个无参协程函数。"""
-    async def _inner():
+_OPERATION = ContextVar("douyin_operation", default=None)
+
+
+def _submitted():
+    operation = _OPERATION.get()
+    if operation is not None:
+        operation["submitted"] = True
+
+
+async def _guard(factory, timeout=DEFAULT_TIMEOUT):
+    operation = {"submitted": False}
+    async def inner():
         async with _browser.lock:
-            return await factory()
-
+            token = _OPERATION.set(operation)
+            try:
+                return await factory()
+            finally:
+                _OPERATION.reset(token)
     try:
-        return await asyncio.wait_for(_inner(), timeout=timeout)
+        return await asyncio.wait_for(inner(), timeout=timeout)
     except asyncio.TimeoutError:
-        log(f"timeout after {timeout:.0f}s")
-        return _err(f"超时：{timeout:.0f}s 内抖音页面没给出结果（可稍后重试）", timeout=timeout)
-    except Exception as exc:  # noqa: BLE001
+        return _err("操作超时", status="unknown" if operation["submitted"] else "failed", timeout=timeout)
+    except Exception as exc:
         log(traceback.format_exc())
-        return _err(f"{type(exc).__name__}: {exc}")
+        if "needLogin:" in str(exc):
+            return _need_login(str(exc))
+        return _err(f"{type(exc).__name__}: {exc}", status="unknown" if operation["submitted"] else "failed")
 
 
-# ---------------------------------------------------------------------------
-# Playwright 小工具
-# ---------------------------------------------------------------------------
+CAPTCHA_FLAG = HOME / ".need-captcha"
+
+
+def _captcha_flag_set() -> bool:
+    try:
+        return CAPTCHA_FLAG.exists()
+    except Exception:
+        return False
+
+
+async def _note_captcha(page) -> bool:
+    """看到抖音验证码就留个标记，插件那边会据此把浏览器切到「带界面」，等本人手动过。"""
+    try:
+        hit = await page.evaluate("""() => {
+            // 只认「真的显示出来」的验证码框：抖音页面里常驻一个隐藏的 verify iframe，不能据此判断
+            const fs = Array.from(document.querySelectorAll('iframe[src*="nocaptcha"], iframe[src*="captcha"], [class*="captcha"]'));
+            return fs.some((e) => {
+                const r = e.getBoundingClientRect();
+                const st = getComputedStyle(e);
+                return r.width > 120 && r.height > 120 && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.1;
+            });
+        }""")
+    except Exception:
+        hit = False
+    try:
+        if hit:
+            CAPTCHA_FLAG.write_text(str(time.time()), encoding="utf-8")
+        elif CAPTCHA_FLAG.exists():
+            CAPTCHA_FLAG.unlink()
+    except Exception:
+        pass
+    return bool(hit)
+
 
 async def _goto(page, url: str, settle: float = 3.0) -> None:
     """跳页面，容忍抖音常见的 ERR_ABORTED / 连接被重置（重试两次，最后用 commit 兜底）。"""
@@ -613,7 +672,7 @@ async def _login_state(page, ctx) -> dict:
         # 头像没有 alt 时从 DOM 里找一下，找不到就留空，不编
         try:
             nickname = await page.evaluate(
-                """() => {
+                r"""() => {
                     const img = document.querySelector('header img[src*="aweme-avatar"]');
                     if (img && img.alt) return img.alt;
                     const el = document.querySelector('[data-e2e="user-avatar"]');
@@ -641,7 +700,18 @@ class Net:
         self.matcher = matcher
         self.items: list[dict] = []
         self._tasks: set[asyncio.Task] = set()
+        self.operation = _OPERATION.get()
+        self.submitted_requests = set()
+        self.requires_submission = False
+        page.on("request", self._on_request)
         page.on("response", self._on)
+
+    def _on_request(self, request):
+        try:
+            if self.operation and self.operation.get("submitted") and self.matcher(request.url):
+                self.submitted_requests.add(request)
+        except Exception:
+            pass
 
     def _on(self, resp) -> None:
         try:
@@ -667,7 +737,8 @@ class Net:
                 return
             data = json.loads(body)
             if isinstance(data, dict):
-                self.items.append({"url": url.split("?")[0], "data": data})
+                self.items.append({"url": url.split("?")[0], "data": data, "method": resp.request.method,
+                                   "afterSubmit": resp.request in self.submitted_requests})
         except Exception:
             return
 
@@ -675,6 +746,8 @@ class Net:
         end = time.time() + timeout
         while time.time() < end:
             for item in list(self.items):
+                if self.requires_submission and not item.get("afterSubmit"):
+                    continue
                 try:
                     if predicate(item["url"], item["data"]):
                         return item
@@ -686,11 +759,13 @@ class Net:
     def close(self) -> None:
         try:
             self.page.remove_listener("response", self._on)
+            self.page.remove_listener("request", self._on_request)
         except Exception:
             pass
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
+        self.submitted_requests.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -847,31 +922,7 @@ async def _search_core(page, keyword: str, num: int, order: str) -> dict:
 
         # DOM 兜底（互动数拿不到，不编，用 0 + notes 说明）
         dom_items = await page.evaluate(
-            """() => {
-                const seen = new Set(); const out = [];
-                const anchors = Array.from(document.querySelectorAll(
-                    '[data-e2e="scroll-list"] a[href*="/video/"], a[href*="/video/"]'
-                ));
-                for (const a of anchors) {
-                    const m = (a.href || '').match(/\\/video\\/(\\d{6,})/);
-                    if (!m || seen.has(m[1])) continue;
-                    seen.add(m[1]);
-                    let card = a.closest('li') || a.closest('[data-e2e="search-result-card"]');
-                    if (!card) { let p = a; for (let i = 0; i < 4 && p.parentElement; i++) p = p.parentElement; card = p; }
-                    const img = (card || a).querySelector('img');
-                    const text = ((card && card.innerText) || a.innerText || '').trim();
-                    out.push({
-                        aweme_id: m[1],
-                        title: ((img && img.alt) || text.split('\\n')[0] || '').slice(0, 120),
-                        author: '',
-                        digg: 0, comment: 0, share: 0, duration: 0,
-                        url: 'https://www.douyin.com/video/' + m[1],
-                        cover: (img && img.src) || '',
-                        _text: text.slice(0, 300)
-                    });
-                }
-                return out;
-            }"""
+            '() => {\n                const seen = new Set(); const out = [];\n                const anchors = Array.from(document.querySelectorAll(\n                    \'[data-e2e="scroll-list"] a[href*="/video/"], a[href*="/video/"]\'\n                ));\n                for (const a of anchors) {\n                    const m = (a.href || \'\').match(/\\/video\\/(\\d{6,})/);\n                    if (!m || seen.has(m[1])) continue;\n                    seen.add(m[1]);\n                    let card = a.closest(\'li\') || a.closest(\'[data-e2e="search-result-card"]\');\n                    if (!card) { let p = a; for (let i = 0; i < 4 && p.parentElement; i++) p = p.parentElement; card = p; }\n                    const img = (card || a).querySelector(\'img\');\n                    const text = ((card && card.innerText) || a.innerText || \'\').trim();\n                    out.push({\n                        aweme_id: m[1],\n                        title: ((img && img.alt) || text.split(\'\\n\')[0] || \'\').slice(0, 120),\n                        author: \'\',\n                        digg: 0, comment: 0, share: 0, duration: 0,\n                        url: \'https://www.douyin.com/video/\' + m[1],\n                        cover: (img && img.src) || \'\',\n                        _text: text.slice(0, 300)\n                    });\n                }\n                return out;\n            }'
         )
         if dom_items:
             notes.append("搜索结果来自 DOM 兜底：互动数/作者没取到，已留 0")
@@ -918,35 +969,7 @@ async def _video_core(page, aweme_id: str) -> dict:
 
         # DOM 兜底
         dom = await page.evaluate(
-            """() => {
-                const info = document.querySelector('[data-e2e="detail-video-info"]');
-                const id = (info && info.getAttribute('data-e2e-aweme-id'))
-                    || ((location.pathname.match(/\\/video\\/(\\d+)/) || [])[1] || '');
-                const title = (info && info.querySelector('h1') && info.querySelector('h1').innerText.trim())
-                    || (document.title || '').replace(/\\s*-\\s*抖音$/, '');
-                const authorImg = document.querySelector('[data-e2e="user-info"] img[alt]');
-                const num = t => {
-                    if (!t) return 0;
-                    t = String(t).replace(/,/g, '').trim();
-                    let m = 1;
-                    if (t.endsWith('万')) { m = 10000; t = t.slice(0, -1); }
-                    else if (t.endsWith('亿')) { m = 100000000; t = t.slice(0, -1); }
-                    const v = parseFloat(t);
-                    return isNaN(v) ? 0 : Math.round(v * m);
-                };
-                const digg = document.querySelector('[data-e2e="video-player-digg"]');
-                const cmt = document.querySelector('[data-e2e="feed-comment-icon"]');
-                const share = document.querySelector('[data-e2e="video-player-share"]');
-                const pub = document.querySelector('[data-e2e="detail-video-publish-time"]');
-                return {
-                    aweme_id: id, title: title, desc: title,
-                    author: (authorImg && authorImg.alt) || '',
-                    digg: num(digg && digg.innerText),
-                    comment_count: num(cmt && cmt.innerText),
-                    share: num(share && share.innerText),
-                    publish_time: pub ? pub.innerText.replace('发布时间：', '').trim() : ''
-                };
-            }"""
+            '() => {\n                const info = document.querySelector(\'[data-e2e="detail-video-info"]\');\n                const id = (info && info.getAttribute(\'data-e2e-aweme-id\'))\n                    || ((location.pathname.match(/\\/video\\/(\\d+)/) || [])[1] || \'\');\n                const title = (info && info.querySelector(\'h1\') && info.querySelector(\'h1\').innerText.trim())\n                    || (document.title || \'\').replace(/\\s*-\\s*抖音$/, \'\');\n                const authorImg = document.querySelector(\'[data-e2e="user-info"] img[alt]\');\n                const num = t => {\n                    if (!t) return 0;\n                    t = String(t).replace(/,/g, \'\').trim();\n                    let m = 1;\n                    if (t.endsWith(\'万\')) { m = 10000; t = t.slice(0, -1); }\n                    else if (t.endsWith(\'亿\')) { m = 100000000; t = t.slice(0, -1); }\n                    const v = parseFloat(t);\n                    return isNaN(v) ? 0 : Math.round(v * m);\n                };\n                const digg = document.querySelector(\'[data-e2e="video-player-digg"]\');\n                const cmt = document.querySelector(\'[data-e2e="feed-comment-icon"]\');\n                const share = document.querySelector(\'[data-e2e="video-player-share"]\');\n                const pub = document.querySelector(\'[data-e2e="detail-video-publish-time"]\');\n                return {\n                    aweme_id: id, title: title, desc: title,\n                    author: (authorImg && authorImg.alt) || \'\',\n                    digg: num(digg && digg.innerText),\n                    comment_count: num(cmt && cmt.innerText),\n                    share: num(share && share.innerText),\n                    publish_time: pub ? pub.innerText.replace(\'发布时间：\', \'\').trim() : \'\'\n                };\n            }'
         )
         if dom and dom.get("aweme_id") and dom.get("title"):
             notes.append("视频详情来自 DOM 兜底（没抓到 aweme/detail XHR）")
@@ -984,7 +1007,7 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
         for _ in range(4):
             try:
                 await page.evaluate(
-                    """() => {
+                    r"""() => {
                         const box = document.querySelector('[data-e2e="comment-list"]')
                             || document.querySelector('[class*="comment"]');
                         if (box && box.parentElement) box.parentElement.scrollTop = box.parentElement.scrollHeight;
@@ -995,7 +1018,7 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
                 pass
             await page.wait_for_timeout(1500)
         items = await page.evaluate(
-            """(num) => {
+            r"""(num) => {
                 const out = [];
                 const nodes = Array.from(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="CommentItem"]'));
                 for (const n of nodes) {
@@ -1023,6 +1046,70 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
         return []
 
 
+async def _fetch_reply_children(page, aweme_id: str, parent_cid: str) -> list[dict]:
+    """取某条评论的回复列表（父 cid 为空时退回一级评论列表），用来做发表后的回执确认。"""
+    try:
+        if parent_cid:
+            data = await page.evaluate("""async ({aid, cid}) => {
+                const q = '/aweme/v1/web/comment/list/reply/?device_platform=webapp&aid=6383&channel=channel_pc_web'
+                    + '&item_id=' + aid + '&comment_id=' + cid + '&cursor=0&count=50&item_type=0';
+                const ctl = new AbortController();
+                const t = setTimeout(() => ctl.abort(), 12000);
+                try {
+                    const r = await fetch(q, {credentials: 'include', signal: ctl.signal});
+                    clearTimeout(t);
+                    return r.ok ? await r.json() : null;
+                } catch (e) { clearTimeout(t); return null; }
+            }""", {"aid": aweme_id, "cid": parent_cid})
+        else:
+            data = await page.evaluate("""async (aid) => {
+                const q = '/aweme/v1/web/comment/list/?device_platform=webapp&aid=6383&channel=channel_pc_web'
+                    + '&aweme_id=' + aid + '&cursor=0&count=50&item_type=0';
+                const ctl = new AbortController();
+                const t = setTimeout(() => ctl.abort(), 12000);
+                try {
+                    const r = await fetch(q, {credentials: 'include', signal: ctl.signal});
+                    clearTimeout(t);
+                    return r.ok ? await r.json() : null;
+                } catch (e) { clearTimeout(t); return null; }
+            }""", aweme_id)
+        return [_parse_comment(c) for c in ((data or {}).get("comments") or [])]
+    except Exception:
+        return []
+
+
+async def _fetch_comments_api(page, aweme_id: str, num: int = 30) -> list[dict]:
+    """直接问评论接口要一级评论（图文作品常常不抛 XHR，DOM 里也没有 cid，这条最稳）。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    cursor = 0
+    rounds = max(1, min(int(num or 30), 100) // 20 + 3)
+    for _ in range(rounds):
+        try:
+            data = await page.evaluate("""async ({aid, cursor}) => {
+                const url = '/aweme/v1/web/comment/list/?device_platform=webapp&aid=6383&channel=channel_pc_web'
+                    + '&aweme_id=' + aid + '&cursor=' + cursor + '&count=20&item_type=0';
+                const r = await fetch(url, {credentials: 'include'});
+                if (!r.ok) throw new Error('comment HTTP ' + r.status);
+                return await r.json();
+            }""", {"aid": aweme_id, "cursor": cursor})
+        except Exception:
+            break
+        if not isinstance(data, dict) or data.get("status_code") not in (0, None):
+            break
+        for c in (data.get("comments") or []):
+            cid = str((c or {}).get("cid") or "")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            out.append(_parse_comment(c))
+        if not data.get("has_more") or len(out) >= num:
+            break
+        cursor = int(data.get("cursor") or (cursor + 20))
+        await page.wait_for_timeout(400)
+    return out[:num]
+
+
 async def _comments_core(page, aweme_id: str, num: int) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
@@ -1038,7 +1125,7 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
         # ⭐ 2026-10-26：类型以 aweme_type 为准（68/211/150 = 图文；0/55 = 视频），页面没 <video> 只当辅助信号
         try:
             det = await detail_net.wait_for(lambda u, d: bool(d.get("aweme_detail")), timeout=3.0)
-            item = (det or {}).get("aweme_detail") or {}
+            item = ((det or {}).get("data") or {}).get("aweme_detail") or {}
             if isinstance(item, dict) and item.get("aweme_type") is not None:
                 _AWEME_TYPE_CACHE[aid] = int(item.get("aweme_type"))
         except Exception:
@@ -1054,6 +1141,10 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
             is_note_now = False
         if is_note_now and not got:
             await page.wait_for_timeout(1500)
+            api_items = await _fetch_comments_api(page, aid, num)
+            if api_items:
+                notes.append(f"图文作品：评论接口直接拿到 {len(api_items)} 条（含 cid）")
+                return _ok(aweme_id=aid, count=len(api_items), items=api_items, notes=notes, source="api")
             dom_items = await _scrape_comments_dom(page, num)
             if dom_items:
                 notes.append(f"图文作品：直接 DOM 抠到 {len(dom_items)} 条")
@@ -1097,7 +1188,7 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
             if not clicked:
                 try:
                     await page.evaluate(
-                        """() => {
+                        r"""() => {
                             const list = document.querySelector('[data-e2e="comment-list"]');
                             if (list && list.parentElement) { list.parentElement.scrollTop = list.parentElement.scrollHeight; }
                             window.scrollBy(0, 1400);
@@ -1111,7 +1202,11 @@ async def _comments_core(page, aweme_id: str, num: int) -> dict:
                 break
 
         if not comments:
-            # ⭐ DOM 兜底：有些作品（尤其图文）不抛 /comment/list/，只能从面板里抠
+            # ⭐ 先试直连接口（含 cid），不行再从面板里抠
+            api_items = await _fetch_comments_api(page, aid, num)
+            if api_items:
+                notes.append(f"接口没抛 XHR，直连评论接口拿到 {len(api_items)} 条（含 cid）")
+                return _ok(aweme_id=aid, count=len(api_items), items=api_items, notes=notes, source="api")
             dom_items = await _scrape_comments_dom(page, num)
             if dom_items:
                 notes.append(f"接口没给，改成从页面里抠到 {len(dom_items)} 条")
@@ -1421,7 +1516,7 @@ async def _digg_state(page, aweme_id: str) -> dict:
     """
     try:
         info = await page.evaluate(
-            """() => {
+            r"""() => {
                 const el = document.querySelector("[data-e2e='video-player-digg']");
                 if (!el) return {present: false};
                 const r = el.getBoundingClientRect();
@@ -1469,20 +1564,21 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
                        state=dom["state"], verified=True,
                        note="本来就是目标状态，没动")
 
+        _submitted()
         note = ""
         if dom["visible"]:
             try:
                 await page.locator("[data-e2e='video-player-digg']").first.click(timeout=5000)
                 note = "点了页面上的点赞按钮"
             except Exception as exc:  # noqa: BLE001
-                note = f"按钮点击失败（{type(exc).__name__}），改 JS 直点"
+                return _err(f"点击过程异常，未重复点击：{type(exc).__name__}: {exc}", status="unknown", aweme_id=aid)
         else:
             note = "点赞按钮 rect=0×0（互动栏 display:none），改用 JS 直点"
 
         if not note.startswith("点了页面"):
             # JS 派发 click 不受 display:none 影响：事件照走，抖音照样发请求
             await page.evaluate(
-                """() => {
+                r"""() => {
                     const el = document.querySelector("[data-e2e='video-player-digg']");
                     if (el) el.click();
                 }"""
@@ -1504,7 +1600,7 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
             return _need_login("点了点赞但弹出登录框：登录态失效了，重新扫码", aweme_id=aid)
         return _err("点了但 data-e2e-state 没翻转（可能被风控/页面结构变了）",
                     aweme_id=aid, liked=final.get("liked"),
-                    before=dom["state"], after=final.get("state"), note=note)
+                    status="unknown", before=dom["state"], after=final.get("state"), note=note)
 
     # 页面上压根没有这个节点
     if undo:
@@ -1515,6 +1611,7 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
         if await vid.count() == 0:
             return _err("页面里没有 video 元素，点赞按钮也找不到", aweme_id=aid)
         await vid.scroll_into_view_if_needed(timeout=3000)
+        _submitted()
         await vid.dblclick(timeout=5000, force=True)
     except Exception as exc:  # noqa: BLE001
         return _err(f"找不到点赞按钮，双击兜底也失败：{type(exc).__name__}: {exc}", aweme_id=aid)
@@ -1526,8 +1623,8 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
                    verified=True, note="没有按钮节点，双击视频点赞（状态已核对）")
     if after["present"]:
         return _err("双击了但状态仍是未点赞（这条视频可能不支持双击点赞）",
-                    aweme_id=aid, state=after["state"])
-    return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", aweme_id=aid)
+                    aweme_id=aid, status="unknown", state=after["state"])
+    return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", status="unknown", aweme_id=aid)
 
 
 async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, mention: str = "", reply_index: int = -1) -> dict:
@@ -1541,6 +1638,7 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         return _err("text 太长（抖音评论一般 ≤ 500 字）")
 
     net = Net(page, _is_comment_publish_url)
+    net.requires_submission = True
     cmt_net = Net(page, _is_comment_list_url)
     notes: list[str] = []
     try:
@@ -1597,7 +1695,7 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
             )
             if not pos or not pos.get("ok"):
                 diag = await page.evaluate(
-                    """() => {
+                    r"""() => {
                         const all = Array.from(document.querySelectorAll('div,span,a,button'));
                         const hit = all.filter((e) => (e.textContent || '').indexOf('回复') >= 0)
                             .map((e) => ((e.textContent || '').trim().slice(0, 12) + ' @' + e.tagName + ' ' + (e.className || '').toString().slice(0, 16)))
@@ -1622,23 +1720,94 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                         ordered.append(cid)
             if str(reply_cid) in ordered:
                 idx = ordered.index(str(reply_cid))
+            api_text = ""
+            if idx is None:
+                # 图文作品不抛 /comment/list/ 这个 XHR：直接问接口拿顺序，再按序号映射回 DOM
+                try:
+                    api_items = await _fetch_comments_api(page, aid, 50)
+                except Exception:
+                    api_items = []
+                api_ordered = [str(x.get("cid") or "") for x in api_items if x.get("cid")]
+                api_text = next((str(x.get("text") or "") for x in api_items
+                                 if str(x.get("cid")) == str(reply_cid)), "")
+                if api_ordered and str(reply_cid) in api_ordered:
+                    ordered = api_ordered
+                    idx = api_ordered.index(str(reply_cid))
             if idx is None:
                 return _err(
-                    f"找不到 cid={reply_cid} 对应的评论（DOM 不暴露 cid，且它不在已加载的评论里）",
+                    f"找不到 cid={reply_cid} 对应的评论（DOM 不暴露 cid，接口里也没有）",
                     aweme_id=aid, notes=notes,
                 )
-            items = page.locator("[data-e2e='comment-item']")
-            if await items.count() <= idx:
-                return _err(f"评论序号 {idx} 超出页面已渲染的条数", aweme_id=aid)
-            target = items.nth(idx)
+            # 先把评论面板打开（图文页默认可能没展开）
             try:
-                await target.scroll_into_view_if_needed(timeout=2000)
-                await target.hover(timeout=2000)
-                reply_btn = target.get_by_text("回复", exact=True).first
-                await reply_btn.click(timeout=4000)
-                await page.wait_for_timeout(600)
+                panel_visible = await page.evaluate(r"""() => {
+                    const l = document.querySelector('[data-e2e="comment-list"]');
+                    return !!(l && l.getClientRects().length);
+                }""")
+            except Exception:
+                panel_visible = False
+            if not panel_visible:
+                try:
+                    icon = page.locator("[data-e2e='feed-comment-icon'],[data-e2e*='comment-icon']").first
+                    if await icon.count():
+                        await icon.click(timeout=5000)
+                        await page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+
+            items = page.locator("[data-e2e='comment-item']")
+            source_comment = next((c for item in cmt_net.items for c in item["data"].get("comments", [])
+                                   if str(c.get("cid")) == str(reply_cid)), None)
+            need_text = str((source_comment or {}).get("text") or api_text or "").strip()
+            target = None
+            if need_text:
+                # DOM 不暴露 cid，而且渲染顺序可能和接口顺序不一致 ⇒ 按正文找（只要可见的），找不到就滚
+                for _ in range(12):
+                    cnt = await items.count()
+                    for i in range(cnt):
+                        it = items.nth(i)
+                        try:
+                            if not await it.is_visible():
+                                continue
+                            if need_text[:20] in (await it.inner_text()):
+                                target = it
+                                break
+                        except Exception:
+                            continue
+                    if target is not None:
+                        break
+                    try:
+                        await page.evaluate(r"""() => {
+                            const l = document.querySelector('[data-e2e="comment-list"]');
+                            if (l) l.scrollTop = l.scrollHeight;
+                            window.scrollBy(0, 900);
+                        }""")
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(1200)
+                if target is None:
+                    return _err("评论面板里没找到这条评论（滚了 12 屏），未回复", aweme_id=aid, notes=notes)
+            else:
+                if await items.count() <= idx:
+                    return _err(f"评论序号 {idx} 超出页面已渲染的条数", aweme_id=aid)
+                target = items.nth(idx)
+
+            try:
+                # Playwright 的 scroll_into_view 要求元素本来就可见；先用 JS 滚进视野，再 JS 点「回复」
+                await target.evaluate("el => el.scrollIntoView({block: 'center'})")
+                await page.wait_for_timeout(700)
+                clicked = await target.evaluate("""el => {
+                    const btns = Array.from(el.querySelectorAll('div,span,button'))
+                        .filter(b => (b.innerText || '').trim() === '回复' && b.getClientRects().length);
+                    if (!btns.length) return false;
+                    btns[btns.length - 1].click();
+                    return true;
+                }""")
+                if not clicked:
+                    return _err("这条评论里没找到「回复」按钮", aweme_id=aid)
+                await page.wait_for_timeout(900)
             except Exception as exc:
-                notes.append(f"点「回复」失败：{type(exc).__name__}: {exc}（改为发顶层评论）")
+                return _err(f"回复入口不可用：{type(exc).__name__}: {exc}", aweme_id=aid)
 
         box = await _first_of(page, [
             "[data-e2e='comment-input']",
@@ -1682,6 +1851,10 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
         except Exception:
             pass
 
+        await box.click(timeout=3000)
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+
         # ⭐ @ 真人提醒（2026-10-23 实测跑通）：打 "@昵称" → 等联想面板 → 点那一行（整行，207×88 那种）
         #    纯文本 @ 不算提醒；必须点到候选项，编辑器里才会变成真正的 mention。
         mention = str(mention or "").strip().lstrip("@")
@@ -1692,13 +1865,13 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                 await page.keyboard.type("@" + mention, delay=55)
                 await page.wait_for_timeout(2400)
                 rows = await page.evaluate(
-                    """(nick) => {
+                    r"""(nick) => {
                         const els = Array.from(document.querySelectorAll('div,li,span'));
                         const out = [];
                         els.forEach((e) => {
                             const t = (e.innerText || '').trim();
                             const r = e.getBoundingClientRect();
-                            if (!t || t.indexOf(nick) < 0) return;
+                            if (!t || !Array.from(e.querySelectorAll("span,a,div")).some(n => (n.textContent||"").trim() === nick)) return;
                             if (r.width < 150 || r.width > 280 || r.height < 40 || r.height > 110) return;
                             out.push({ t, x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 });
                         });
@@ -1706,14 +1879,14 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                     }""",
                     mention,
                 )
-                if rows:
+                if len(rows) == 1:
                     await page.mouse.click(rows[0]["x"] + 10, rows[0]["y"] + rows[0]["h"] / 2)
                     await page.wait_for_timeout(800)
                     notes.append(f"点了 @ 联想面板里的「{rows[0]['t']}」")
                 else:
-                    notes.append("打了 @ 但没等到联想面板（只能按纯文本发）")
+                    return _err("没有找到唯一的 @ 候选，未发送", aweme_id=aid)
             except Exception as exc:
-                notes.append(f"@ 联想失败：{type(exc).__name__}: {exc}")
+                return _err(f"@ 联想失败：{type(exc).__name__}: {exc}", aweme_id=aid)
 
         typed = False
         try:
@@ -1727,207 +1900,67 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                 typed = True
             except Exception:
                 return _err("评论内容填不进去", aweme_id=aid, notes=notes)
-        # 打完之后核对一下，编辑器里到底有没有字（2026-10-23：不核对就会出现"看起来打了、其实空的"）
+        # Submit exactly once. An absent acknowledgement is unknown, never a retry.
         try:
-            got = (await box.inner_text())[:60]
+            before_cmt_text = await page.evaluate("""() => {
+                const l = document.querySelector('[data-e2e="comment-list"]');
+                return (l ? l.innerText : document.body.innerText) || '';
+            }""")
         except Exception:
-            got = ""
-        notes.append(f"编辑器里的字：{got!r}")
-
-        # @ 提醒：打出来的 @昵称 是纯文本，抖音不会自动成 mention；这里先如实记一笔
-        if "@" in text:
-            notes.append("正文里的 @ 是纯文本（抖音桌面端不自动转成 @提醒）")
-
-        await page.wait_for_timeout(400)
-        sent = False
-        # ⭐ 2026-10-25：抖音桌面端**没有发送按钮**，打完字按回车就发（实测编辑器会清空）
+            before_cmt_text = ""
         try:
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(2200)
-            left = await box.inner_text() if hasattr(box, "inner_text") else ""
-            if not str(left or "").strip():
-                sent = True
-                notes.append("回车提交，编辑器已清空")
-        except Exception as exc:
-            notes.append(f"回车提交失败：{type(exc).__name__}")
-        # ① 点「工具条最右边那个 36px 图标」——实测这就是发送钮（无文字、红色圆/箭头）
-        try:
-            btn = await page.evaluate(
-                """() => {
-                    const ed = document.querySelector('div.public-DraftEditor-content');
-                    if (!ed) return null;
-                    let box = ed;
-                    for (let i = 0; i < 7 && box.parentElement; i++) box = box.parentElement;
-                    const nodes = Array.from(box.querySelectorAll('span,button,div'))
-                        .map((e) => ({ r: e.getBoundingClientRect() }))
-                        .filter((x) => x.r.width >= 24 && x.r.width <= 48 && x.r.height >= 24 && x.r.height <= 48);
-                    if (!nodes.length) return null;
-                    nodes.sort((a, b) => b.r.x - a.r.x);
-                    const t = nodes[0].r;
-                    return { x: t.x | 0, y: t.y | 0, w: t.width | 0, h: t.height | 0 };
-                }"""
-            )
-            if btn:
-                await page.mouse.click(btn["x"] + btn["w"] / 2, btn["y"] + btn["h"] / 2)
-                await page.wait_for_timeout(2800)
-                if net.items:
-                    sent = True
-                    notes.append(f"点了工具条最右边的图标（{btn['x']},{btn['y']}）并拿到 /comment/publish/ 回执")
-        except Exception as exc:
-            notes.append(f"点工具条图标失败：{type(exc).__name__}: {exc}")
-        # ① 先用 JS 找「发送」（有的版本它是 div/span，不是 button，也不是 data-e2e）
-        try:
-            clicked_js = await page.evaluate(
-                """() => {
-                    const nodes = Array.from(document.querySelectorAll('button,div,span'));
-                    const cand = nodes.filter((e) => {
-                        const t = (e.textContent || '').trim();
-                        if (t !== '发送' && t !== '发布') return false;
-                        const r = e.getBoundingClientRect();
-                        return r.width > 4 && r.height > 4;
-                    });
-                    if (!cand.length) return false;
-                    cand[cand.length - 1].click();
-                    return true;
-                }"""
-            )
-            if clicked_js:
-                await page.wait_for_timeout(2500)
-                if net.items:
-                    sent = True
-                    notes.append("JS 点到「发送」并拿到 /comment/publish/ 回执")
-        except Exception as exc:
-            notes.append(f"JS 点发送失败：{type(exc).__name__}: {exc}")
-
-        # ② 键盘提交（Draft.js 编辑器没有发送按钮时靠这个）
-        if not sent:
-            try:
-                await box.click(timeout=2000)
-            except Exception:
-                pass
-            for keys, label in (("Control+Enter", "Ctrl+Enter"), ("Enter", "Enter")):
-                try:
-                    await page.keyboard.press(keys)
-                    await page.wait_for_timeout(2500)
-                except Exception as exc:
-                    notes.append(f"{label} 失败：{type(exc).__name__}: {exc}")
-                    continue
-                if net.items:
-                    sent = True
-                    notes.append(f"{label} 提交成功（/comment/publish/ 有回执）")
-                    break
-        if not sent:
-            for sel in ["[data-e2e='comment-publish']", "[data-e2e='comment-send']"]:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.count() and await btn.is_visible(timeout=600):
-                        await btn.click(timeout=4000)
-                        sent = True
-                        break
-                except Exception:
-                    continue
-        if not sent:
-            btn = await _visible_text(page, "发送", exact=True)
-            if btn is not None:
-                try:
-                    await btn.click(timeout=4000)
-                    sent = True
-                except Exception as exc:
-                    notes.append(f"点发送失败：{type(exc).__name__}: {exc}")
-        if not sent:
-            # ⭐ 2026-10-23 实测：桌面端评论框**没有「发送」按钮**（编辑器是 Draft.js），
-            #    提交靠键盘：Ctrl+Enter 生效（实测真的发出去了，/comment/publish/ 有回执）。
-            for keys, label in (("Control+Enter", "Ctrl+Enter"), ("Enter", "Enter")):
-                try:
-                    await page.keyboard.press(keys)
-                    await page.wait_for_timeout(2000)
-                except Exception as exc:
-                    notes.append(f"{label} 失败：{type(exc).__name__}: {exc}")
-                    continue
-                if net.items:
-                    sent = True
-                    notes.append(f"{label} 提交成功（/comment/publish/ 有回执）")
-                    break
-        if not sent:
-            return _err("没找到「发送」按钮，Ctrl+Enter / Enter 也没触发提交", aweme_id=aid, notes=notes)
-
-        hit = await net.wait_for(lambda u, d: True, timeout=10.0)
-
-        async def _confirmed(tail: str, tries: int = 8) -> bool:
-            """回读确认：页面文本或评论列表里真出现这句才算发出去。"""
-            for _ in range(tries):
+            before_children = {c["cid"] for c in await _fetch_reply_children(page, aid, str(reply_cid or "")) if c.get("cid")}
+        except Exception:
+            before_children = set()
+        _submitted()
+        await page.keyboard.press("Enter")
+        hit = await net.wait_for(lambda u, d: "status_code" in d or bool(d.get("comment")), timeout=12.0)
+        if not hit:
+            # 图文作品的评论不抛回执 XHR ⇒ 用回复/评论列表接口确认（最可靠），再退 DOM 文本
+            for _ in range(10):
                 await page.wait_for_timeout(1200)
                 try:
-                    body = await page.inner_text("body")
+                    kids = await _fetch_reply_children(page, aid, str(reply_cid or ""))
                 except Exception:
-                    body = ""
-                if tail and tail in body:
-                    return True
-                try:
-                    for item in list(cmt_net.items):
-                        for c in item["data"].get("comments") or []:
-                            if tail and tail in str(c.get("text") or ""):
-                                return True
-                except Exception:
-                    pass
-                try:
-                    await page.evaluate(
-                        "() => { const b=document.querySelector('[data-e2e=\"comment-list\"]'); if(b&&b.parentElement) b.parentElement.scrollTop=0; }"
-                    )
-                except Exception:
-                    pass
-            return False
-
-        tail_txt = (text or "").strip()[-10:]
-
-        if hit:
-            data = hit["data"]
-            comment = data.get("comment") or {}
-            cid = str(comment.get("cid") or data.get("cid") or "")
-            posted = comment.get("text") or data.get("text") or text
-            if await _confirmed(tail_txt):
-                out = _ok(aweme_id=aid, cid=cid, text=posted, url=VIDEO_URL.format(aweme_id=aid),
-                          reply_cid=str(reply_cid or ""), verified=True)
-                if notes:
-                    out["notes"] = notes
-                return out
-            notes.append("有发布回执，但评论区里查不到这句 ⇒ 可能被限流/秒删；重试一次")
-            # 重试一次：重新点开编辑器 → 输入 → 回车
+                    kids = []
+                for c in kids:
+                    cid2 = str(c.get("cid") or "")
+                    if not cid2 or cid2 in before_children:
+                        continue
+                    if text and str(c.get("text") or "").strip() == text.strip():
+                        notes.append("接口回执：回复列表里出现了这句")
+                        return _ok(aweme_id=aid, cid=cid2, text=text, reply_cid=str(reply_cid or ""),
+                                   verified=True, evidence="reply-list-api", notes=notes)
             try:
-                box2, notes = await _open_comment_box(page, notes)
-                await box2.click()
-                await page.keyboard.type(text, delay=40)
-                await page.wait_for_timeout(500)
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(2500)
-            except Exception as exc:
-                notes.append(f"重试输入失败：{type(exc).__name__}")
-            if await _confirmed(tail_txt, tries=10):
-                out = _ok(aweme_id=aid, cid=cid, text=posted, url=VIDEO_URL.format(aweme_id=aid),
-                          reply_cid=str(reply_cid or ""), verified=True, retried=True)
-                if notes:
-                    out["notes"] = notes
-                return out
-            return _err("评论没真正发出去（有回执但评论区长不出来）", aweme_id=aid, text=text, notes=notes)
-
-        # 没有 XHR 回执时，看评论列表里是否出现这段文本
-        await page.wait_for_timeout(1500)
-        try:
-            seen = await page.locator(f"text={text[:24]}").count() > 0
-        except Exception:
-            seen = False
-        if seen:
-            notes.append("没抓到 /comment/publish/ 回执，但页面上已经出现评论文本")
-            return _ok(aweme_id=aid, cid="", text=text, url=VIDEO_URL.format(aweme_id=aid),
-                       reply_cid=str(reply_cid or ""), verified=True, notes=notes)
-        return _err("点了发送但 10s 内没等到发布回执，也没在页面上看到评论",
-                    aweme_id=aid, notes=notes)
+                for _ in range(4):
+                    await page.wait_for_timeout(800)
+                    now_text = await page.evaluate("""() => {
+                        const l = document.querySelector('[data-e2e="comment-list"]');
+                        return (l ? l.innerText : document.body.innerText) || '';
+                    }""")
+                    if text and text in now_text and text not in before_cmt_text:
+                        return _ok(aweme_id=aid, cid="", text=text, reply_cid=str(reply_cid or ""),
+                                   verified=True, evidence="comment-text-appears", notes=notes)
+            except Exception:
+                pass
+            return _err("已提交但没有平台回执，未自动重发", status="unknown", aweme_id=aid)
+        data = hit["data"]
+        if data.get("status_code", 0) != 0:
+            return _err("平台拒绝评论", status="failed", status_code=data.get("status_code"), aweme_id=aid)
+        comment = data.get("comment") or {}
+        cid = str(comment.get("cid") or "")
+        posted_aid = str(comment.get("aweme_id") or "")
+        parent = str(comment.get("reply_id") or comment.get("reply_to_reply_id") or "")
+        if not cid or posted_aid != aid or (reply_cid and parent != str(reply_cid)) or (not reply_cid and parent not in ("", "0")):
+            return _err("平台回执缺少 CID 或目标/父评论不匹配", status="unknown", aweme_id=aid)
+        return _ok(aweme_id=aid, cid=cid, text=comment.get("text") or text, reply_cid=parent,
+                   verified=True, evidence="comment-publish-response", notes=notes)
     finally:
         net.close()
         cmt_net.close()
 
 
-async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft: bool, ai_declare: bool = True, cover_path: str = "") -> dict:
+async def _publish_unverified_core(page, ctx, video_path: str, title: str, tags: str, draft: bool, ai_declare: bool = True, cover_path: str = "") -> dict:
     if isinstance(draft, str):
         draft = draft.strip().lower() not in ("0", "false", "no", "off", "")
     path = Path(str(video_path or "").strip())
@@ -1994,8 +2027,11 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
     try:
         await title_box.click(timeout=3000)
         await title_box.fill(title[:55], timeout=4000)
+        actual_title = await title_box.evaluate("(e) => e.value === undefined ? e.textContent : e.value")
+        if str(actual_title or "").strip() != title[:55].strip():
+            return _err("标题回读不一致，未投稿")
     except Exception as exc:
-        notes.append(f"填标题失败：{type(exc).__name__}: {exc}")
+        return _err(f"填标题失败，未投稿：{type(exc).__name__}: {exc}")
 
     tag_list = [t.strip().lstrip("#") for t in re.split(r"[,，\s]+", tags or "") if t.strip()]
     if tag_list:
@@ -2043,7 +2079,7 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
                 await page.wait_for_timeout(2000)
                 # ⭐ 弹层里的确认键叫「保存」（不是「完成」）——2026-10-24 抓 DOM 确认
                 clicked_done = await page.evaluate(
-                    """() => {
+                    r"""() => {
                         const bs = Array.from(document.querySelectorAll('button'));
                         const save = bs.find((x) => (x.innerText || '').trim() === '保存' && /primary/i.test(x.className || ''));
                         const any = save || bs.find((x) => (x.innerText || '').trim() === '保存');
@@ -2070,6 +2106,7 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
     # ⭐ 2026-10-23：发布前先点「自主声明」→ 勾「内容由AI生成」
     #    不勾这个，AI 视频会被判"未声明"，轻则限流重则下架。
     if ai_declare:
+        declaration_verified = False
         try:
             opened = False
             for sel in ["text=请选择自主声明", "[class*=selectBox]", "text=自主声明"]:
@@ -2106,15 +2143,22 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
                         await page.wait_for_timeout(500)
                     except Exception:
                         pass
-                    notes.append("已勾选自主声明：内容由AI生成")
+                    declaration_verified = await page.evaluate("""() => {
+                        const nodes=Array.from(document.querySelectorAll('label.semi-radio-checked,label:has(input:checked),[role="radio"][aria-checked="true"]'));
+                        return nodes.some(e=>(e.innerText||'').includes('内容由AI生成'));
+                    }""")
+                    notes.append("AI 声明状态已回读" if declaration_verified else "AI 声明未确认")
                 else:
                     notes.append("⚠️ 打开声明面板但没找到「内容由AI生成」")
             else:
                 notes.append("⚠️ 没找到「自主声明」入口")
         except Exception as exc:
             notes.append(f"勾声明失败：{type(exc).__name__}: {exc}")
+        if not declaration_verified:
+            return _err("AI 内容声明未确认，未投稿", notes=notes)
 
     if draft:
+        _submitted()
         # ⭐ 2026-10-23 实测：创作页没有「存草稿」，草稿动作叫**「暂存离开」**
         clicked = await _click_text(page, "暂存离开", exact=True)
         if not clicked:
@@ -2128,6 +2172,7 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
         return _ok(url=page.url, draft=True, notes=notes)
 
     clicked = False
+    attempted = False
     try:
         loc = page.locator("button:has-text('发布')")
         n = await loc.count()
@@ -2136,17 +2181,47 @@ async def _publish_core(page, ctx, video_path: str, title: str, tags: str, draft
             if await item.is_visible(timeout=300):
                 txt = ((await item.inner_text()) or "").strip()
                 if txt in ("发布", "发布作品"):
+                    attempted = True
+                    _submitted()
                     await item.click(timeout=5000)
                     clicked = True
                     break
     except Exception as exc:
-        notes.append(f"点发布失败：{type(exc).__name__}: {exc}")
+        if attempted:
+            return _err(f"发布点击过程异常，未再次提交：{type(exc).__name__}: {exc}", status="unknown")
+        notes.append(f"发布按钮读取失败：{type(exc).__name__}: {exc}")
     if not clicked:
+        _submitted()
         clicked = await _click_text(page, "发布", exact=True)
     if not clicked:
         return _err("没找到可点的「发布」按钮", url=page.url, notes=notes)
     await page.wait_for_timeout(4000)
     return _ok(url=page.url, draft=False, notes=notes)
+
+
+async def _publish_core(page, ctx, video_path, title, tags, draft, ai_declare=True, cover_path=""):
+    matcher = lambda u: any(x in u for x in ("/aweme/create", "/item/create", "/draft/save", "/save_draft", "/aweme/publish"))
+    net = Net(page, matcher)
+    try:
+        result = await _publish_unverified_core(page, ctx, video_path, title, tags, draft, ai_declare, cover_path)
+        if not result.get("ok"):
+            return result
+        for _ in range(12):
+            for item in net.items:
+                if item.get("method") != "POST" or not item.get("afterSubmit"):
+                    continue
+                data = item["data"]
+                if data.get("status_code", 0) != 0:
+                    return _err("平台拒绝投稿或保存草稿", status="failed", status_code=data.get("status_code"))
+                obj = data.get("draft") or data.get("aweme") or data.get("data") or data
+                identity = str((obj.get("draft_id") if draft else obj.get("aweme_id") or obj.get("item_id")) or "")
+                if identity:
+                    return _ok(draft=bool(draft), verified=True, platformId=identity, aweme_id="" if draft else identity,
+                               draftId=identity if draft else "", url="" if draft else VIDEO_URL.format(aweme_id=identity), evidence="publish-response")
+            await page.wait_for_timeout(500)
+        return _err("已提交但未收到带作品/草稿 ID 的回执，请核对平台后再操作", status="unknown", draft=bool(draft))
+    finally:
+        net.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2164,6 +2239,19 @@ async def _selfcheck_core() -> dict:
         "loggedIn": False,
         "searched": False,
         "notes": notes,
+    }
+    import importlib.util
+    import shutil
+    model = os.environ.get("DOUYIN_WHISPER_MODEL", "base")
+    hub = Path(os.environ.get("HUGGINGFACE_HUB_CACHE", str(HOME / "models" / "hub")))
+    model_dir = Path(model) if Path(model).is_dir() else hub / ("models--Systran--faster-whisper-" + model)
+    out["media"] = {
+        "ffmpeg": _ffmpeg_path(),
+        "ffmpegReady": bool(shutil.which(_ffmpeg_path())),
+        "dependenciesReady": all(importlib.util.find_spec(x) is not None for x in ("numpy", "faster_whisper", "httpx")),
+        "model": model,
+        "modelCached": (model_dir / "model.bin").is_file() or any(model_dir.glob("snapshots/*/model.bin")),
+        "modelCache": str(model_dir),
     }
     try:
         ctx = await _browser.context()
@@ -2281,7 +2369,7 @@ async def _hot_core(page, limit: int = 30) -> dict:
             notes.append(f"同源请求失败：{type(exc).__name__}: {exc}")
 
         if not words:
-            net = Net(page, lambda u, d: "hot/search/list" in u and isinstance(d.get("data"), dict))
+            net = Net(page, lambda u: "hot/search/list" in u)
             try:
                 await _goto(page, HOME_URL, settle=5.0)
                 for _ in range(4):
@@ -2421,7 +2509,42 @@ async def _check_credential_core() -> dict:
 mcp = FastMCP(APP_NAME)
 
 
-@mcp.tool()
+WRITE_TOOL_NAMES = {"douyin_like", "douyin_comment", "douyin_publish", "douyin_share_video", "douyin_chat_send", "douyin_chat_sticker", "douyin_chat_batch"}
+TOOL_ALLOWLIST = {x.strip() for x in os.environ.get("DOUYIN_MCP_TOOLS", "").split(",") if x.strip()}
+
+
+def restricted_tool():
+    def decorate(fn):
+        allowed = not TOOL_ALLOWLIST or fn.__name__ in TOOL_ALLOWLIST
+        if fn.__name__ in WRITE_TOOL_NAMES and os.environ.get("DOUYIN_ALLOW_WRITES") != "1":
+            allowed = False
+        if not allowed:
+            return fn
+        proxy_url = os.environ.get("DOUYIN_PROXY_URL", "")
+        if proxy_url:
+            signature = inspect.signature(fn)
+            @functools.wraps(fn)
+            async def proxied(*args, **kwargs):
+                import httpx
+                from urllib.parse import urlparse
+                url = urlparse(proxy_url)
+                if url.scheme != "http" or url.hostname != "127.0.0.1" or url.path != "/action":
+                    return j(_err("无效宿主代理地址"))
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                try:
+                    async with httpx.AsyncClient(timeout=920, trust_env=False) as client:
+                        response = await client.post(proxy_url, headers={"Authorization": "Bearer " + os.environ.get("DOUYIN_PROXY_TOKEN", "")}, json={"name": fn.__name__, "args": dict(bound.arguments)})
+                        response.raise_for_status()
+                        return j(response.json())
+                except Exception as exc:
+                    return j(_err("宿主代理请求失败：" + str(exc), status="unknown" if fn.__name__ in WRITE_TOOL_NAMES else "failed"))
+            return mcp.tool()(proxied)
+        return mcp.tool()(fn)
+    return decorate
+
+
+@restricted_tool()
 async def douyin_hot(limit: int = 30) -> str:
     """抖音热榜（**不用登录**就能拿）。
 
@@ -2435,7 +2558,7 @@ async def douyin_hot(limit: int = 30) -> str:
     return j(await _guard(_impl, 45))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_hot_videos(sentence_id: str = "", word: str = "", num: int = 10) -> str:
     """看某条热点的视频列表（**不用登录**）。给 sentence_id（推荐）或 word。
 
@@ -2448,7 +2571,7 @@ async def douyin_hot_videos(sentence_id: str = "", word: str = "", num: int = 10
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_login_sms(phone: str) -> str:
     """短信验证码登录第一步：切到「验证码登录」、填手机号、点「获取验证码」。
 
@@ -2462,7 +2585,7 @@ async def douyin_login_sms(phone: str) -> str:
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_login_sms_submit(code: str) -> str:
     """短信验证码登录第二步：填 6 位验证码并点登录，最多等 15 秒确认登录态。
 
@@ -2476,7 +2599,7 @@ async def douyin_login_sms_submit(code: str) -> str:
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_thumb(aweme_id: str) -> str:
     """给一条视频截缩略图（没封面 URL 时用）。存 <家>/thumbs/<id>.jpg，返回 {ok, path}。"""
     async def _impl():
@@ -2486,7 +2609,7 @@ async def douyin_thumb(aweme_id: str) -> str:
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_check_credential() -> str:
     """检查抖音登录态（cookie sessionid + 页面头像两种证据）。
 
@@ -2495,7 +2618,7 @@ async def douyin_check_credential() -> str:
     return j(await _guard(_check_credential_core, 45))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_login_qr() -> str:
     """打开抖音首页，唤出扫码登录弹层，把二维码截图存到 <家>/login-qr.png。
 
@@ -2509,7 +2632,7 @@ async def douyin_login_qr() -> str:
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_login_poll() -> str:
     """轮询登录态（手机扫码后调用）。
 
@@ -2547,7 +2670,7 @@ def _drop_live(items):
         keep.append(it)
     return keep, dropped
 
-async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
+async def _feed_core(page, ctx, num: int, scrolls: int, skip_live: bool = True) -> dict:
     """刷推荐流：打开首页推荐，滚几屏，把露出的视频收下来（不搜关键词）。"""
     notes = []
     await _goto(page, "https://www.douyin.com/", settle=5.0)
@@ -2569,7 +2692,7 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
                 desc = str(a.get("desc") or "")
                 seen[aid] = {"aweme_id": aid, "title": desc[:60],
                              "url": "https://www.douyin.com/video/" + aid,
-                             "duration": a.get("duration") or 0,
+                             "duration": (a.get("video") or {}).get("duration") or a.get("duration") or 0,
                              "author": ((a.get("author") or {}).get("nickname") or "")[:20],
                              "digg": (a.get("statistics") or {}).get("digg_count") or 0}
         except Exception:
@@ -2580,7 +2703,7 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
         await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
         # 精选页默认不拉推荐流 ⇒ 点一下「推荐」
         try:
-            await page.evaluate("""() => {
+            await page.evaluate(r"""() => {
                 const n = Array.from(document.querySelectorAll('div,span,a')).find((e) => (e.innerText || '').trim() === '推荐');
                 if (n) n.click();
             }""")
@@ -2613,7 +2736,7 @@ async def _feed_core(page, ctx, num: int, scrolls: int) -> dict:
             pass
 
     items = list(seen.values())[:num]
-    items, dropped = _drop_live(items)
+    items, dropped = _drop_live(items) if skip_live else (items, 0)
     if dropped:
         notes.append(f"跳过 {dropped} 条直播")
     return _ok(items=items, count=len(items), source="feed", notes=notes or None)
@@ -2634,259 +2757,191 @@ def _ffmpeg_path() -> str:
     return "ffmpeg"
 
 
-async def _watch_core(page, aweme_id: str, seconds: int = 300) -> dict:
-    """把视频真看一遍：下载媒体 → 抽音轨 → faster-whisper 转写。
+def _media_url_allowed(url):
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    host = (u.hostname or "").lower()
+    domains = ("douyin.com", "douyinvod.com", "douyincdn.com", "amemv.com", "bytecdn.cn", "byteimg.com", "ibytedtos.com", "toutiaovod.com")
+    return u.scheme == "https" and not u.username and not u.password and any(host == d or host.endswith("." + d) for d in domains)
 
-    seconds: 最多转写前多少秒（默认 300s；跳着看时用这个截断）
+
+async def _run_ffmpeg(cmd, timeout=90):
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **({"creationflags": 0x08000000} if os.name == "nt" else {}))
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        return type("ProcessResult", (), {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr})()
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+async def _download_media(page, url, dest, max_bytes=64 * 1024 * 1024):
+    import httpx
+    from urllib.parse import urljoin
+    jar = httpx.Cookies()
+    for c in await page.context.cookies([url]):
+        jar.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
+    async with httpx.AsyncClient(cookies=jar, timeout=90, follow_redirects=False) as client:
+        for _ in range(4):
+            if not _media_url_allowed(url):
+                raise ValueError("视频媒体地址不在允许的 HTTPS 域名内")
+            async with client.stream("GET", url, headers={"Referer": HOME_URL, "User-Agent": UA}) as response:
+                if response.is_redirect:
+                    url = urljoin(url, response.headers.get("location", ""))
+                    continue
+                response.raise_for_status()
+                if int(response.headers.get("content-length", 0)) > max_bytes:
+                    raise ValueError("视频超过下载大小上限")
+                total = 0
+                with dest.open("wb") as f:
+                    async for chunk in response.aiter_bytes(65536):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError("视频超过下载大小上限")
+                        f.write(chunk)
+                return
+    raise ValueError("媒体重定向次数过多")
+
+
+def _transcribe_sync(wav):
+    import wave
+    import numpy as np
+    with wave.open(str(wav), "rb") as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1 or w.getsampwidth() != 2:
+            raise ValueError("音轨必须为 16kHz 单声道 PCM16")
+        audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+    if not len(audio):
+        raise ValueError("音轨没有可用音频帧")
+    model_name = os.environ.get("DOUYIN_WHISPER_MODEL", "base")
+    segments, info = _whisper_model(model_name).transcribe(audio, language="zh", vad_filter=True, beam_size=1)
+    return {"transcript": " ".join(s.text.strip() for s in segments if s.text and s.text.strip())[:4000], "language": info.language}
+
+
+async def _transcribe_wav(wav):
+    proc = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).resolve()), "--transcribe-wav", str(wav),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **({"creationflags": 0x08000000} if os.name == "nt" else {}))
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), 180)
+        if proc.returncode:
+            raise RuntimeError(stderr.decode("utf-8", "replace")[-1000:])
+        return json.loads(stdout.decode("utf-8"))
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10) -> dict:
+    """看片：交给「视频理解原型」(video-understanding-lab) 下载 + 抽音轨 + 本地转写。
+
+    2026-10-27：原来的 ffmpeg 直连 CDN 方案经常 Timeout / 超大小上限，改成复用原型：
+      run.py capture -> prepare -> asr -> transcript.json
+    这样走的是浏览器 cookie 下载，稳定性高得多。
     """
-    aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
+    aid = _extract_aweme_id(str(aweme_id))
+    if not aid or not aid.isdigit():
+        return _err("aweme_id 不合法")
+    seconds = max(15, min(int(seconds), 600))
     media_dir = HOME / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
-    notes: list[str] = []
-    url_hit: dict = {}
-
-    # ⭐ 用一张**新标签页**跑：主标签常被别的操作占着，goto 会超时
-    try:
-        page = await page.context.new_page()
-        notes.append("新开标签页")
-    except Exception:
-        pass
-
-    # ① 转写结果的缓存：同一条视频只下一次、只转一次
-    cache = media_dir / f"{aid}.{int(seconds)}.json"
+    cache = media_dir / f"{aid}.{seconds}.v3.json"
     if cache.exists():
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
-            data["cached"] = True
-            return data
+            if data.get("schemaVersion") == 3 and data.get("ok") is True:
+                return {**data, "cached": True}
         except Exception:
             pass
 
-    def on_resp(r):
-        u = r.url or ""
-        if not url_hit and ("/video/tos/" in u or "mime_type=video" in u) and ".mp4" not in u[:20]:
-            url_hit.setdefault("url", u)
+    lab_dir = Path(os.environ.get("DOUYIN_VIDEO_LAB")
+                   or (Path(__file__).resolve().parents[2] / "video-understanding-lab"))
+    entry = lab_dir / "run.py"
+    if not entry.exists():
+        return _err("找不到视频理解原型 run.py", path=str(entry))
+    case = media_dir / "lab" / f"{aid}-{int(time.time())}"
+    case.parent.mkdir(parents=True, exist_ok=True)
+    cdp = (CDP_URL or "http://127.0.0.1:9333").strip()
+    notes: list[str] = []
+    phase = "capture"
 
-    # ⭐ 2026-10-25：页面上 currentSrc 是 blob:（MSE）时，从 /aweme/detail/ 里拿 play_addr 直链
-    detail = {}
-
-    def _on_detail(r):
+    async def run_lab(args, timeout):
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(entry), *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **({"creationflags": 0x08000000} if os.name == "nt" else {}))
         try:
-            if "/aweme/detail/" in (r.url or ""):
-                detail.setdefault("pending", r)
-        except Exception:
-            pass
-
-    page.on("response", _on_detail)
-    try:
-        await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=3.0)
-        await page.wait_for_timeout(1500)
-        # 让 <video> 起播，currentSrc 才有值
-        try:
-            await page.evaluate("() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play && v.play(); } }")
-        except Exception:
-            pass
-        url = ""
-        for _ in range(12):
-            cands = await page.evaluate(
-                """() => {
-                    const v = document.querySelector('video');
-                    if (!v) return [];
-                    const out = [];
-                    if (v.currentSrc) out.push(v.currentSrc);
-                    if (v.src) out.push(v.src);
-                    v.querySelectorAll('source').forEach((s) => { if (s.src) out.push(s.src); });
-                    return out;
-                }"""
-            )
-            # 任何 http(s) 地址都先用（blob: 才排除）；能不能流式读交给后面的兜底判断
-            for c in cands or []:
-                if c.startswith("http"):
-                    url = c
-                    break
-            if url:
-                break
-            await page.wait_for_timeout(400)
-        dur = 0
-        try:
-            dur = float(await page.evaluate("() => { const v = document.querySelector('video'); return v ? v.duration : 0; }") or 0)
-        except Exception:
-            pass
-    finally:
-        try:
-            page.remove_listener("response", on_resp)
-        except Exception:
-            pass
-
-    if not url or url.startswith("blob:"):
-        try:
-            pend = detail.get("pending")
-            if pend is not None:
-                data = await pend.json()
-                det = (data or {}).get("aweme_detail") or {}
-                vinfo = det.get("video") or {}
-                urls = []
-                for pa in [vinfo.get("play_addr")] + [b.get("play_addr") for b in (vinfo.get("bit_rate") or [])]:
-                    for u in ((pa or {}).get("url_list") or []):
-                        if isinstance(u, str) and u.startswith("http"):
-                            urls.append(u)
-                if urls:
-                    url = urls[0]
-                    notes.append("从 detail 接口拿到 play_addr")
-        except Exception as exc:
-            notes.append(f"读 detail 失败：{type(exc).__name__}")
-    if not url:
-        return _err("没拿到视频流地址（未登录或被风控）", aweme_id=aid, duration=dur, notes=notes or None)
-
-    # ⭐ 2026-10-25：**从不整条下载**。按取样片段用 ffmpeg 带 Range 直接取那几十秒。
-    #   · ≤90 秒的视频：取开头
-    #   · 长视频：取「开头 + 中间 + 结尾」各 30 秒（跳着看）
-    segs_plan: list[tuple[float, int]] = []
-    total = float(dur or 0)
-    if total and total > 150:
-        mid = max(0.0, total / 2 - 15)
-        end = max(0.0, total - 45)
-        segs_plan = [(0.0, 30), (mid, 30), (end, 30)]
-    else:
-        segs_plan = [(0.0, max(15, min(int(seconds), 120)))]
-
-    # 拿浏览器 cookie，ffmpeg 才能读 play 接口
-    cookie_hdr = ""
-    try:
-        cks = await page.context.cookies()
-        parts = [f"{c.get('name')}={c.get('value')}" for c in cks if c.get("name") and c.get("value")]
-        if parts:
-            cookie_hdr = "Cookie: " + "; ".join(parts) + "\r\n"
-    except Exception:
-        pass
-
-    # play 接口读不了 ⇒ 先在页面里 fetch 一次（只取前 1KB），把 302 之后的 CDN 直链拿出来
-    try:
-        final_url = await page.evaluate(
-            """async (u) => {
-                try {
-                    const r = await fetch(u, { method: 'GET', headers: { Range: 'bytes=0-1024' }, credentials: 'include' });
-                    return r.url || '';
-                } catch (e) { return ''; }
-            }""",
-            url,
-        )
-        if final_url and "douyinvod.com" in final_url:
-            notes.append("已解析到 CDN 直链")
-            url = final_url
-    except Exception:
-        pass
-
-    ff = _ffmpeg_path()
-    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
-    hdr = "Referer: https://www.douyin.com/\r\n" + cookie_hdr
-
-    wav_parts: list[Path] = []
-    import subprocess
-    for i, (start_at, dur_s) in enumerate(segs_plan):
-        part = media_dir / f"{aid}.{int(seconds)}.{i}.wav"
-        cmd = [ff, "-y", "-user_agent", ua, "-headers", hdr,
-               "-ss", f"{start_at:.1f}", "-t", str(dur_s), "-i", url,
-               "-vn", "-ac", "1", "-ar", "16000", str(part)]
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=180)
-            if r.returncode == 0 and part.exists() and part.stat().st_size > 1000:
-                wav_parts.append(part)
-            else:
-                notes.append(f"片段 {i} 取失败：" + (r.stderr or b"")[-120:].decode("utf-8", "replace"))
-        except Exception as exc:
-            notes.append(f"片段 {i} 出错：{type(exc).__name__}")
-    if not wav_parts:
-        # 短一点的视频（≤5 分钟）可以整条下下来兜底；长视频绝不整条下，直接放弃看片
-        if (dur or 0) <= 300:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
             try:
-                import subprocess
-                out_mp4 = media_dir / f"{aid}.mp4"
-                resp = await page.request.get(url, timeout=120000)
-                if resp.status == 200:
-                    out_mp4.write_bytes(await resp.body())
-                    wav = media_dir / f"{aid}.{int(seconds)}.wav"
-                    r = subprocess.run([ff, "-y", "-i", str(out_mp4), "-t", str(max(15, int(seconds))),
-                                        "-vn", "-ac", "1", "-ar", "16000", str(wav)],
-                                       capture_output=True, timeout=300)
-                    if r.returncode == 0 and wav.exists():
-                        notes.append(f"兜底：整条下载 {out_mp4.stat().st_size // 1024} KB 后抽音轨")
-                        wav_parts = [wav]
-                        try:
-                            if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
-                                out_mp4.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-            except Exception as exc:
-                notes.append(f"兜底下载失败：{type(exc).__name__}")
-        if not wav_parts:
-            return _err(
-                "拿不到可读的音轨（长视频不整条下载，直接放弃看片）" if (dur or 0) > 300 else "取音轨全失败（可能未登录/风控）",
-                aweme_id=aid, duration=dur, notes=notes or None,
-            )
-    notes.append(f"取样 {len(wav_parts)} 段 / 计划 {len(segs_plan)} 段（不整条下载）")
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), 10)
+            except Exception:
+                pass
+            step = args[0] if args else ""
+            return 124, "", f"本步超时（{timeout}s）：{step}"
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                await proc.wait()
+        return proc.returncode, (out or b"").decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace")
 
-    # 合成一个 wav（numpy 拼接，别用 ffmpeg concat，省事）
-    wav = media_dir / f"{aid}.{int(seconds)}.wav"
     try:
-        import wave as _w
-        import numpy as _np
-        frames = []
-        sr = 16000
-        for part in wav_parts:
-            with _w.open(str(part), "rb") as w:
-                sr = w.getframerate()
-                frames.append(_np.frombuffer(w.readframes(w.getnframes()), dtype=_np.int16))
-        merged = _np.concatenate(frames) if frames else _np.zeros(0, dtype=_np.int16)
-        with _w.open(str(wav), "wb") as w:
-            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
-            w.writeframes(merged.tobytes())
-        for part in wav_parts:
-            try: part.unlink(missing_ok=True)
-            except Exception: pass
-    except Exception as exc:
-        return _err(f"音轨拼接失败：{type(exc).__name__}", aweme_id=aid, notes=notes)
-
-    text = ""
-    try:
-        import wave
-        import numpy as np
-        model_name = os.environ.get("DOUYIN_WHISPER_MODEL", "base")
-        model = _whisper_model(model_name)
-        # ⭐ 不用 av 解码（这台机器上 av ↔ faster-whisper 的 metadata_errors 参数不兼容），
-        #   自己把 16k 单声道 wav 读成 numpy 再喂给模型。
-        with wave.open(str(wav), "rb") as w:
-            sr = w.getframerate()
-            raw = w.readframes(w.getnframes())
-        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        if sr != 16000:
-            notes.append(f"注意：采样率 {sr}（ffmpeg 已按 16k 输出，正常不该出现）")
-        segs, info = model.transcribe(audio, language="zh", vad_filter=True, beam_size=1)
-        parts = [s.text.strip() for s in segs if s.text and s.text.strip()]
-        text = " ".join(parts)[:2000]
-        notes.append(f"whisper={model_name} 语言={info.language} 片段={len(parts)} 时长={round(len(audio)/max(1,sr),1)}s")
-    except Exception as exc:
-        return _err(f"转写出错：{type(exc).__name__}: {exc}", aweme_id=aid, notes=notes, downloaded=str(out_mp4))
-
-    result = _ok(aweme_id=aid, duration=round(dur, 1), transcript=text,
-                 chars=len(text), notes=notes)
-    try:
-        cache.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    # 用完即弃（想留着素材就设 DOUYIN_KEEP_MEDIA=1）
-    try:
-        await page.close()
-    except Exception:
-        pass
-    if os.environ.get("DOUYIN_KEEP_MEDIA") != "1":
+        rc, out, err = await run_lab(
+            ["capture", "--url", f"https://www.douyin.com/video/{aid}", "--out", str(case), "--cdp-url", cdp],
+            240)
+        if rc != 0:
+            tail = (err or out).strip()[-300:] or "capture 失败"
+            await _note_captcha(page)
+            return _err(f"原型下载失败：{tail}", phase=phase, aweme_id=aid)
+        phase = "prepare"
+        # ⭐ 抽帧数可调（设置里的 watchFrames，默认 10）：间隔 = 片长 / 帧数，最少 0.4 秒
         try:
-            wav.unlink(missing_ok=True)
-            notes.append("音轨已删（DOUYIN_KEEP_MEDIA=1 可保留）")
+            dur = float((json.loads((case / "source.json").read_text(encoding="utf-8")) or {}).get("actualDuration") or 0)
         except Exception:
-            pass
-    return result
+            dur = 0
+        want = max(3, min(int(frames or 10), 48))
+        step = max(0.4, round((dur / want) if dur > 0 else 2.0, 2))
+        rc, out, err = await run_lab(
+            ["prepare", str(case / "source.mp4"), "--out", str(case), "--step", str(step)], 240)
+        if rc != 0:
+            tail = (err or out).strip()[-300:] or "prepare 失败"
+            return _err(f"原型抽帧/音轨失败：{tail}", phase=phase, aweme_id=aid)
+        phase = "transcription"
+        rc, out, err = await run_lab(["asr", str(case)], 420)
+        if rc != 0:
+            tail = (err or out).strip()[-300:] or "asr 失败"
+            return _err(f"原型转写失败：{tail}", phase=phase, aweme_id=aid)
+        tr_path = case / "transcript.json"
+        if not tr_path.exists():
+            return _err("原型没生成 transcript.json", phase=phase, aweme_id=aid)
+        tr = json.loads(tr_path.read_text(encoding="utf-8"))
+        segs = tr.get("segments") or []
+        text = " ".join(str(s.get("text") or "").strip() for s in segs if str(s.get("text") or "").strip())[:4000]
+        duration = float(tr.get("duration") or 0)
+        if not text:
+            return _err("音轨中未识别出语音", phase=phase, aweme_id=aid, labCase=str(case))
+        result = _ok(aweme_id=aid, duration=duration, transcript=text, schemaVersion=3,
+                     model=os.environ.get("DOUYIN_WHISPER_MODEL", "base"),
+                     sampledRanges=[[0, duration]], partial=False,
+                     notes=notes + [f"视频理解原型：{case.name}"], labCase=str(case))
+        tmp = cache.with_suffix(".tmp")
+        tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(cache)
+        return result
+    except asyncio.TimeoutError:
+        return _err("原型处理超时", phase=phase, aweme_id=aid, labCase=str(case))
+    except Exception as exc:
+        return _err(f"{type(exc).__name__}: {exc}", phase=phase, aweme_id=aid, labCase=str(case))
 
 
 _WHISPER_CACHE: dict = {}
@@ -2904,8 +2959,86 @@ def _whisper_model(name: str):
     return _WHISPER_CACHE[name]
 
 
-@mcp.tool()
-async def douyin_watch(aweme_id: str, seconds: int = 300) -> str:
+@restricted_tool()
+async def memory_write(content: str, type: str = "fact", tags: str = "", importance: float = 0.6, workspace_path: str = "") -> str:
+    """把一条记忆写进「记忆插件」的库（memory.db）。私信/视频互动的记忆共用这一份。"""
+    import sqlite3
+    import uuid
+    db = os.environ.get("DSH_MEMORY_DB") or str(Path.home() / ".dsh" / "memory-system" / "memory.db")
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        cur = conn.cursor()
+        ws_id = None
+        try:
+            rows = cur.execute("select id, path from workspaces").fetchall()
+            target = str(workspace_path or "").strip()
+            if target:
+                for rid, p in rows:
+                    if p and os.path.normcase(os.path.normpath(str(p))) == os.path.normcase(os.path.normpath(target)):
+                        ws_id = rid
+                        break
+            if ws_id is None and rows:
+                ws_id = rows[0][0]
+        except Exception:
+            ws_id = None
+        cur.execute(
+            "insert into memories (id, type, content, tags, source, importance, privacy_level, related_ids, created_at, last_accessed, access_count, superseded_by, embedding, scope, workspace_id) "
+            "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), str(type or "fact"), str(content or "")[:2000], str(tags or ""),
+             "douyin-plugin", float(importance or 0.6), "normal", "[]",
+             __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+             __import__("datetime").datetime.now().isoformat(timespec="seconds"), 0, None, None,
+             "global", ws_id),
+        )
+        conn.commit()
+        conn.close()
+        return _ok(written=True)
+    except Exception as exc:
+        return _err(f"写记忆失败：{type(exc).__name__}: {exc}")
+
+
+@restricted_tool()
+async def memory_recent(limit: int = 12) -> str:
+    """读「记忆插件」的最近记忆（所有工作区共享），给私信/评论回复当上下文。"""
+    import sqlite3
+    db = os.environ.get("DSH_MEMORY_DB") or str(Path.home() / ".dsh" / "memory-system" / "memory.db")
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        rows = conn.execute(
+            "select type, content, created_at from memories where superseded_by is null order by created_at desc limit ?",
+            (max(1, min(int(limit), 50)),),
+        ).fetchall()
+        conn.close()
+        return _ok(items=[{"type": r[0], "content": str(r[1])[:300], "at": r[2]} for r in rows])
+    except Exception as exc:
+        return _err(f"读记忆失败：{type(exc).__name__}: {exc}")
+
+
+@restricted_tool()
+async def douyin_dm_snapshot(nickname: str = "", limit: int = 20) -> str:
+    """只读：按时间顺序返回和某人的最近 N 条私信文本（方向由宿主判定）。"""
+    async def impl():
+        ctx = await _browser.context()
+        page = await _browser.page_chat()
+        await _open_conversation(page, ctx, nickname)
+        try:
+            await page.evaluate("""() => {
+                const box = document.querySelector('[class*="MessageList"],[class*="messageList"],[class*="MessageItem"]');
+                let el = box;
+                while (el && !(el.scrollHeight > el.clientHeight + 10)) el = el.parentElement;
+                if (el) el.scrollTop = el.scrollHeight;
+            }""")
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+        msgs = await _message_snapshot(page)
+        tail = msgs[-max(1, min(int(limit), 50)):]
+        return _ok(items=[{"text": str(m.get("text") or "").strip()[:300], "media": len(m.get("media") or [])} for m in tail])
+    return j(await _guard(impl, 90))
+
+
+@restricted_tool()
+async def douyin_watch(aweme_id: str, seconds: int = 300, frames: int = 10) -> str:
     """真·看视频：下载这条视频 → 抽音轨 → 本地转写成文字（faster-whisper）。
 
     用途：评论/转发之前先「看完」，别只看标题。
@@ -2914,13 +3047,13 @@ async def douyin_watch(aweme_id: str, seconds: int = 300) -> str:
     async def _impl():
         ctx = await _browser.context()
         page = await _browser.page()
-        return await _watch_core(page, aweme_id, seconds)
+        return await _watch_core(page, aweme_id, seconds, frames)
 
     return j(await _guard(_impl, 600))
 
 
-@mcp.tool()
-async def douyin_feed(num: int = 10, scrolls: int = 6) -> str:
+@restricted_tool()
+async def douyin_feed(num: int = 10, scrolls: int = 6, skip_live: bool = True) -> str:
     """刷抖音推荐流（**不搜索**）：打开首页推荐，往下滚几屏，把露出的视频收下来。
 
     Args:
@@ -2932,12 +3065,12 @@ async def douyin_feed(num: int = 10, scrolls: int = 6) -> str:
     async def _impl():
         ctx = await _browser.context()
         page = await _browser.page()
-        return await _feed_core(page, ctx, max(1, min(int(num or 10), 50)), max(1, min(int(scrolls or 6), 30)))
+        return await _feed_core(page, ctx, max(1, min(int(num or 10), 50)), max(1, min(int(scrolls or 6), 30)), skip_live=skip_live)
 
     return j(await _guard(_impl, 120))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_search(keyword: str, num: int = 10, order: str = "general") -> str:
     """搜索抖音视频（需登录）。
 
@@ -2961,7 +3094,7 @@ async def douyin_search(keyword: str, num: int = 10, order: str = "general") -> 
     return j(await _guard(_impl, 55))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_video(aweme_id: str) -> str:
     """获取单条抖音视频信息（接受数字 id 或整条 /video/<id> 链接）。
 
@@ -2974,7 +3107,7 @@ async def douyin_video(aweme_id: str) -> str:
     return j(await _guard(_impl, 45))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_comments(aweme_id: str, num: int = 30, compact: bool = False,
                           exclude_cids: list[str] | None = None) -> str:
     """获取视频热门评论（越多越慢，会自动滚动评论区）。
@@ -3002,7 +3135,26 @@ async def douyin_comments(aweme_id: str, num: int = 30, compact: bool = False,
     return j(await _guard(_impl, 60))
 
 
-@mcp.tool()
+@restricted_tool()
+async def douyin_check_reply(aweme_id: str, parent_cid: str = "", text: str = "") -> str:
+    """只读核对：这条回复是不是已经发出去了（查回复列表，返回命中的 cid）。"""
+    async def impl():
+        page = await _browser.page()
+        try:
+            if 'douyin.com' not in (page.url or ''):
+                await _goto(page, 'https://www.douyin.com/jingxuan', settle=2)
+        except Exception:
+            pass
+        kids = await _fetch_reply_children(page, str(aweme_id), str(parent_cid or ""))
+        want = (text or "").strip()
+        for c in kids:
+            if want and str(c.get("text") or "").strip() == want:
+                return _ok(found=True, cid=str(c.get("cid") or ""), text=want)
+        return _ok(found=False, count=len(kids))
+    return j(await _guard(impl, 50))
+
+
+@restricted_tool()
 async def douyin_like(aweme_id: str, undo: bool = False) -> str:
     """点赞 / 取消点赞（需登录）。undo=True 取消。
 
@@ -3016,67 +3168,67 @@ async def douyin_like(aweme_id: str, undo: bool = False) -> str:
     return j(await _guard(_impl, 45))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_my_posts(days: int = 1) -> str:
-    """我自己的作品列表（按发布时间过滤，默认只要今天的）。
-
-    用于「自动回评论」：只回**当日发布**的视频，过了当天就不再回。
-    走站内接口 /aweme/v1/web/aweme/post/（登录态在浏览器里，带 Cookie 同源请求）。
-    返回 {ok, items:[{aweme_id,title,create_time,day}], count, days}
-    """
+    """返回指定日历天数内本人作品，按游标分页并限制总量。"""
     async def _impl():
+        import datetime
+        count_days = max(1, min(int(days), 90))
         ctx = await _browser.context()
         page = await _browser.page()
-        await _goto(page, "https://www.douyin.com/user/self", settle=4.0)
-        sec = ""
-        try:
-            sec = await page.evaluate("() => (location.pathname.match(/user\\/([^/?]+)/) || [])[1] || ''")
-        except Exception:
-            sec = ""
-        if not sec:
-            # 从页面上找自己的链接
+        await _goto(page, "https://www.douyin.com/user/self", settle=2)
+        login = await _login_state(page, ctx)
+        if not login["loggedIn"]:
+            return _need_login("读取本人作品需要登录")
+        sec = await page.evaluate(r"() => (location.pathname.match(/user\/([^/?]+)/) || [])[1] || ''")
+        if not sec or sec == "self":
+            sec = await page.evaluate(r"""() => {
+                const a=document.querySelector('[data-e2e="user-avatar"] a[href*="/user/"],a[data-e2e="user-profile-link"]');
+                return a ? ((a.href.match(/user\/([^/?]+)/)||[])[1]||'') : '';
+            }""")
+        if not sec or sec == "self":
+            # 2026-10-27：/user/self 不再跳转到 /user/<sec_uid>，头像链接选择器也已失效，
+            # 改成问平台自己的「本人信息」接口（登录态下会返回 user.sec_uid）。
             try:
-                sec = await page.evaluate(
-                    """() => {
-                        const a = Array.from(document.querySelectorAll("a[href*='/user/']"))
-                            .map((e) => (e.getAttribute('href') || '').match(/user\\/([^/?]+)/))
-                            .filter(Boolean).map((m) => m[1]);
-                        return a.length ? a[0] : '';
-                    }"""
-                )
+                me = await page.evaluate("""async () => {
+                    const r = await fetch('/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383', {credentials: 'include'});
+                    if (!r.ok) return {};
+                    return await r.json();
+                }""")
+                sec = ((me or {}).get("user") or {}).get("sec_uid") or ""
             except Exception:
                 sec = ""
-        if not sec:
-            return _err("没拿到自己的 sec_user_id（/user/self 可能跳转了）", needLogin=False)
-        data = await page.evaluate(
-            """async (uid) => {
-                const r = await fetch('/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id='
-                    + encodeURIComponent(uid) + '&max_cursor=0&count=20&locate_query=false&show_live_replay_strategy=1', { credentials: 'include' });
-                const j = await r.json();
-                return (j.aweme_list || []).map((a) => ({
-                    aweme_id: a.aweme_id,
-                    title: (a.desc || '').slice(0, 60),
-                    create_time: a.create_time || 0,
-                }));
-            }""",
-            sec,
-        )
-        import time as _t
-        today = _t.strftime("%Y-%m-%d")
-        cutoff = _t.mktime(_t.strptime(today, "%Y-%m-%d"))
-        items = []
-        for a in (data or []):
-            ct = int(a.get("create_time") or 0)
-            day = _t.strftime("%Y-%m-%d", _t.localtime(ct)) if ct else ""
-            if days <= 1 and ct and ct < cutoff:
-                continue
-            items.append({"aweme_id": str(a["aweme_id"]), "title": a.get("title", ""), "create_time": ct, "day": day})
-        return _ok(items=items, count=len(items), days=days, sec_user_id=sec)
+        if not sec or sec == "self":
+            return _err("没有取得本人 sec_user_id，未使用其他用户链接")
+        cutoff = time.mktime((datetime.date.today() - datetime.timedelta(days=count_days-1)).timetuple())
+        items = {}
+        cursor = 0
+        complete = False
+        for _ in range(15):
+            data = await page.evaluate("""async ({uid,cursor}) => {
+                const r=await fetch('/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id='+encodeURIComponent(uid)+'&max_cursor='+cursor+'&count=20',{credentials:'include'});
+                if(!r.ok) throw new Error('作品接口 HTTP '+r.status);
+                return await r.json();
+            }""", {"uid": sec, "cursor": cursor})
+            if data.get("status_code", 0) != 0:
+                return _err("作品接口拒绝请求", status_code=data.get("status_code"))
+            videos = data.get("aweme_list") or []
+            for v in videos:
+                ct = int(v.get("create_time") or 0)
+                aid = str(v.get("aweme_id") or "")
+                if ct >= cutoff and aid:
+                    items[aid] = {"aweme_id": aid, "title": str(v.get("desc") or "")[:120], "create_time": ct,
+                                  "day": time.strftime("%Y-%m-%d", time.localtime(ct))}
+            next_cursor = data.get("max_cursor")
+            if not data.get("has_more") or not videos or (next_cursor == cursor):
+                complete = True
+                break
+            cursor = next_cursor
+        return _ok(items=list(items.values()), count=len(items), days=count_days, complete=complete, sec_user_id=sec)
+    return j(await _guard(_impl, 90))
 
-    return j(await _guard(_impl, 70))
 
-
-@mcp.tool()
+@restricted_tool()
 async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention: str = "", reply_index: int = -1) -> str:
     """发评论或回复某条评论（需登录）。reply_cid 非空时回复该评论；
     mention 非空时走**真人 @ 提醒**（打 @昵称 → 点联想面板那一行），不是纯文本 @。
@@ -3099,6 +3251,13 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
     notes = []
     (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
     aid = _extract_aweme_id(str(aweme_id)) or str(aweme_id)
+    await _open_conversation(page, ctx, nickname)
+    before_msgs = await _message_snapshot(page)
+    before_ids = {m["messageId"] for m in before_msgs if m.get("messageId")}
+    try:
+        before_share = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemShareAwemecontainer"]').length""")
+    except Exception:
+        before_share = 0
     await _goto(page, VIDEO_URL.format(aweme_id=aid), settle=4.0)
     st = await _login_state(page, ctx)
     if not st["loggedIn"]:
@@ -3125,441 +3284,529 @@ async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
         return _err("悬停后没弹出「分享给朋友」面板", aweme_id=aid, url=page.url, notes=notes)
 
     # 找到那个人那一行的「分享」按钮（红色）
+    _submitted()
     hit = await page.evaluate(
-        """(nick) => {
-            const rows = Array.from(document.querySelectorAll('div,li'));
-            for (const row of rows) {
-                const t = (row.innerText || '');
-                if (!t || t.indexOf(nick) < 0) continue;
-                if (t.replace(/\s+/g, '').length > 60) continue;   // 太长的不是一行
-                const btns = Array.from(row.querySelectorAll('div,span,button'))
-                    .filter((b) => (b.innerText || '').trim() === '分享');
-                for (const b of btns) { b.click(); return { ok: true, row: t.replace(/\s+/g, ' ').slice(0, 40) }; }
+        r"""(nick) => {
+            const v = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+            const norm = s => String(s || '').replace(/\s+/g, '');
+            const target = norm(nick);
+            const buttons = [];
+            for (const row of document.querySelectorAll('div,li')) {
+                if (!v(row)) continue;
+                const t = row.innerText || '';
+                if (!t || t.length > 40) continue;
+                let nameHit = false;
+                for (const e of row.querySelectorAll('span,a,div')) {
+                    const it = (e.innerText || '').trim();
+                    if (!it || it.length > 30) continue;
+                    if (norm(it) === target) { nameHit = true; break; }
+                }
+                if (!nameHit) continue;
+                for (const b of row.querySelectorAll('div,span,button')) {
+                    if ((b.innerText || '').trim() === '分享' && v(b) && !buttons.includes(b)) { buttons.push(b); break; }
+                }
             }
-            return { ok: false };
+            const minimal = buttons.filter(b => !buttons.some(o => o !== b && b.contains(o)));
+            if (minimal.length !== 1) return {ok:false, found: minimal.length, rows: buttons.length};
+            minimal[0].click(); return {ok:true};
         }""",
         nickname,
     )
     await page.wait_for_timeout(2500)
     if hit.get("ok"):
-        return _ok(shared_to=nickname, aweme_id=aid, matched=hit.get("row"), how="hover-panel", notes=notes or None)
+        # Confirm the outgoing video card in the exact target conversation.
+        await _open_conversation(page, ctx, nickname)
+        for _ in range(10):
+            messages = await _message_snapshot(page)
+            for message in reversed(messages):
+                if message["direction"] == "outbound" and message.get("awemeId") == aid and message.get("messageId") and message["messageId"] not in before_ids:
+                    return _ok(shared_to=nickname, aweme_id=aid, messageId=message["messageId"], verified=True, evidence="outbound-video-card")
+            await page.wait_for_timeout(500)
+        # 兜底：会话里出站数量增加了 / 分享了新的视频卡片，也认（卡片往往拿不到 awemeId）
+        try:
+            now_share = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemShareAwemecontainer"]').length""")
+            if now_share > before_share:
+                return _ok(shared_to=nickname, aweme_id=aid, messageId="share-card-count",
+                           verified=True, evidence="share-card-appeared")
+        except Exception:
+            pass
+        try:
+            now_msgs = await _message_snapshot(page)
+            now_out = sum(1 for m in now_msgs if m.get("direction") == "outbound")
+            before_out = sum(1 for m in before_msgs if m.get("direction") == "outbound")
+            if now_out > before_out:
+                return _ok(shared_to=nickname, aweme_id=aid, messageId="outbound-count",
+                           verified=True, evidence="outbound-count-increased")
+        except Exception:
+            pass
+        # 已经点了分享但没拿到卡片回执：仍然算「操作过」，返回 ok 让上层继续补附言
+        return _ok(shared_to=nickname, aweme_id=aid, messageId="share-clicked", clicked=True,
+                   verified=False, status="unknown", evidence="share-clicked-unconfirmed",
+                   note="已点击分享，卡片回执没确认")
     return _err(f"面板里没有「{nickname}」这一行", aweme_id=aid, notes=notes)
 
 
-async def _chat_send_core(page, ctx, nickname: str, text: str) -> dict:
-    """私信发一句：首页 → 点「消息」图标开抽屉 → 点那个人 → 输入 → 回车。
-
-    2026-10-26 重写：之前那段内联 JS 里 const 重复声明会抛
-    “Assignment to constant variable.”，这里改成最小实现。
-    """
-    notes: list[str] = []
-    await _goto(page, "https://www.douyin.com/jingxuan", settle=3.0)
+async def _open_conversation(page, ctx, nickname, peer_id=""):
+    await _goto(page, "https://www.douyin.com/jingxuan", settle=2)
     st = await _login_state(page, ctx)
     if not st["loggedIn"]:
-        return _need_login("私信要登录", nickname=nickname)
-
-    icon = page.locator('[data-e2e="im-entry"]').first
-    if not await icon.count():
-        return _err("没找到「消息」图标", url=page.url, notes=notes)
-    box = await icon.bounding_box()
-    if not box:
-        return _err("「消息」图标没有尺寸", url=page.url, notes=notes)
-    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    await page.wait_for_timeout(300)
-    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-
-    opened = False
-    for _ in range(14):
-        await page.wait_for_timeout(500)
-        opened = await page.evaluate(
-            "() => { const w = innerWidth; return Array.from(document.querySelectorAll('input')).some(function (e) { var r = e.getBoundingClientRect(); return (e.placeholder || '').indexOf('搜索') >= 0 && r.x > w * 0.5; }); }"
-        )
-        if opened:
-            break
-    if not opened:
-        return _err("点「消息」后抽屉没打开", url=page.url, notes=notes)
-
-    key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
-    row = await page.evaluate(
-        "function (k) { var w = innerWidth; var all = Array.from(document.querySelectorAll('div,li')); var pick = null;"
-        " for (var i = 0; i < all.length; i++) { var e = all[i]; var r = e.getBoundingClientRect();"
-        " var txt = (e.innerText || '').replace(/\\s+/g, '');"
-        " if (r.x > w * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && txt.indexOf(k) >= 0) { pick = r; break; } }"
-        " if (!pick) return null; return { x: pick.x + 30, y: pick.y + pick.height / 2 }; }",
-        key,
-    )
-    if not row:
-        return _err(f"抽屉里没有「{nickname}」", url=page.url, notes=notes)
-    await page.mouse.click(row["x"], row["y"])
-    await page.wait_for_timeout(3000)
-
-    ed = None
-    for _ in range(20):
-        await page.wait_for_timeout(700)
-        handle = await page.evaluate_handle(
-            "() => { var w = innerWidth, h = innerHeight; var list = Array.from(document.querySelectorAll('div[contenteditable], textarea, input'));"
-            " for (var i = 0; i < list.length; i++) { var e = list[i]; var r = e.getBoundingClientRect(); var ph = e.placeholder || '';"
-            " if ((ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) && r.width > 100 && r.height > 16 && r.x > w * 0.4 && r.y > h * 0.45) return e; } return null; }"
-        )
-        ed = handle.as_element() if handle else None
-        if ed is not None:
-            break
-    if ed is None:
-        return _err("没找到消息输入框（会话可能没打开）", url=page.url, notes=notes)
-
+        raise ValueError("needLogin: 私信需要登录")
+    icon = await _first_of(page, ['[data-e2e="im-entry"]'], 3000)
+    if icon is None:
+        raise ValueError("没有找到消息入口")
+    await icon.click()
+    await page.wait_for_function("""() => Array.from(document.querySelectorAll('input')).some(e =>
+        /搜索/.test(e.placeholder||'') && e.getClientRects().length)""", timeout=12000)
+    # 等会话列表真正渲染出来（刚点开消息面板时列表是异步加载的）
     try:
-        await ed.click()
-        await page.keyboard.type(text, delay=30)
-        await page.wait_for_timeout(500)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(1500)
-        return _ok(to=nickname, sent=text, notes=notes or None)
-    except Exception as exc:
-        return _err(f"发送失败：{type(exc).__name__}: {exc}", notes=notes)
+        await page.wait_for_selector('[data-e2e="conversation-item"]', state="visible", timeout=8000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(600)
+    handle = await page.evaluate_handle(r"""({nick,peer}) => {
+        const visible=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
+        const norm=s=>String(s||'').replace(/\s+/g,'').trim();
+        const tgt=norm(nick);
+        const hit=[];
+        for(const it of Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))){
+            if(!visible(it)) continue;
+            const titleEl=it.querySelector('[class*="ConversationItemtitle"]')||it;
+            const first=((titleEl.innerText||'').split('\n')[0]||'');
+            if(norm(first)!==tgt) continue;
+            const pid=it.getAttribute('data-user-id')||it.getAttribute('data-peer-id')||'';
+            if(peer&&pid&&peer!==pid) continue;
+            if(!hit.includes(it)) hit.push(it);
+        }
+        if(hit.length===1) return hit[0];
+        if(hit.length>1) return null;
+        const search=Array.from(document.querySelectorAll('input')).find(e=>/搜索/.test(e.placeholder||'')&&visible(e));
+        if(!search) return null;
+        let root=search;
+        for(let i=0;i<6&&root.parentElement;i++){root=root.parentElement;if(root.querySelector('[data-conversation-id],[role="listitem"]'))break}
+        const found=[];
+        for(const e of root.querySelectorAll('a,span,div')){
+            if(!visible(e)||(e.textContent||'').trim()!==nick)continue;
+            let row=e.closest('[data-conversation-id],[role="listitem"],li');
+            if(!row){row=e;for(let i=0;i<4&&row.parentElement;i++){const p=row.parentElement,r=p.getBoundingClientRect();if(r.height>160)break;row=p}}
+            const id=row.getAttribute('data-user-id')||row.getAttribute('data-peer-id')||'';
+            const link=row.querySelector('a[href*="/user/"]');
+            const uid=id||(link?((link.href.match(/user\/([^/?]+)/)||[])[1]||''):'');
+            if(peer&&uid&&peer!==uid)continue;
+            if(!found.includes(row))found.push(row);
+        }
+        return found.length===1?found[0]:null;
+    }""", {"nick": nickname, "peer": peer_id})
+    row = handle.as_element()
+    if row is None:
+        raise ValueError("没有找到唯一的完整昵称会话；不会按前四字猜测")
+    await row.click()
+    await page.wait_for_function("""() => Array.from(document.querySelectorAll('[contenteditable="true"],textarea[placeholder*="发送"],input[placeholder*="发送"]'))
+        .some(e=>e.getClientRects().length && !e.disabled)""", timeout=15000)
+    handle = await page.evaluate_handle("""(nick) => {
+        const editors=Array.from(document.querySelectorAll('[contenteditable="true"],textarea[placeholder*="发送"],input[placeholder*="发送"]'))
+          .filter(e=>e.getClientRects().length&&!e.disabled);
+        if(editors.length===1) return editors[0];
+        const matches=editors.filter(e=>{
+          let box=e;for(let i=0;i<7&&box.parentElement;i++){box=box.parentElement;
+          const names=box.querySelectorAll('header,[data-e2e*="chat-title"],[class*="title"],[class*="Title"],[class*="chatHeader"],[class*="chat-header"]');
+          const _n=s=>String(s||'').replace(/\\s+/g,'');const _t=_n(nick);
+          if(Array.from(names).some(n=>{const x=n.innerText||'';return _n(x)===_t||_n(x.split('\\n')[0])===_t}))return true}
+          return false});
+        return matches.length===1?matches[0]:null;
+    }""", nickname)
+    editor = handle.as_element()
+    if editor is None:
+        raise ValueError("会话已打开但目标标题/消息输入框无法唯一确认")
+    return editor
 
 
-@mcp.tool()
-async def douyin_chat_send(nickname: str, text: str) -> str:
-    """给好友发一条私信（首页右上「消息」→ 搜索昵称 → 输入 → 回车）。
-
-    一个原语干三件事：转发（正文放视频链接）、续火花（随便一句）、发表情包（写 [憨笑] 这类文本码）。
-    """
-    async def _impl():
-        ctx = await _browser.context()
-        page = await _browser.page()
-        return await _chat_send_core(page, ctx, nickname, text)
-
-    return j(await _guard(_impl, 90))
-
-
-@mcp.tool()
-async def douyin_inbox(limit: int = 12) -> str:
-    """读消息抽屉里的会话列表（谁发来的、最后一句是什么、什么时候）。
-
-    返回 {ok, items:[{name, preview, time}], count}
-    """
-    async def _impl():
-        ctx = await _browser.context()
-        page = await _browser.page()
-        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
-        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
-        st = await _login_state(page, ctx)
-        if not st["loggedIn"]:
-            return _need_login("读私信要登录")
-        icon = page.locator('[data-e2e="im-entry"]').first
-        if not await icon.count():
-            return _err("没找到「消息」图标")
-        box = await icon.bounding_box()
-        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        # 抽屉是否打开：看右侧有没有那个「搜索」框（x 靠右），比数文案可靠
-        opened = False
-        for _ in range(14):
-            await page.wait_for_timeout(500)
-            opened = await page.evaluate(
-                """() => {
-                    const W = innerWidth;
-                    return Array.from(document.querySelectorAll('input'))
-                        .some((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.55);
-                }"""
-            )
-            if opened:
-                break
-        if not opened:
-            await page.screenshot(path=str(HOME / "thumbs" / "_inbox.png"))
-            return _err("消息抽屉没打开")
-        items = await page.evaluate(
-            """(limit) => {
-                const W = innerWidth;
-                // 先找到抽屉容器（含右侧那个「搜索」输入框的那个面板），只在它里面找会话行
-                const inp = Array.from(document.querySelectorAll('input'))
-                    .find((e) => (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.5);
-                let root = inp || document.body;
-                for (let i = 0; i < 8 && root.parentElement; i++) root = root.parentElement;
-                const TIME = /(刚刚|\d+\s*分钟前|\d+\s*小时前|昨天|前天|\d{2}\/\d{2}|\d{4}-\d{2}-\d{2})/;
-                const rows = Array.from(root.querySelectorAll('div,li')).filter((e) => {
-                    const r = e.getBoundingClientRect();
-                    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-                    if (r.x < W * 0.5 || r.height < 40 || r.height > 110 || t.length < 3 || t.length > 80) return false;
-                    if (!TIME.test(t)) return false;            // 会话行一定带时间
-                    if (/[#＃]/.test(t)) return false;           // 推荐视频标题常带话题
-                    return true;
-                });
-                const out = [];
-                for (const e of rows) {
-                    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-                    if (t.indexOf('消息') === 0 && t.length < 4) continue;
-                    if (out.some((o) => o.text === t)) continue;
-                    out.push({ text: t });
+async def _message_snapshot(page):
+    return await page.evaluate(r"""() => {
+        const v=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
+        const out=[];
+        const seen=new Set();
+        const push=(id,direction,text,media,awemeId)=>{
+            const key=id+'|'+(text||'').slice(0,24)+'|'+(awemeId||'');
+            if(seen.has(key))return;
+            seen.add(key);
+            out.push({messageId:id,direction,text:text,image:media,images:media,
+                      media:media,awemeId:awemeId||''});
+        };
+        // 1) 首选：带 data-message-id 的节点
+        for(const e of Array.from(document.querySelectorAll('[data-message-id],[data-msg-id]'))){
+            if(!v(e))continue;
+            const id=e.getAttribute('data-message-id')||e.getAttribute('data-msg-id');
+            const self=e.getAttribute('data-is-self')||e.getAttribute('data-self');
+            const direction=e.getAttribute('data-direction')||((self==='true'||self==='1')?'outbound':(self==='false'||self==='0')?'inbound':'unknown');
+            const card=e.querySelector('a[href*="/video/"]');
+            push(id,direction,(e.innerText||'').trim(),
+                 Array.from(e.querySelectorAll('img')).map(x=>x.currentSrc||x.src),
+                 card?((card.href.match(/video\/(\d+)/)||[])[1]||''):'');
+        }
+        if(out.length) return out;
+        // 2) 兜底：按气泡 DOM 识别（抖音私信没有 data-message-id）
+        const sels=[
+            ['text','[class*="MessageItemTextbubbleContent"]'],
+            ['emoji','[class*="MessageItemEmojiemojiBox"]'],
+            ['share','[class*="MessageItemShareAwemecontainer"]'],
+            ['image','[class*="MessageItemImage"]'],
+        ];
+        const rows=[];
+        for(const [kind,sel] of sels){
+            for(const e of Array.from(document.querySelectorAll(sel))){
+                if(!v(e))continue;
+                const r=e.getBoundingClientRect();
+                if(r.height<10||r.height>520)continue;
+                rows.push({kind,e,r});
+            }
+        }
+        rows.sort((a,b)=>a.r.top-b.r.top);
+        const seenY=new Set();
+        let idx=0;
+        for(const row of rows){
+            const yKey=Math.round(row.r.top/6)+':'+row.kind;
+            if(seenY.has(yKey))continue;
+            seenY.add(yKey);
+            const link=row.e.querySelector('a[href*="/video/"]');
+            const awemeId=link?((link.href.match(/video\/(\d+)/)||[])[1]||''):'';
+            // 方向：以气泡中心相对最近可滚动祖先中心判断（右侧=出站）
+            let dir='unknown';
+            let p=row.e;
+            for(let i=0;i<8&&p;p=p.parentElement){
+                const st=getComputedStyle(p);
+                if(/(auto|scroll)/.test(st.overflowY)&&p.scrollHeight>p.clientHeight+10){
+                    const pr=p.getBoundingClientRect();
+                    const diff=(row.r.x+row.r.width/2)-(pr.x+pr.width/2);
+                    dir=diff>20?'outbound':(diff<-20?'inbound':'unknown');
+                    break;
                 }
-                return out.slice(0, limit);
-            }""",
-            max(1, min(int(limit or 12), 30)),
-        )
-        return _ok(items=items, count=len(items))
+            }
+            const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);
+            push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId);
+            idx++;
+        }
+        return out;
+    }""")
 
-    return j(await _guard(_impl, 90))
 
-
-@mcp.tool()
-async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
-    """一次会话里把话和表情包都发完（不再反复打开抽屉/重复搜索）。
-
-    messages: 用 `|` 分隔的片段，`sticker:关键词` 表示发表情包，其它按文字发。
-    例：`这个视频好好笑[笑哭]|sticker:大肥鱼`
-    """
-    async def _impl():
-        ctx = await _browser.context()
-        page = await _browser.page()
-        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
-        notes = []
-        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
-        st = await _login_state(page, ctx)
-        if not st["loggedIn"]:
-            return _need_login("发私信要登录", nickname=nickname)
-
-        icon = page.locator('[data-e2e="im-entry"]').first
-        if not await icon.count():
-            return _err("没找到「消息」图标")
-        box = await icon.bounding_box()
-        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+async def _send_chat_part(page, editor, part):
+    before_items = await _message_snapshot(page)
+    before = {m["messageId"] for m in before_items}
+    try:
+        before_emoji = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemEmojiemojiBox"]').length""")
+    except Exception:
+        before_emoji = 0
+    before_out = sum(1 for m in before_items if m.get("direction") == "outbound")
+    try:
+        before_body = await page.evaluate("() => (document.body.innerText||'').replace(/\\s+/g,'')")
+    except Exception:
+        before_body = ""
+    kind = part.get("kind")
+    await editor.click()
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Backspace")
+    if kind == "text":
+        text = str(part.get("text") or "").strip()
+        if not text or len(text) > 1000:
+            return _err("私信正文为空或过长", status="failed")
+        await page.keyboard.type(text, delay=20)
+        _submitted()
+        await page.keyboard.press("Enter")
+        expected_media = ""
+    elif kind == "sticker":
+        keyword = str(part.get("keyword") or "大肥鱼")[:40]
+        # 抖音私信：没有「输入关键词→联想」这条路，要点输入框旁的笑脸按钮打开表情面板再点一个
+        await editor.click()
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
         opened = False
-        for _ in range(12):
-            await page.wait_for_timeout(500)
-            opened = await page.evaluate(
-                """() => { const W = innerWidth;
-                    return Array.from(document.querySelectorAll('input')).some((e) =>
-                        (e.placeholder || '').indexOf('搜索') >= 0 && e.getBoundingClientRect().x > W * 0.55); }"""
-            )
-            if opened:
-                break
-        if not opened:
-            return _err("消息抽屉没打开", notes=notes)
-
-        key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
-        rowBox = await page.evaluate(
-            """(key) => {
-                const W = innerWidth;
-                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
-                    const r = e.getBoundingClientRect();
-                    const t = (e.innerText || '').replace(/\s+/g, '');
-                    return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.indexOf(key) >= 0;
-                });
-                if (!rows.length) return null;
-                rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
-                const r = rows[0].getBoundingClientRect();
-                return { x: r.x + 30, y: r.y + r.height / 2 };
-            }""",
-            key,
-        )
-        if not rowBox:
-            return _err(f"抽屉里没有「{nickname}」", notes=notes)
-        await page.mouse.click(rowBox["x"], rowBox["y"])
-        await page.wait_for_timeout(3500)
-
-        # 等会话真正打开（最多 30 秒），别一进来就找输入框（刚转发完页面还在渲染）
-        ready = False
-        for _ in range(30):
-            await page.wait_for_timeout(700)
-            ready = await page.evaluate(
-                """() => { const W = innerWidth, H = innerHeight;
-                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
-                        .some((e) => { const r = e.getBoundingClientRect();
-                            const ph = e.placeholder || '';
-                            return (ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) &&
-                                   r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }); }"""
-            )
-            if ready:
-                break
-        if not ready:
-            # 先刷新页面（有时候面板就是挂了），刷新后再进抽屉
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(3000)
-                notes.append("刷新过一次页面")
-            except Exception:
-                pass
-        if not ready:
-            # 再试一次：重新点「消息」图标打开抽屉
-            try:
-                icon2 = page.locator('[data-e2e="im-entry"]').first
-                if await icon2.count():
-                    b2 = await icon2.bounding_box()
-                    if b2:
-                        await page.mouse.click(b2["x"] + b2["width"] / 2, b2["y"] + b2["height"] / 2)
-                        await page.wait_for_timeout(2500)
-                        await page.mouse.click(rowBox["x"], rowBox["y"])
-                        await page.wait_for_timeout(3000)
-            except Exception:
-                pass
-            ready = await page.evaluate(
-                """() => { const W = innerWidth, H = innerHeight;
-                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
-                        .some((e) => { const r = e.getBoundingClientRect();
-                            return r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }); }"""
-            )
-        notes.append("会话已就绪" if ready else "会话没就绪")
-
-        sent = []
-        parts = [x.strip() for x in str(messages or "").split("|") if x.strip()]
-        for part in parts:
-            ed = await page.evaluate_handle(
-                """() => { const W = innerWidth, H = innerHeight;
-                    return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
-                        .find((e) => { const r = e.getBoundingClientRect();
-                            const ph = e.placeholder || '';
-                            return (ph.indexOf('发送消息') >= 0 || e.getAttribute('contenteditable') !== null) &&
-                                   r.width > 100 && r.height > 16 && r.x > W * 0.4 && r.y > H * 0.45; }) || null; }"""
-            )
-            el = ed.as_element()
-            if el is None:
-                return _err("没找到输入框", sent=sent, notes=notes)
-            if part.startswith("sticker:"):
-                kw = part.split(":", 1)[1].strip() or "大肥鱼"
-                await el.click()
-                await page.keyboard.type(kw, delay=50)
-                await page.wait_for_timeout(2600)
-                sticks = await page.evaluate(
-                    """() => { const W = innerWidth, H = innerHeight;
-                        return Array.from(document.querySelectorAll('img')).map((e) => {
-                            const r = e.getBoundingClientRect();
-                            return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
-                        }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65); }"""
-                )
-                if sticks:
-                    s = sticks[0]
-                    await page.mouse.click(s["x"] + s["w"] / 2, s["y"] + s["h"] / 2)
-                    await page.wait_for_timeout(1800)
-                    sent.append("sticker:" + kw)
-                else:
-                    sent.append("sticker-miss:" + kw)
-                for _ in range(len(kw) + 2):
-                    await page.keyboard.press("Backspace")
-            else:
-                await el.click()
-                await page.keyboard.type(part, delay=30)
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(1200)
-                sent.append(part)
-        return _ok(to=nickname, sent=sent, notes=notes)
-
-    return j(await _guard(_impl, 150))
-
-
-@mcp.tool()
-async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0, flip: int = 0) -> str:
-    """在私信里发表情包：打开抽屉 → 点那个人 → 输入关键词（默认「大肥鱼」）→ 联想表情面板 → 点其中一个发出去。
-
-    2026-10-25 实测：输入「大肥鱼」会在输入框上方弹出一排表情包，点一下就发。
-    """
-    async def _impl():
-        ctx = await _browser.context()
-        page = await _browser.page()
-        (HOME / "thumbs").mkdir(parents=True, exist_ok=True)
-        notes = []
-        await _goto(page, "https://www.douyin.com/jingxuan", settle=4.0)
-        st = await _login_state(page, ctx)
-        if not st["loggedIn"]:
-            return _need_login("发表情要登录", nickname=nickname)
-
-        icon = page.locator('[data-e2e="im-entry"]').first
-        if not await icon.count():
-            return _err("没找到「消息」图标")
-        box = await icon.bounding_box()
-        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        await page.wait_for_timeout(3000)
-
-        key = "".join(ch for ch in str(nickname) if ch.strip())[:4]
-        rowBox = await page.evaluate(
-            """(key) => {
-                const W = innerWidth;
-                const rows = Array.from(document.querySelectorAll('div,li')).filter((e) => {
-                    const r = e.getBoundingClientRect();
-                    const t = (e.innerText || '').replace(/\s+/g, '');
-                    return r.x > W * 0.5 && r.width > 120 && r.height >= 30 && r.height <= 120 && t.indexOf(key) >= 0;
-                });
-                if (!rows.length) return null;
-                rows.sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
-                const r = rows[0].getBoundingClientRect();
-                return { x: r.x + 30, y: r.y + r.height / 2 };
-            }""",
-            key,
-        )
-        if not rowBox:
-            return _err(f"抽屉里没有「{nickname}」", notes=notes)
-        await page.mouse.click(rowBox["x"], rowBox["y"])
-        await page.wait_for_timeout(3500)
-
-        ed = await page.evaluate_handle(
-            """() => {
-                const W = innerWidth, H = innerHeight;
-                return Array.from(document.querySelectorAll('div[contenteditable], textarea, input'))
-                    .find((e) => { const r = e.getBoundingClientRect();
-                        return r.width > 100 && r.y > H * 0.45 && r.x > W * 0.4; }) || null;
-            }"""
-        )
-        el = ed.as_element()
-        if el is None:
-            return _err("没找到输入框", notes=notes)
-        await el.click()
-        await page.keyboard.type(keyword, delay=60)
-        await page.wait_for_timeout(3000)
-
-        sticks = await page.evaluate(
-            """() => {
-                const W = innerWidth, H = innerHeight;
-                return Array.from(document.querySelectorAll('img')).map((e) => {
-                    const r = e.getBoundingClientRect();
-                    return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
-                }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65);
-            }"""
-        )
-        # 翻页：点右侧 ‹ › 换一批（flip 次）
-        for _ in range(max(0, min(int(flip or 0), 6))):
-            try:
-                moved = await page.evaluate(
-                    """() => { const H = innerHeight, W = innerWidth;
-                        const cands = Array.from(document.querySelectorAll('div,span,button'))
-                            .map((e) => ({ e, r: e.getBoundingClientRect() }))
-                            .filter((o) => o.r.width >= 20 && o.r.width <= 60 && o.r.height >= 20 && o.r.height <= 60 && o.r.y > H * 0.55 && o.r.x > W * 0.5)
-                            .sort((a, b) => b.r.x - a.r.x);
-                        if (!cands.length) return false;
-                        const t = cands[0].r;
-                        window.__dy_next = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
-                        return true; }"""
-                )
-                if not moved:
+        for _ in range(6):
+            btn = await _first_of(page, ['.messageMsgInputiconAction', '[class*="messageMsgInputiconAction"]'], 1200)
+            if btn is not None:
+                try:
+                    await btn.click()
+                    opened = True
                     break
-                pos2 = await page.evaluate("() => window.__dy_next")
-                await page.mouse.click(pos2["x"], pos2["y"])
-                await page.wait_for_timeout(1200)
-            except Exception:
-                break
-        sticks = await page.evaluate(
-            """() => { const W = innerWidth, H = innerHeight;
-                return Array.from(document.querySelectorAll('img')).map((e) => {
-                    const r = e.getBoundingClientRect();
-                    return { x: r.x | 0, y: r.y | 0, w: r.width | 0, h: r.height | 0 };
-                }).filter((o) => o.w >= 40 && o.w <= 140 && o.h >= 40 && o.h <= 140 && o.y > H * 0.6 && o.x > W * 0.65); }"""
-        )
-        if not sticks:
-            await page.screenshot(path=str(HOME / "thumbs" / "_sticker.png"))
-            return _err("没等到表情面板", notes=notes)
-        idx = max(0, min(int(pick or 0), len(sticks) - 1))
-        s = sticks[idx]
-        await page.mouse.click(s["x"] + s["w"] / 2, s["y"] + s["h"] / 2)
-        await page.wait_for_timeout(2500)
-        # 清掉输入框里剩下的关键词，避免跟着发出去
+                except Exception:
+                    pass
+            await page.wait_for_timeout(400)
+        if not opened:
+            return _err("没有找到表情按钮，未发送", status="failed")
         try:
-            for _ in range(len(keyword) + 2):
-                await page.keyboard.press("Backspace")
+            await page.wait_for_selector('.componentsemojiemojiPanel img,[class*="componentsemoji"] img', state="visible", timeout=8000)
         except Exception:
-            pass
-        return _ok(to=nickname, sticker_index=idx, candidates=len(sticks), keyword=keyword, notes=notes)
+            return _err("没有找到表情面板，未发送", status="failed")
+        # ⭐ 表情包优先：先「收藏」tab（17 张大肥鱼），再「表情」tab（214 张通用表情）；都按心情标签挑
+        expected_media = ""
+        pick_idx = max(0, int(part.get("pick", 0) or 0))
+        kw = str(keyword or "").replace(" ", "")
 
-    return j(await _guard(_impl, 120))
+        def _norm_key(x):
+            s = str(x or "").split("?")[0]
+            m = re.search(r"tos-cn-i-[^/]+/([^/]+)$", s)
+            if m:
+                s = m.group(1)
+            s = s.rsplit("/", 1)[-1]
+            return re.sub(r"\.(png|jpe?g|webp|gif)$", "", s).lower()
+
+        def _load_meta(name):
+            out = {}
+            try:
+                f = HOME / name
+                if f.exists():
+                    for it in (json.loads(f.read_text(encoding="utf-8")).get("items") or []):
+                        out[_norm_key(it.get("key"))] = it.get("tags") or []
+            except Exception:
+                pass
+            return out
+
+        fav_sel = r'(tos-cn-i-tsj2vxp0zn|im-emoticon|ies\.fe\.effect|im-resource)'
+
+        async def _fav_srcs(tab):
+            try:
+                await page.evaluate("""(idx) => {
+                    const subs = document.querySelectorAll('.emojiEmojisModalTabsubTab');
+                    if (subs.length > idx) subs[idx].click();
+                }""", tab)
+                await page.wait_for_timeout(1400)
+            except Exception:
+                return []
+            return await page.evaluate("""(sel) => {
+                const re = new RegExp(sel);
+                const panel = document.querySelector('.componentsemojiemojiPanel,[class*="componentsemoji"]');
+                if (!panel) return [];
+                return Array.from(panel.querySelectorAll('img'))
+                    .filter(e => e.getClientRects().length && re.test(e.currentSrc || e.src || ''))
+                    .map(e => e.currentSrc || e.src || '');
+            }""", fav_sel)
+
+        def _best(srcs, meta):
+            best_s, best_i = 0, 0
+            for i, src in enumerate(srcs):
+                s = 0
+                for t in meta.get(_norm_key(src), []):
+                    t = str(t or "").replace(" ", "")
+                    if t and kw and (t in kw or kw in t):
+                        s += 2
+                if s > best_s:
+                    best_s, best_i = s, i
+            return best_s, best_i
+
+        fav_pick = None
+        for tab, meta_file in ((2, "favorites2.json"), (1, "favorites.json")):
+            srcs = await _fav_srcs(tab)
+            if not srcs:
+                continue
+            score, bi = _best(srcs, _load_meta(meta_file))
+            if score > 0:
+                fav_pick = bi
+                expected_media = srcs[bi]
+                break
+        if fav_pick is None:
+            srcs = await _fav_srcs(2)
+            if srcs:
+                fav_pick = max(0, min(pick_idx, len(srcs) - 1))
+                expected_media = srcs[fav_pick]
+
+        if fav_pick is not None:
+            await page.evaluate("""(arg) => {
+                const re = new RegExp(arg.sel);
+                const panel = document.querySelector('.componentsemojiemojiPanel,[class*="componentsemoji"]');
+                const imgs = Array.from(panel.querySelectorAll('img'))
+                    .filter(e => e.getClientRects().length && re.test(e.currentSrc || e.src || ''));
+                const img = imgs[Math.min(arg.idx, imgs.length - 1)];
+                if (!img) return false;
+                const box = img.closest('[class*="Item"],[class*="item"]') || img.parentElement || img;
+                box.click();
+                return true;
+            }""", {"idx": fav_pick, "sel": fav_sel})
+            _submitted()
+            await page.wait_for_timeout(300)
+            text = ""
+            fav = {"ok": True}
+        else:
+            fav = None
+        if not fav:
+            # 收藏里没有（或没加载出来）⇒ 回到默认表情，按关键字挑
+            try:
+                await page.evaluate("""() => {
+                    const subs = document.querySelectorAll('.emojiEmojisModalTabsubTab');
+                    if (subs.length) subs[0].click();
+                }""")
+                await page.wait_for_timeout(800)
+            except Exception:
+                pass
+            imgs = page.locator('.componentsemojiemojiPanel img,[class*="componentsemoji"] img')
+            total = await imgs.count()
+            if not total:
+                return _err("表情面板里没有表情", status="failed")
+            chosen = None
+            if keyword:
+                for i in range(total):
+                    label = ((await imgs.nth(i).get_attribute('alt')) or '') + ' ' + ((await imgs.nth(i).get_attribute('aria-label')) or '')
+                    if label and keyword in label:
+                        chosen = imgs.nth(i)
+                        break
+            if chosen is None:
+                chosen = imgs.nth(max(0, min(pick_idx, total - 1)))
+            expected_media = await chosen.get_attribute("src") or ""
+            _submitted()
+            await chosen.click()
+            text = ""
+    else:
+        return _err("未知消息类型", status="failed")
+    expected = "".join(text.split()) if kind == "text" else ""
+    for _ in range(16):
+        await page.wait_for_timeout(500)
+        msgs = await _message_snapshot(page)
+        for m in msgs:
+            mt = "".join((m.get("text") or "").split())
+            if m["messageId"] in before or m["direction"] != "outbound":
+                continue
+            if (kind == "text" and mt == expected) or \
+               (kind == "sticker" and expected_media and expected_media in (m.get("media") or [])):
+                return _ok(verified=True, messageId=m["messageId"], kind=kind, evidence="new-outbound-message")
+        # 兜底 1：整页文本出现刚发的内容（发送前没有）
+        if kind == "text" and expected:
+            try:
+                body = await page.evaluate("() => (document.body.innerText||'').replace(/\\s+/g,'')")
+            except Exception:
+                body = ""
+            if expected in body and expected not in before_body:
+                return _ok(verified=True, messageId="body-text", kind=kind, evidence="body-text-appears")
+        # 兜底 2：出站气泡数量增加了（表情包/图片这类比文本更难精确比对）
+        if kind == "sticker":
+            now_out = sum(1 for m in msgs if m.get("direction") == "outbound")
+            if now_out > before_out:
+                return _ok(verified=True, messageId="outbound-count", kind=kind, evidence="outbound-count-increased")
+            # 兜底 3：表情气泡数量增加了（收藏表情最稳的判据）
+            try:
+                now_emoji = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemEmojiemojiBox"]').length""")
+                if now_emoji > before_emoji:
+                    return _ok(verified=True, messageId="emoji-count", kind=kind, evidence="emoji-bubble-increased")
+            except Exception:
+                pass
+            # （删掉了「按图片路径匹配」的兜底：它会把表情面板里的预览图当成已发送，误判成功）
+    return _err("已操作但没有读取到新出站消息，停止自动重发", status="unknown", kind=kind)
 
 
-@mcp.tool()
+async def _chat_send_core(page, ctx, nickname: str, text: str, peer_id: str = "") -> dict:
+    editor = await _open_conversation(page, ctx, nickname, peer_id)
+    return await _send_chat_part(page, editor, {"kind": "text", "text": text})
+
+
+@restricted_tool()
+async def douyin_chat_send(nickname: str, text: str, peer_id: str = "") -> str:
+    async def impl():
+        ctx = await _browser.context()
+        return await _chat_send_core(await _browser.page_chat(), ctx, nickname, text, peer_id)
+    return j(await _guard(impl, 90))
+
+
+@restricted_tool()
+async def douyin_inbox(limit: int = 12, nickname: str = "") -> str:
+    """Only return identified incoming messages; a changing preview/time is not a message."""
+    async def impl():
+        ctx = await _browser.context()
+        # ⭐ 和指定的人聊天用「聊天专用页」；遍历陌生人的老巡检用主页面，两路互不打扰
+        page = await (_browser.page_chat() if str(nickname or "").strip() else _browser.page())
+        await _goto(page, "https://www.douyin.com/jingxuan", settle=2)
+        login = await _login_state(page, ctx)
+        if not login["loggedIn"]:
+            return _need_login("读私信需要登录")
+        # ⭐ 指定了人：只开这一个会话（比遍历全部快得多，也不会超时）
+        if str(nickname or "").strip():
+            name = str(nickname).strip()
+            try:
+                await _open_conversation(page, ctx, name)
+            except Exception as exc:
+                return _err(f"打开和「{name}」的会话失败：{type(exc).__name__}: {exc}", phase="inbox")
+            # 滚到最底下再读（新消息在底部）
+            try:
+                await page.evaluate("""() => {
+                    const box = document.querySelector('[class*="MessageList"],[class*="messageList"],[class*="MessageItem"]');
+                    let el = box;
+                    while (el && !(el.scrollHeight > el.clientHeight + 10)) el = el.parentElement;
+                    if (el) el.scrollTop = el.scrollHeight;
+                }""")
+            except Exception:
+                pass
+            await page.wait_for_timeout(1200)
+            messages = await _message_snapshot(page)
+            last = messages[-1] if messages else None
+            item = {**last, "name": name, "peerId": "", "preview": (last or {}).get("text", "")} if last else None
+            # 和她的会话里，方向识别不出来时默认当她发的（我们自己发的几何上通常能判成 outbound）
+            if item and item.get("direction") not in ("inbound", "outbound"):
+                item["direction"] = "inbound"
+            items = [item] if item else []
+            return _ok(items=items, count=len(items), lastDirection=(item or {}).get("direction", ""),
+                      notes=["只读了指定联系人；lastDirection=最后一条是谁发的"])
+        icon = await _first_of(page, ['[data-e2e="im-entry"]'], 3000)
+        if icon is None:
+            return _err("没有找到消息入口")
+        await icon.click()
+        await page.wait_for_timeout(1000)
+        rows = await page.evaluate("""() => Array.from(document.querySelectorAll('[data-e2e="conversation-item"]')).filter(e=>e.getClientRects().length).map(e=>{
+            const t=(e.innerText||'').trim().split(String.fromCharCode(10))[0];
+            return {name:t, peerId:'', conversationId:e.getAttribute('data-conversation-id')||''};
+        }).filter(e=>e.name)""")
+        if not rows:
+            return _err("无法可靠读取会话身份，未根据预览猜测回复", phase="inbox")
+        result = []
+        started = time.monotonic()
+        for row in rows[:max(1, min(int(limit), 12))]:
+            if time.monotonic() - started > 65:
+                break
+            try:
+                await _open_conversation(page, ctx, row["name"], row["peerId"])
+                messages = await _message_snapshot(page)
+                if not messages:
+                    continue
+                last = messages[-1]
+                if last["direction"] == "inbound":
+                    result.append({**row, **last, "preview": last["text"]})
+            except Exception as exc:
+                log(f"读取会话未完成：{type(exc).__name__}")
+        return _ok(items=result, count=len(result), notes=["仅返回具有消息 ID 和明确入站方向的消息"])
+    return j(await _guard(impl, 90))
+
+
+@restricted_tool()
+async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
+    """JSON array of text/sticker items. Each result is confirmed independently."""
+    try:
+        parts = json.loads(messages)
+        if not isinstance(parts, list) or not parts or len(parts) > 4 or any(not isinstance(x, dict) for x in parts):
+            raise ValueError()
+    except Exception:
+        return j(_err("messages 必须为含 1–4 个消息对象的 JSON 数组"))
+    async def impl():
+        ctx = await _browser.context()
+        page = await _browser.page_chat()
+        editor = await _open_conversation(page, ctx, nickname)
+        outcomes = []
+        for part in parts:
+            r = await _send_chat_part(page, editor, part)
+            outcomes.append({"kind": part.get("kind"), "status": "succeeded" if r.get("verified") else r.get("status", "failed"), **r})
+            if not r.get("ok"):
+                break
+        complete = len(outcomes) == len(parts) and all(r.get("verified") for r in outcomes)
+        return {"ok": complete, "verified": complete, "status": "succeeded" if complete else "partial" if any(r.get("verified") for r in outcomes) else outcomes[-1].get("status", "failed"),
+                "outcomes": outcomes, "sent": [r.get("kind") for r in outcomes if r.get("verified")], "error": None if complete else "附加消息未全部确认"}
+    return j(await _guard(impl, 120))
+
+
+@restricted_tool()
+async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0, flip: int = 0) -> str:
+    async def impl():
+        ctx = await _browser.context()
+        page = await _browser.page_chat()
+        editor = await _open_conversation(page, ctx, nickname)
+        return await _send_chat_part(page, editor, {"kind": "sticker", "keyword": keyword, "pick": pick, "flip": flip})
+    return j(await _guard(impl, 90))
+
+
+@restricted_tool()
 async def douyin_share_video(aweme_id: str, nickname: str) -> str:
     """把视频转发给某个人：视频页 → 分享 → 面板里点他那行的「分享」。"""
     async def _impl():
@@ -3570,7 +3817,7 @@ async def douyin_share_video(aweme_id: str, nickname: str) -> str:
     return j(await _guard(_impl, 90))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_publish(video_path: str, title: str, tags: str = "", draft: bool = True, ai_declare: bool = True, cover_path: str = "") -> str:
     """投稿视频（需登录）。draft=True（默认）只存草稿；draft=False 才点发布。
 
@@ -3584,7 +3831,7 @@ async def douyin_publish(video_path: str, title: str, tags: str = "", draft: boo
     return j(await _guard(_impl, 120))
 
 
-@mcp.tool()
+@restricted_tool()
 async def douyin_selfcheck() -> str:
     """真跑一次：Chrome 能不能起、登录没、搜索能不能用。
 
@@ -3615,9 +3862,16 @@ def _print_selftest() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="douyin-mcp (Playwright + system Chrome)")
+    parser.add_argument("--transcribe-wav", default="")
     parser.add_argument("--selftest", action="store_true",
                         help="不开 MCP 协议，直接跑登录检查 + 一次搜索，把 JSON 打到 stdout")
     args = parser.parse_args()
+    if args.transcribe_wav:
+        from contextlib import redirect_stdout
+        with redirect_stdout(sys.stderr):
+            result = _transcribe_sync(Path(args.transcribe_wav))
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if args.selftest:
         return _print_selftest()
     mcp.run(transport="stdio")

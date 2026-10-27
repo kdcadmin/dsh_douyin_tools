@@ -2,3 +2,6 @@
 # 注意：必须 mcp<2 —— mcp 2.x 把 FastMCP 改名成 MCPServer，本文件用的是 v1 的 FastMCP API。
 mcp>=1.9,<2
 playwright>=1.45
+numpy>=1.26
+faster-whisper>=1.1,<2
+httpx>=0.27,<1

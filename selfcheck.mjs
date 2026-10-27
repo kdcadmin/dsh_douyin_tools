@@ -21,9 +21,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { McpClient } from './lib/mcp.mjs'
 
 const pluginDir = dirname(fileURLToPath(import.meta.url))
-const home = mkdtempSync(join(tmpdir(), 'douyin-selfcheck-'))
+const home = mkdtempSync(join(pluginDir, '.douyin-selfcheck-'))
 process.env.DSH_DOUYIN_HOME = join(home, 'douyin-duty')
 
 const EXPECTED_TOOLS = [
@@ -263,7 +264,11 @@ if (mod) {
   await new Promise((r) => setTimeout(r, 30))
   writeFileSync(join(fakeComfy, 'newest.mp4'), '')
   await byName.dy_config.execute({ patch: { comfyOutputDir: fakeComfy, autoPublish: true } })
-  const pub2 = await byName.dy_publish.execute({ latest: true, title: '自检用标题' })
+  const originalCall = McpClient.prototype.call
+  let pub2
+  McpClient.prototype.call = async () => { throw new Error('Offline selfcheck: MCP is deliberately disabled') }
+  try { pub2 = await byName.dy_publish.execute({ latest: true, title: '自检用标题' }) }
+  finally { McpClient.prototype.call = originalCall }
   check('dy_publish(latest) 按 mtime 挑到最新那个 .mp4（不是最旧的）',
     String(pub2?.video || '').endsWith('newest.mp4'), String(pub2?.video || '(没带 video 出来)'))
   check('dy_publish 默认 draft=true（只存草稿）', pub2?.draft === true, String(pub2?.draft))
@@ -274,10 +279,11 @@ if (mod) {
 
   /* ── ⑧ 跑一轮：用一个假 dsh CLI 验整条链路（不联网、不花 token） ── */
   const argvFile = join(homeDir, 'fake-dsh-argv.json')
-  const fakeCli = join(homeDir, 'fake-dsh.js')
+  const fakeCli = join(homeDir, 'fake-dsh.cjs')
   writeFileSync(fakeCli,
-    `const { writeFileSync } = require('node:fs')\n`
+    `const { writeFileSync, copyFileSync } = require('node:fs')\n`
     + `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2), null, 2))\n`
+    + `copyFileSync(process.argv[5], ${JSON.stringify(join(homeDir, 'overlay-snapshot.yml'))})\n`
     + `process.exit(0)\n`, 'utf8')
   await byName.dy_config.execute({ patch: { dshBin: fakeCli } })
   const run = await byName.dy_run.execute({ mode: 'headless' })
@@ -293,12 +299,12 @@ if (mod) {
     `argv[0..3]=${JSON.stringify(argv.slice(0, 4))}`)
   const promptText = String(argv[4] || '')
   check('提示词里带了今天的报告路径与"### <视频id>"口径',
-    promptText.includes(join('out', `${status?.today}.md`)) && promptText.includes('### <视频id>'),
+    promptText.includes(join('out', `${status?.today}.md`)) && promptText.includes('结构化账本'),
     promptText.slice(0, 80))
   check('提示词里写清了三道闸门都是关的',
     promptText.includes('关着'), 'ok')
   let overlayText = ''
-  try { overlayText = readFileSync(join(homeDir, 'headless-overlay.yml'), 'utf8') } catch { overlayText = '' }
+  try { overlayText = readFileSync(join(homeDir, 'overlay-snapshot.yml'), 'utf8') } catch { overlayText = '' }
   check('overlay 挂上了 douyin-duty 的 stdio MCP',
     overlayText.includes('mcp-douyin-duty') && overlayText.includes('serverName: douyin-duty')
     && overlayText.includes("transport: stdio") && overlayText.includes('mcp_server.py'),
