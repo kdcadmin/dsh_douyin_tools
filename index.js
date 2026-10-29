@@ -308,7 +308,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen-vl-max-latest', localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -2058,7 +2058,7 @@ export function apply(ctx, config) {
       if (!url) return ''
       const cred = (typeof ctx.get === 'function' ? ctx.get('credentials') : null)
       if (!cred || typeof cred.resolve !== 'function') { log('⚡ 看图跳过：没有 credentials 服务'); return '' }
-      const model = String(cfg.dmFastVisionModel || 'qwen3-vl-plus')
+      const model = String(cfg.dmFastVisionModel || 'qwen3-vl-plus').replace('qwen-vl-max-latest', 'qwen3-vl-plus')
       const attempts = [
         { base: 'https://maas.qianwenaiapi.com/compatible-mode/v1', keyName: 'QWEN_TOKEN_PLAN_CN_API_KEY', model: model },
         { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', keyName: 'DASHSCOPE_API_KEY', model: 'qwen-vl-max-latest' },
@@ -2262,14 +2262,15 @@ export function apply(ctx, config) {
       try {
         const mc = await call('memory_context', { limit: 16 }, { timeoutMs: 30_000 })
         if (mc && mc.ok !== false && mc.context) sharedMemo = String(mc.context).slice(0, 1800)
-      } catch { /* 读不到就退回 memory_recent */ }
+        else log('⚡ 记忆读取：memory_context 没给内容 ' + JSON.stringify(mc || {}).slice(0, 160))
+      } catch (e) { log('⚡ 记忆读取失败：memory_context ' + String((e && e.message) || e).slice(0, 120)) }
       if (!sharedMemo) {
         try {
           const mr = await call('memory_recent', { limit: 10 }, { timeoutMs: 30_000 })
           if (mr && mr.ok !== false && Array.isArray(mr.items)) {
             sharedMemo = mr.items.map((x) => `- ${String(x.content || '').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n')
           }
-        } catch { /* 读不到就不带 */ }
+        } catch (e) { log('⚡ 记忆读取失败：memory_recent ' + String((e && e.message) || e).slice(0, 120)) }
       }
       // ⚡ 快回：纯文字 / 表情包直接生成并发送；带视频/图片的、或快回失败的，退回下面的慢回
       const msgKind = String((row.message && row.message.kind) || 'text');
