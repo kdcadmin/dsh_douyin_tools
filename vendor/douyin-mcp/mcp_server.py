@@ -3897,7 +3897,10 @@ async def _message_snapshot(page):
             } catch { dir='unknown'; }
             const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);
             const kind=row.kind==='share'?'video':row.kind==='emoji'?'sticker':row.kind;
-            push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId,kind,
+            // 用 data-index 当稳定编号：同一条消息在多轮快照里 id 不变，重复发同一句也不会误判成同一条
+            let dataIdx='';
+            try { const rowEl=row.e.closest('[data-index]'); dataIdx=rowEl?String(rowEl.getAttribute('data-index')):''; } catch { dataIdx=''; }
+            push(dataIdx?'idx:'+dataIdx+':'+row.kind:'dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId,kind,
                  Array.from(row.e.querySelectorAll('img')).map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})),
                  '', '', avatarOf(row.e));
             idx++;
