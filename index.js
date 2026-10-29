@@ -1369,18 +1369,19 @@ export function apply(ctx, config) {
     const day = dayKey(when)
     const hhmm = when.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
     const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+    // 称呼用记忆里的「主人」；大肥鱼是自己
     const block = [
       `\n## ${day} ${hhmm} · 私信 · ${name}`,
-      `A（${name}）: ${clean(userText)}`,
-      `B（大肥鱼）: ${clean(replyText)}`,
+      `主人: ${clean(userText)}`,
+      `大肥鱼: ${clean(replyText)}`,
     ].join('\n') + '\n'
     appendMemory(block)
-    // ⭐ 同时写进「记忆插件」的 memory.db：A、B 分开两条，一眼能看出谁说了什么、回了没有
+    // ⭐ 同时写进「记忆插件」的 memory.db：主人 / 大肥鱼 分开两条，一眼能看出谁说了什么、回了没有
     try {
       const ws = process.cwd()
-      call('memory_write', { content: `【私信·A（${name}）】${clean(userText)}`, type: 'fact', tags: `私信,${name},A`, importance: 0.7, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
+      call('memory_write', { content: `主人: ${clean(userText)}（私信 · ${name}）`, type: 'fact', tags: `私信,主人`, importance: 0.7, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
       if (clean(replyText)) {
-        call('memory_write', { content: `【私信·B（大肥鱼）】${clean(replyText)}`, type: 'fact', tags: `私信,${name},B`, importance: 0.6, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
+        call('memory_write', { content: `大肥鱼: ${clean(replyText)}（私信 · ${name}）`, type: 'fact', tags: `私信,大肥鱼`, importance: 0.6, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
       }
     } catch { /* 写不进也不影响聊天 */ }
   }
