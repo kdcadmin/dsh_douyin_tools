@@ -2058,28 +2058,38 @@ export function apply(ctx, config) {
       if (!url) return ''
       const cred = (typeof ctx.get === 'function' ? ctx.get('credentials') : null)
       if (!cred || typeof cred.resolve !== 'function') { log('⚡ 看图跳过：没有 credentials 服务'); return '' }
-      const resolved = await cred.resolve('DASHSCOPE_API_KEY')
-      const key = resolved && resolved.value ? String(resolved.value) : ''
-      if (!key) { log('⚡ 看图跳过：没有 DASHSCOPE_API_KEY'); return '' }
-      const model = String(cfg.dmFastVisionModel || 'qwen-vl-max-latest')
-      const res = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
-        body: JSON.stringify({
-          model: model,
-          messages: [{ role: 'user', content: [
-            { type: 'image_url', image_url: { url: String(url) } },
-            { type: 'text', text: '这张表情包画的是什么？图上的字是什么？一句话回答，20 字内，不要评价。' },
-          ] }],
-          max_tokens: 80,
-        }),
-        signal: AbortSignal.timeout(8000),
-      })
-      if (!res.ok) { log('⚡ 看图失败：HTTP ' + res.status); return '' }
-      const j = await res.json()
-      const txt = String((((j.choices || [])[0] || {}).message || {}).content || '').replace(/\s+/g, ' ').trim()
-      if (txt) log('⚡ 看图：' + txt.slice(0, 60))
-      return txt.slice(0, 80)
+      const model = String(cfg.dmFastVisionModel || 'qwen3-vl-plus')
+      const attempts = [
+        { base: 'https://maas.qianwenaiapi.com/compatible-mode/v1', keyName: 'QWEN_TOKEN_PLAN_CN_API_KEY', model: model },
+        { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', keyName: 'DASHSCOPE_API_KEY', model: 'qwen-vl-max-latest' },
+      ]
+      for (const a of attempts) {
+        try {
+          const resolved = await cred.resolve(a.keyName)
+          const key = resolved && resolved.value ? String(resolved.value) : ''
+          if (!key) continue
+          const res = await fetch(a.base + '/chat/completions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
+            body: JSON.stringify({
+              model: a.model,
+              messages: [{ role: 'user', content: [
+                { type: 'image_url', image_url: { url: String(url) } },
+                { type: 'text', text: '这张表情包画的是什么？图上的字是什么？一句话回答，20 字内，不要评价。' },
+              ] }],
+              max_tokens: 80,
+            }),
+            signal: AbortSignal.timeout(8000),
+          })
+          if (!res.ok) { log(`⚡ 看图失败：${a.model} HTTP ${res.status}`); continue }
+          const j = await res.json()
+          const txt = String((((j.choices || [])[0] || {}).message || {}).content || '').replace(/\s+/g, ' ').trim()
+          if (txt) { log(`⚡ 看图：${a.model} → ${txt.slice(0, 60)}`); return txt.slice(0, 80) }
+        } catch (e) {
+          log(`⚡ 看图异常：${a.model} ${String((e && e.message) || e).slice(0, 80)}`)
+        }
+      }
+      return ''
     } catch (e) {
       log('⚡ 看图异常：' + String((e && e.message) || e).slice(0, 100))
       return ''
@@ -2100,7 +2110,6 @@ export function apply(ctx, config) {
     }
     if (!provider) provider = 'deepseek-account'
     if (!model) model = 'deepseek-flash'
-    log(`⚡ 快回开始：provider=${provider} model=${model} 记忆=${sharedMemo ? sharedMemo.length : 0}字 历史=${history.length}字`)
     const isSticker = !!(message && (message.kind === 'sticker' || message.kind === 'emoji'))
     // 表情包：先看图，把「图上是什么/写了什么」拼进提示词（拿不到就只按情绪回）
     let visionNote = ''
@@ -2119,6 +2128,7 @@ export function apply(ctx, config) {
       const mine = items.filter((x) => x && x.name === name).slice(-4)
       history = mine.map((x) => `我: ${String(x.text || '').slice(0, 60)}\n大肥鱼: ${String(x.replyText || '').slice(0, 60)}`).join('\n')
     } catch { history = '' }
+    log(`⚡ 快回开始：provider=${provider} model=${model} 记忆=${sharedMemo ? sharedMemo.length : 0}字 历史=${history.length}字 图=${visionNote ? '有' : '无'}`)
     const system = [
       String(cfg.personaPrompt || ''),
       `你在给「${name}」回抖音私信。只输出一句回复正文：短句、最多 20 个字，不要引号、不要解释、不要写「大肥鱼:」。要带表情就写完整的 [憨笑] 这种码，不能只写一半。`,
