@@ -3253,7 +3253,7 @@ async def memory_write(content: str, type: str = "fact", tags: str = "", importa
         )
         conn.commit()
         conn.close()
-        return _ok(written=True)
+        return j(_ok(written=True))
     except Exception as exc:
         return _err(f"写记忆失败：{type(exc).__name__}: {exc}")
 
@@ -3271,7 +3271,7 @@ async def memory_recent(limit: int = 12) -> str:
             (max(1, min(int(limit), 50)),),
         ).fetchall()
         conn.close()
-        return _ok(items=[{"type": r[0], "content": str(r[1])[:300], "at": r[2]} for r in rows])
+        return j(_ok(items=[{"type": r[0], "content": str(r[1])[:300], "at": r[2]} for r in rows]))
     except Exception as exc:
         return _err(f"读记忆失败：{type(exc).__name__}: {exc}")
 
@@ -3317,7 +3317,7 @@ async def memory_context(limit: int = 16) -> str:
             items.append("- [%s] %s" % (r["type"], c[:70]))
         if items:
             lines.append("【最近的记忆】\n" + "\n".join(items[:14]))
-        return _ok(context="\n".join(lines), count=len(items))
+        return j(_ok(context="\n".join(lines), count=len(items)))
     except Exception as exc:
         return _err(f"读记忆失败：{type(exc).__name__}: {exc}")
 
@@ -3366,6 +3366,30 @@ async def douyin_dm_snapshot(nickname: str = "", limit: int = 20) -> str:
         await page.wait_for_timeout(1000)
         msgs = await _message_snapshot(page)
         tail = msgs[-max(1, min(int(limit), 50)):]
+        try:
+            brief = [f"{m.get('direction')}|{str(m.get('text') or '')[:16]}|{m.get('kind')}" for m in tail[-4:]]
+            geo = await page.evaluate(r"""() => {
+                const v=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
+                const sels=['[class*="MessageItemTextbubbleContent"]','[class*="MessageItemEmojiemojiBox"]'];
+                const rows=[];
+                for(const sel of sels){ for(const e of Array.from(document.querySelectorAll(sel))){ if(!v(e))continue; const r=e.getBoundingClientRect(); rows.push({e,r,txt:(e.innerText||'').slice(0,10)}); } }
+                rows.sort((a,b)=>a.r.top-b.r.top);
+                return rows.slice(-4).map(o=>{
+                    const chain=[];
+                    let p=o.e;
+                    for(let i=0;i<4&&p;i++){ const pr=p.getBoundingClientRect(); chain.push((p.className||'').toString().slice(0,40)+'@'+Math.round(pr.x)+'/'+Math.round(pr.width)); p=p.parentElement; }
+                    return {txt:o.txt, x:Math.round(o.r.x), w:Math.round(o.r.width), chain};
+                });
+            }""")
+            with open(HOME / "dm-snapshot-debug.log", "a", encoding="utf-8") as fh:
+                fh.write(f"[dm-snapshot] nick={nickname} n={len(tail)} url={page.url} last4={brief}\n")
+                fh.write(f"[dm-geo] {geo}\n")
+        except Exception as exc:
+            try:
+                with open(HOME / "dm-snapshot-debug.log", "a", encoding="utf-8") as fh:
+                    fh.write(f"[dm-geo-error] {exc}\n")
+            except Exception:
+                pass
         return _ok(items=tail, count=len(tail))
     return j(await _guard(impl, 90))
 
@@ -3687,8 +3711,45 @@ async def _open_conversation(page, ctx, nickname, peer_id=""):
         raise ValueError("needLogin: 私信需要登录")
     icon = await _first_of(page, ['[data-e2e="im-entry"]'], 3000)
     if icon is None:
+        # 兜底：有些版本入口没有 data-e2e，就按文字找「消息」那一项
+        try:
+            icon = await page.evaluate_handle("""() => {
+                const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+                const cands = Array.from(document.querySelectorAll('a,button,div,li,span'))
+                    .filter(e => visible(e) && (e.innerText || '').trim() === '消息');
+                return cands.length === 1 ? cands[0] : null;
+            }""")
+            icon = icon.as_element()
+        except Exception:
+            icon = None
+    if icon is None:
         raise ValueError("没有找到消息入口")
-    await icon.click()
+    # 先把可能挡住点击的浮层清掉（发现页提示条/引导遮罩）
+    try:
+        await page.evaluate("""() => {
+            document.querySelectorAll('.discover-tab-container, [class*="discover-tab"], [class*="guide-mask"], [class*="mask-layer"]').forEach(e => e.remove());
+        }""")
+    except Exception:
+        pass
+    opened = False
+    for _attempt in range(3):
+        try:
+            await icon.click(force=True, timeout=4000)
+            opened = True
+            break
+        except Exception:
+            try:
+                await icon.evaluate("e => e.click()")
+                opened = True
+                break
+            except Exception:
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                await page.wait_for_timeout(400)
+    if not opened:
+        raise ValueError("消息入口点不进去（页面浮层挡住）")
     await page.wait_for_function("""() => Array.from(document.querySelectorAll('input')).some(e =>
         /搜索/.test(e.placeholder||'') && e.getClientRects().length)""", timeout=12000)
     # 等会话列表真正渲染出来（刚点开消息面板时列表是异步加载的）
@@ -3817,16 +3878,21 @@ async def _message_snapshot(page):
             seenY.add(yKey);
             const link=row.e.querySelector('a[href*="/video/"]');
             const awemeId=link?((link.href.match(/video\/(\d+)/)||[])[1]||''):'';
-            // 方向：以气泡中心相对最近可滚动祖先中心判断（右侧=出站）
+            // 方向：自己的气泡靠右、对方的靠左。用「离容器左右边的距离」判断，比拿中心点稳
             let dir='unknown';
             let p=row.e;
-            for(let i=0;i<8&&p;p=p.parentElement){
+            for(let i=0;i<10&&p;p=p.parentElement){
                 const st=getComputedStyle(p);
-                if(/(auto|scroll)/.test(st.overflowY)&&p.scrollHeight>p.clientHeight+10){
-                    const pr=p.getBoundingClientRect();
-                    const diff=(row.r.x+row.r.width/2)-(pr.x+pr.width/2);
-                    dir=diff>20?'outbound':(diff<-20?'inbound':'unknown');
-                    break;
+                const pr=p.getBoundingClientRect();
+                const scrollable=/(auto|scroll)/.test(st.overflowY)&&p.scrollHeight>p.clientHeight+10;
+                const wide=pr.width>=280;
+                if(scrollable||wide){
+                    const leftDist=row.r.x-pr.x;
+                    const rightDist=pr.right-row.r.right;
+                    if(Math.abs(leftDist-rightDist)>12){
+                        dir = leftDist<rightDist ? 'inbound' : 'outbound';
+                        break;
+                    }
                 }
             }
             const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);

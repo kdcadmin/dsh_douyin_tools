@@ -308,7 +308,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: true, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -2265,16 +2265,27 @@ export function apply(ctx, config) {
         }
         if (!snap || snap.ok === false) { readError = snap?.error || snap?.hint || '读会话失败'; continue }
         successfulReads++
-        const message = normalizeDmMessage((snap.items || []).at(-1))
-        // 不根据作者昵称、文本匹配、发送历史猜方向；未知方向也不自动回。
-        if (message.direction !== 'inbound' || !message.messageId) continue
-        if (!message.text && !message.attachments.length && !message.awemeId) continue
-        const key = dmMessageKey(contact, message)
-        const prior = dmPrior(items, contact, key)
-        if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) continue
-        if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) continue
-        picked = { name: contact, text: dmMessagePreview(message), message, key }
-        break
+        // 从新到旧扫，不只信「最后一条」；方向字段不可靠时用「不是我们自己发过的内容」兜底判定入站
+        const ourReplies = new Set((items || []).map((x) => String((x && x.replyText) || '').trim()).filter(Boolean))
+        const rawList = Array.isArray(snap.items) ? snap.items : []
+        for (let i = rawList.length - 1; i >= 0; i--) {
+          const message = normalizeDmMessage(rawList[i])
+          if (!message.messageId) continue
+          if (!message.text && !message.attachments.length && !message.awemeId) continue
+          const key = dmMessageKey(contact, message)
+          const prior = dmPrior(items, contact, key)
+          if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) continue
+          if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) continue
+          const txt = String(message.text || '').trim()
+          const looksOurs = !!txt && ourReplies.has(txt)
+          if (looksOurs) continue
+          const dirOk = message.direction === 'inbound' || (cfg.dmAssumeInbound !== false && !looksOurs)
+          if (!dirOk) continue
+          if (message.direction !== 'inbound') log(`私信巡检：方向判不出（${message.direction}），按内容当成入站：${txt.slice(0, 20)}`)
+          picked = { name: contact, text: dmMessagePreview(message), message, key }
+          break
+        }
+        if (picked) break
       }
       if (!picked) return successfulReads ? { ok: true, replied: 0, note: '没有需要回的消息' } : { ok: false, error: readError || '所有会话都读取失败' }
       const name = picked.name
