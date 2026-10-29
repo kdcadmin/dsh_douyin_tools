@@ -3888,23 +3888,12 @@ async def _message_snapshot(page):
             seenY.add(yKey);
             const link=row.e.querySelector('a[href*="/video/"]');
             const awemeId=link?((link.href.match(/video\/(\d+)/)||[])[1]||''):'';
-            // 方向：自己的气泡靠右、对方的靠左。用「离容器左右边的距离」判断，比拿中心点稳
+            // 方向：抖音的 class 已经明说了——自己的消息容器带 isFromMe
             let dir='unknown';
-            let p=row.e;
-            for(let i=0;i<10&&p;p=p.parentElement){
-                const st=getComputedStyle(p);
-                const pr=p.getBoundingClientRect();
-                const scrollable=/(auto|scroll)/.test(st.overflowY)&&p.scrollHeight>p.clientHeight+10;
-                const wide=pr.width>=280;
-                if(scrollable||wide){
-                    const leftDist=row.r.x-pr.x;
-                    const rightDist=pr.right-row.r.right;
-                    if(Math.abs(leftDist-rightDist)>12){
-                        dir = leftDist<rightDist ? 'inbound' : 'outbound';
-                        break;
-                    }
-                }
-            }
+            try {
+                if (row.e.closest('[class*="isFromMe"]')) dir='outbound';
+                else if (row.e.closest('[class*="MessageItemText"], [class*="MessageItemEmoji"], [class*="MessageItemImage"], [class*="MessageItemShare"]')) dir='inbound';
+            } catch { dir='unknown'; }
             const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);
             const kind=row.kind==='share'?'video':row.kind==='emoji'?'sticker':row.kind;
             push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId,kind,

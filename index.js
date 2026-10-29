@@ -2304,7 +2304,7 @@ export function apply(ctx, config) {
           const av = String(message.avatar || '')
           let effDir = String(message.direction || '')
           if (selfAvatar && av) effDir = av === selfAvatar ? 'outbound' : 'inbound'
-          if (effDir !== 'inbound' && !(selfAvatar && av) && cfg.dmAssumeInbound !== false && !looksOurs) effDir = 'inbound'
+          if (effDir === 'unknown' && cfg.dmAssumeInbound !== false && !looksOurs) effDir = 'inbound'
           if (effDir !== 'inbound') continue
           if (message.direction !== 'inbound') log(`私信巡检：方向判不出（${message.direction}${av ? '，头像=' + av.slice(-12) : ''}），按内容当成入站：${txt.slice(0, 20)}`)
           picked = { name: contact, text: dmMessagePreview(message), message, key }
