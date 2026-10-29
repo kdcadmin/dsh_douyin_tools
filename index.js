@@ -2107,6 +2107,16 @@ export function apply(ctx, config) {
       let mt = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
       if (!/^image\/(png|jpeg|webp|gif)$/.test(mt)) mt = 'image/png'
       const ref = await svc.saveImage({ data: buf, mediaType: mt, name: 'douyin-sticker' })
+      try {
+        let hostPath = ''
+        if (typeof svc.imageHostPath === 'function') { try { hostPath = String(svc.imageHostPath(ref) || '') } catch { hostPath = '' } }
+        const ledgerFile = join(stateDir, 'dm-sticker-attachments.json')
+        let ledger = {}
+        try { ledger = JSON.parse(readFileSync(ledgerFile, 'utf8')) || {} } catch { ledger = {} }
+        const list = Array.isArray(ledger.items) ? ledger.items : []
+        list.push({ id: String(ref.attachmentId || ''), path: hostPath, at: Date.now(), bytes: Number(ref.bytes) || 0 })
+        writeFileSync(ledgerFile, JSON.stringify({ items: list.slice(-500) }), 'utf8')
+      } catch { /* 记账失败不影响回复 */ }
       log(`⚡ 图片附件：已存 ${ref.width}x${ref.height} ${mt} ${ref.bytes}B`)
       return ref
     } catch (e) {
@@ -3336,6 +3346,24 @@ export function apply(ctx, config) {
     drop(join(stateDir, 'shots'), 7)
     drop(join(stateDir, 'stickers'), 0)
     drop(join(stateDir, 'sticker-cache'), 0)
+    // ⭐ 私信表情包存下来的 DSH 附件：跟视频一样每天清（按账本删，只删自己存的）
+    try {
+      const ledgerFile = join(stateDir, 'dm-sticker-attachments.json')
+      if (existsSync(ledgerFile)) {
+        const ledger = JSON.parse(readFileSync(ledgerFile, 'utf8')) || {}
+        const list = Array.isArray(ledger.items) ? ledger.items : []
+        const keep = []
+        let n = 0
+        for (const it of list) {
+          const mine = String(it && it.path ? it.path : '')
+          const fresh = it && it.at && (now - Number(it.at)) / 86400000 < 1
+          if (fresh || !mine) { keep.push(it); continue }
+          try { if (existsSync(mine)) { rmSync(mine, { force: true }); n += 1 } } catch { keep.push(it); continue }
+        }
+        if (n) out.push(`删除表情包附件 ${n} 个`)
+        writeFileSync(ledgerFile, JSON.stringify({ items: keep }), 'utf8')
+      }
+    } catch { /* 清理失败不影响其他 */ }
     drop(join(stateDir, 'thumbs'), opts.thumbDays ?? 30)   // 老缩略图
     drop(join(stateDir, 'out'), opts.reportDays ?? 120, (f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
     // 日志轮转：超过 2MB 就把旧内容丢掉，只留最后 2000 行
