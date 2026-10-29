@@ -2268,6 +2268,21 @@ export function apply(ctx, config) {
         // 从新到旧扫，不只信「最后一条」；方向字段不可靠时用「不是我们自己发过的内容」兜底判定入站
         const ourReplies = new Set((items || []).map((x) => String((x && x.replyText) || '').trim()).filter(Boolean))
         const rawList = Array.isArray(snap.items) ? snap.items : []
+        // ⭐ 用头像图 URL 认人：头像不同 ⇒ 发消息的人不同
+        const avFile = join(stateDir, 'dm-self-avatar.json')
+        let selfAvatar = String((readJson(avFile, {}) || {}).url || '')
+        if (!selfAvatar) {
+          for (const raw of rawList) {
+            const mm = normalizeDmMessage(raw)
+            const tt = String((mm && mm.text) || '').trim()
+            if (tt && ourReplies.has(tt) && mm.avatar) {
+              selfAvatar = String(mm.avatar)
+              try { writeFileSync(avFile, JSON.stringify({ url: selfAvatar, at: Date.now() }), 'utf8') } catch { /* 记不上也行 */ }
+              log('私信巡检：已从历史回复学到「自己的头像」')
+              break
+            }
+          }
+        }
         // 找到「我们最后一条回复」的位置：只考虑它之后的消息，否则会自己回自己（自言自语）
         let lastOursIdx = -1
         for (let i = 0; i < rawList.length; i++) {
@@ -2286,9 +2301,12 @@ export function apply(ctx, config) {
           const txt = String(message.text || '').trim()
           const looksOurs = !!txt && ourReplies.has(txt)
           if (looksOurs) continue
-          const dirOk = message.direction === 'inbound' || (cfg.dmAssumeInbound !== false && !looksOurs)
-          if (!dirOk) continue
-          if (message.direction !== 'inbound') log(`私信巡检：方向判不出（${message.direction}），按内容当成入站：${txt.slice(0, 20)}`)
+          const av = String(message.avatar || '')
+          let effDir = String(message.direction || '')
+          if (selfAvatar && av) effDir = av === selfAvatar ? 'outbound' : 'inbound'
+          if (effDir !== 'inbound' && !(selfAvatar && av) && cfg.dmAssumeInbound !== false && !looksOurs) effDir = 'inbound'
+          if (effDir !== 'inbound') continue
+          if (message.direction !== 'inbound') log(`私信巡检：方向判不出（${message.direction}${av ? '，头像=' + av.slice(-12) : ''}），按内容当成入站：${txt.slice(0, 20)}`)
           picked = { name: contact, text: dmMessagePreview(message), message, key }
           break
         }

@@ -3372,13 +3372,21 @@ async def douyin_dm_snapshot(nickname: str = "", limit: int = 20) -> str:
                 const v=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
                 const sels=['[class*="MessageItemTextbubbleContent"]','[class*="MessageItemEmojiemojiBox"]'];
                 const rows=[];
-                for(const sel of sels){ for(const e of Array.from(document.querySelectorAll(sel))){ if(!v(e))continue; const r=e.getBoundingClientRect(); rows.push({e,r,txt:(e.innerText||'').slice(0,10)}); } }
+                for(const sel of sels){ for(const e of Array.from(document.querySelectorAll(sel))){ if(!v(e))continue; const r=e.getBoundingClientRect(); rows.push({e,r,txt:(e.innerText||'').slice(0,12)}); } }
                 rows.sort((a,b)=>a.r.top-b.r.top);
                 return rows.slice(-4).map(o=>{
                     const chain=[];
                     let p=o.e;
-                    for(let i=0;i<4&&p;i++){ const pr=p.getBoundingClientRect(); chain.push((p.className||'').toString().slice(0,40)+'@'+Math.round(pr.x)+'/'+Math.round(pr.width)); p=p.parentElement; }
-                    return {txt:o.txt, x:Math.round(o.r.x), w:Math.round(o.r.width), chain};
+                    for(let i=0;i<9&&p;i++){ const pr=p.getBoundingClientRect(); chain.push((p.className||'').toString().slice(0,70)); p=p.parentElement; }
+                    // 找同一行里的头像 img
+                    let av=null;
+                    let q=o.e;
+                    for(let i=0;i<8&&q;i++){
+                        const img=q.querySelector('img[src*="avatar"], img');
+                        if(img && img.getBoundingClientRect().width>10 && img.getBoundingClientRect().width<80){ const ir=img.getBoundingClientRect(); av={x:Math.round(ir.x),w:Math.round(ir.width)}; break; }
+                        q=q.parentElement;
+                    }
+                    return {txt:o.txt, x:Math.round(o.r.x), w:Math.round(o.r.width), av, chain};
                 });
             }""")
             with open(HOME / "dm-snapshot-debug.log", "a", encoding="utf-8") as fh:
@@ -3822,7 +3830,8 @@ async def _message_snapshot(page):
         const seen=new Set();
         const hash=s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h.toString(16)};
         const occurrences=new Map();
-        const push=(id,direction,text,media,awemeId,kind='text',attachments=[],senderId='',conversationId='')=>{
+        const avatarOf=(e)=>{let p=e;for(let i=0;i<10&&p;i++){for(const img of Array.from(p.querySelectorAll('img'))){const src=img.currentSrc||img.src||'';const r=img.getBoundingClientRect();if(r.width>=20&&r.width<=90&&/(aweme-avatar|\/img\/|avatar)/i.test(src))return src;}p=p.parentElement;}return ''};
+        const push=(id,direction,text,media,awemeId,kind='text',attachments=[],senderId='',conversationId='',avatar='')=>{
             if(id.startsWith('dom')){
                 const value=JSON.stringify([direction,text,media.map(u=>{try{return new URL(u).origin+new URL(u).pathname}catch{return u}}),awemeId]);
                 const count=occurrences.get(value)||0;occurrences.set(value,count+1);
@@ -3832,7 +3841,7 @@ async def _message_snapshot(page):
             if(seen.has(key))return;
             seen.add(key);
             out.push({messageId:id,direction,text:text,image:media,images:media,
-                      media:media,awemeId:awemeId||'',kind,attachments,senderId,conversationId,
+                      media:media,awemeId:awemeId||'',kind,attachments,senderId,conversationId,avatar,
                       idSource:id.startsWith('dom:')?'dom':'platform'});
         };
         // 1) 首选：带 data-message-id 的节点
@@ -3850,7 +3859,8 @@ async def _message_snapshot(page):
                  imgs.map(x=>x.currentSrc||x.src),
                  card?((card.href.match(/video\/(\d+)/)||[])[1]||''):'',kind,
                  imgs.map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})),senderId,
-                 e.closest('[data-conversation-id]')?.getAttribute('data-conversation-id')||'');
+                 e.closest('[data-conversation-id]')?.getAttribute('data-conversation-id')||'',
+                 avatarOf(e));
         }
         if(out.length) return out;
         // 2) 兜底：按气泡 DOM 识别（抖音私信没有 data-message-id）
@@ -3898,7 +3908,8 @@ async def _message_snapshot(page):
             const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);
             const kind=row.kind==='share'?'video':row.kind==='emoji'?'sticker':row.kind;
             push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId,kind,
-                 Array.from(row.e.querySelectorAll('img')).map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})));
+                 Array.from(row.e.querySelectorAll('img')).map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})),
+                 '', '', avatarOf(row.e));
             idx++;
         }
         return out;
