@@ -46,7 +46,7 @@ import { normalizeDmMessage, dmMessageKey, dmMessagePreview, dmMessageContext } 
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 
 export const name = 'douyin-life'
-export const inject = ['webServer', 'tools', 'settings', 'llm', 'credentials']
+export const inject = ['webServer', 'tools', 'settings', 'llm', 'credentials', 'attachments']
 
 // 插件目录（读本地 package.json 的版本号，检查更新用）
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
@@ -308,7 +308,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -2095,6 +2095,25 @@ export function apply(ctx, config) {
       return ''
     }
   }
+  /** 把私信里的图片下载下来、存成 DSH 附件，直接作为图片输入交给模型（模型自己看，不转述） */
+  const dmFetchImageAttachment = async (url) => {
+    try {
+      if (!url) return null
+      const svc = (typeof ctx.get === 'function' ? ctx.get('attachments') : null)
+      if (!svc || typeof svc.saveImage !== 'function') { log('⚡ 图片附件：没有 attachments 服务'); return null }
+      const res = await fetch(String(url), { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) { log('⚡ 图片附件下载失败 HTTP ' + res.status); return null }
+      const buf = new Uint8Array(await res.arrayBuffer())
+      let mt = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+      if (!/^image\/(png|jpeg|webp|gif)$/.test(mt)) mt = 'image/png'
+      const ref = await svc.saveImage({ data: buf, mediaType: mt, name: 'douyin-sticker' })
+      log(`⚡ 图片附件：已存 ${ref.width}x${ref.height} ${mt} ${ref.bytes}B`)
+      return ref
+    } catch (e) {
+      log('⚡ 图片附件异常：' + String((e && e.message) || e).slice(0, 120))
+      return null
+    }
+  }
   /** 快回：直接用 DSH 自己的 llm 服务生成一句（低思考、短句，1~3 秒） */
   const dmFastGenerate = async (name, text, sharedMemo = '', message = null) => {
     const llm = (typeof ctx.get === 'function' ? ctx.get('llm') : ctx.llm)
@@ -2111,15 +2130,16 @@ export function apply(ctx, config) {
     if (!provider) provider = 'deepseek-account'
     if (!model) model = 'deepseek-flash'
     const isSticker = !!(message && (message.kind === 'sticker' || message.kind === 'emoji'))
-    // 表情包：先看图，把「图上是什么/写了什么」拼进提示词（拿不到就只按情绪回）
+    // 图片/表情包：优先下载→存成 DSH 附件→直接当图片输入给模型（模型自己看）
+    // 附件服务不可用或模型不支持图片时，才退回 qwen3-vl 转述一句话
     let visionNote = ''
-    if (isSticker && cfg.dmFastVision !== false) {
-      const first = (message.attachments && message.attachments[0]) || null
-      const url = first && first.url ? String(first.url) : ''
-      if (url) {
-        const desc = await dmDescribeImage(url)
-        if (desc) visionNote = `【对方发来的表情包，图上是：${desc}】`
-      }
+    let imgRef = null
+    const firstMedia = (message && message.attachments && message.attachments[0]) || null
+    const mediaUrl = firstMedia && firstMedia.url ? String(firstMedia.url) : ''
+    if (mediaUrl && cfg.dmFastImageAttach !== false) imgRef = await dmFetchImageAttachment(mediaUrl)
+    if (!imgRef && isSticker && cfg.dmFastVision !== false && mediaUrl) {
+      const desc = await dmDescribeImage(mediaUrl)
+      if (desc) visionNote = `【对方发来的表情包，图上是：${desc}】`
     }
     // 带上最近几轮私信，别每句都像第一次说话
     let history = ''
@@ -2128,7 +2148,7 @@ export function apply(ctx, config) {
       const mine = items.filter((x) => x && x.name === name).slice(-4)
       history = mine.map((x) => `我: ${String(x.text || '').slice(0, 60)}\n大肥鱼: ${String(x.replyText || '').slice(0, 60)}`).join('\n')
     } catch { history = '' }
-    log(`⚡ 快回开始：provider=${provider} model=${model} 记忆=${sharedMemo ? sharedMemo.length : 0}字 历史=${history.length}字 图=${visionNote ? '有' : '无'}`)
+    log(`⚡ 快回开始：provider=${provider} model=${model} 记忆=${sharedMemo ? sharedMemo.length : 0}字 历史=${history.length}字 图=${imgRef ? '附件' : (visionNote ? '转述' : '无')}`)
     const system = [
       String(cfg.personaPrompt || ''),
       `你在给「${name}」回抖音私信。只输出一句回复正文：短句、最多 20 个字，不要引号、不要解释、不要写「大肥鱼:」。要带表情就写完整的 [憨笑] 这种码，不能只写一半。`,
@@ -2148,7 +2168,9 @@ export function apply(ctx, config) {
         provider: provider,
         model: model,
         system: system,
-        messages: [{ role: 'user', content: [{ type: 'text', text: String(text || '').slice(0, 500) }] }],
+        messages: [{ role: 'user', content: imgRef
+          ? [{ type: 'image', attachment: imgRef }, { type: 'text', text: String(text || '').slice(0, 500) }]
+          : [{ type: 'text', text: String(text || '').slice(0, 500) }] }],
         maxTokens: 80,
         temperature: 0.9,
       }
@@ -2175,6 +2197,12 @@ export function apply(ctx, config) {
         lastErr = e
         log(`⚡ 快回模型失败：effort=${ef || '默认'} ${String((e && e.message) || e).slice(0, 100)}`)
       }
+    }
+    // 图片输入被模型拒了：改纯文字再试一次
+    if (!out && imgRef) {
+      imgRef = null
+      log('⚡ 快回：图片输入失败，改纯文字重试')
+      try { out = await runOnce(String(cfg.dmFastReasoning || 'off').trim() || false) } catch (e) { lastErr = e }
     }
     if (!out && lastErr) throw lastErr
     const raw = out.replace(/\s+/g, ' ').trim().replace(/^["'“”]+|["'“”]+$/g, '')
@@ -2273,10 +2301,9 @@ export function apply(ctx, config) {
         } catch (e) { log('⚡ 记忆读取失败：memory_recent ' + String((e && e.message) || e).slice(0, 120)) }
       }
       // ⚡ 快回：纯文字 / 表情包直接生成并发送；带视频/图片的、或快回失败的，退回下面的慢回
-      const msgKind = String((row.message && row.message.kind) || 'text');
-      const isStickerMsg = msgKind === 'sticker' || msgKind === 'emoji';
-      const hasVisual = !!(row.message && (row.message.awemeId || (((row.message.attachments || []).length > 0) && !isStickerMsg)));
-      if (!hasVisual && cfg.dmFastReply !== false) {
+      // 只有视频要慢回（要先看片）；图片/表情包都能走快回（下载成附件交给模型看）
+      const hasVideo = !!(row.message && row.message.awemeId);
+      if (!hasVideo && cfg.dmFastReply !== false) {
         try {
           const fastText = await dmFastGenerate(row.name, row.text, sharedMemo, row.message)
           if (fastText) {
