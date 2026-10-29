@@ -308,7 +308,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: true, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: false, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -2265,9 +2265,8 @@ export function apply(ctx, config) {
         }
         if (!snap || snap.ok === false) { readError = snap?.error || snap?.hint || '读会话失败'; continue }
         successfulReads++
-        // 从新到旧扫，不只信「最后一条」；方向字段不可靠时用「不是我们自己发过的内容」兜底判定入站
+        // 只看最新一条：是自己发的、或分不清左右，就停。不能把未知方向当成对方，否则会回自己刚发的那句。
         const ourReplies = new Set((items || []).map((x) => String((x && x.replyText) || '').trim()).filter(Boolean))
-        // ⭐ 回之前先复核：把「我们发过的所有文本」收集起来（dm-log + dm-sent.json），命中就不回
         try {
           const sentFile = readJson(join(stateDir, 'dm-sent.json'), {})
           const sentItems = Array.isArray(sentFile) ? sentFile : (sentFile && Array.isArray(sentFile.items) ? sentFile.items : [])
@@ -2276,47 +2275,58 @@ export function apply(ctx, config) {
             if (tt) ourReplies.add(tt)
           }
         } catch { /* 读不到就只用 dm-log */ }
-        const rawList = Array.isArray(snap.items) ? snap.items : []
-        // ⭐ 用头像图 URL 认人：头像不同 ⇒ 发消息的人不同
-        const avFile = join(stateDir, 'dm-self-avatar.json')
-        let selfAvatar = String((readJson(avFile, {}) || {}).url || '')
-        if (!selfAvatar) {
-          for (const raw of rawList) {
-            const mm = normalizeDmMessage(raw)
-            const tt = String((mm && mm.text) || '').trim()
-            if (tt && ourReplies.has(tt) && mm.avatar) {
-              selfAvatar = String(mm.avatar)
-              try { writeFileSync(avFile, JSON.stringify({ url: selfAvatar, at: Date.now() }), 'utf8') } catch { /* 记不上也行 */ }
-              log('私信巡检：已从历史回复学到「自己的头像」')
-              break
-            }
+        const normDm = (s) => String(s || '')
+          .replace(/\[[^\]\n]{1,12}\]/g, '')
+          .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, '')
+          .replace(/已读|未读/g, '')
+          .replace(/\s+/g, '')
+        const ourNorm = new Set()
+        for (const t of ourReplies) {
+          const n = normDm(t)
+          if (n.length >= 2) ourNorm.add(n)
+        }
+        const looksOursText = (s) => {
+          const n = normDm(s)
+          if (n.length < 2) return false
+          for (const o of ourNorm) {
+            if (n === o) return true
+            const short = n.length < o.length ? n : o
+            const long = n.length < o.length ? o : n
+            if (short.length >= 6 && long.startsWith(short) && long.length - short.length <= 12) return true
           }
+          return false
         }
-        // 找到「我们最后一条回复」的位置：只考虑它之后的消息，否则会自己回自己（自言自语）
-        let lastOursIdx = -1
-        for (let i = 0; i < rawList.length; i++) {
-          const mm = normalizeDmMessage(rawList[i])
-          const tt = String((mm && mm.text) || '').trim()
-          if (tt && ourReplies.has(tt)) lastOursIdx = i
-        }
-        for (let i = rawList.length - 1; i > lastOursIdx; i--) {
-          const message = normalizeDmMessage(rawList[i])
+        const rawList = Array.isArray(snap.items) ? snap.items : []
+        // 头像不能用来认人：页面上经常每条消息都抓到同一张图，学过一次就把对方的话也当成自己的。
+        // data-index 是列表格子，最新一条永远是 idx:0。用它当消息编号的话，回过一次以后新消息也会被当成已经回过。
+        for (let i = rawList.length - 1; i >= 0; i--) {
+          let message = normalizeDmMessage(rawList[i])
           if (!message.messageId) continue
           if (!message.text && !message.attachments.length && !message.awemeId) continue
+          if (String(message.messageId).startsWith('idx:')) {
+            const textKey = normDm(message.text) || message.kind || 'text'
+            let n = 0
+            for (let j = 0; j <= i; j++) {
+              const older = normalizeDmMessage(rawList[j])
+              if (older.direction === message.direction && (normDm(older.text) || older.kind || 'text') === textKey) n++
+            }
+            message = { ...message, messageId: `occ:${message.direction}:${textKey}:${n}` }
+          }
+          const txt = String(message.text || '').trim()
+          const textOurs = looksOursText(txt)
+          const mine = message.fromMe === true || message.direction === 'outbound' || textOurs
+          if (mine) {
+            if (message.direction !== 'outbound' && txt) log(`私信复核：最新一句是自己发过的原文，不回「${txt.slice(0, 20)}」`)
+            break
+          }
+          if (message.direction !== 'inbound') {
+            log(`私信巡检：最新消息分不清是谁发的（${message.direction || 'unknown'}），先不回`)
+            break
+          }
           const key = dmMessageKey(contact, message)
           const prior = dmPrior(items, contact, key)
-          if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) continue
-          if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) continue
-          if (message.fromMe === true) continue
-          const txt = String(message.text || '').trim()
-          const looksOurs = !!txt && ourReplies.has(txt)
-          if (looksOurs) { log(`私信复核：跳过自己发过的一句「${txt.slice(0, 20)}」`); continue }
-          const av = String(message.avatar || '')
-          let effDir = String(message.direction || '')
-          if (selfAvatar && av) effDir = av === selfAvatar ? 'outbound' : 'inbound'
-          if (effDir === 'unknown' && cfg.dmAssumeInbound !== false && !looksOurs) effDir = 'inbound'
-          if (effDir !== 'inbound') continue
-          if (message.direction !== 'inbound') log(`私信巡检：方向判不出（${message.direction}${av ? '，头像=' + av.slice(-12) : ''}），按内容当成入站：${txt.slice(0, 20)}`)
+          if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) break
+          if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) break
           picked = { name: contact, text: dmMessagePreview(message), message, key }
           break
         }
