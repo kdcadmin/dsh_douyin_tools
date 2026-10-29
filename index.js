@@ -2267,6 +2267,15 @@ export function apply(ctx, config) {
         successfulReads++
         // 从新到旧扫，不只信「最后一条」；方向字段不可靠时用「不是我们自己发过的内容」兜底判定入站
         const ourReplies = new Set((items || []).map((x) => String((x && x.replyText) || '').trim()).filter(Boolean))
+        // ⭐ 回之前先复核：把「我们发过的所有文本」收集起来（dm-log + dm-sent.json），命中就不回
+        try {
+          const sentFile = readJson(join(stateDir, 'dm-sent.json'), {})
+          const sentItems = Array.isArray(sentFile) ? sentFile : (sentFile && Array.isArray(sentFile.items) ? sentFile.items : [])
+          for (const s of sentItems) {
+            const tt = String((s && s.text) || '').trim()
+            if (tt) ourReplies.add(tt)
+          }
+        } catch { /* 读不到就只用 dm-log */ }
         const rawList = Array.isArray(snap.items) ? snap.items : []
         // ⭐ 用头像图 URL 认人：头像不同 ⇒ 发消息的人不同
         const avFile = join(stateDir, 'dm-self-avatar.json')
@@ -2298,9 +2307,10 @@ export function apply(ctx, config) {
           const prior = dmPrior(items, contact, key)
           if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) continue
           if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) continue
+          if (message.fromMe === true) continue
           const txt = String(message.text || '').trim()
           const looksOurs = !!txt && ourReplies.has(txt)
-          if (looksOurs) continue
+          if (looksOurs) { log(`私信复核：跳过自己发过的一句「${txt.slice(0, 20)}」`); continue }
           const av = String(message.avatar || '')
           let effDir = String(message.direction || '')
           if (selfAvatar && av) effDir = av === selfAvatar ? 'outbound' : 'inbound'

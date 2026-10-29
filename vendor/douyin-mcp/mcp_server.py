@@ -3842,6 +3842,7 @@ async def _message_snapshot(page):
             seen.add(key);
             out.push({messageId:id,direction,text:text,image:media,images:media,
                       media:media,awemeId:awemeId||'',kind,attachments,senderId,conversationId,avatar,
+                      fromMe: direction === 'outbound',
                       idSource:id.startsWith('dom:')?'dom':'platform'});
         };
         // 1) 首选：带 data-message-id 的节点
