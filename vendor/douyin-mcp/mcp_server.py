@@ -47,6 +47,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:  # 宿主已设 PYTHONUTF8=1；这里再兜一层，避免 GBK 控制台炸
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -422,6 +423,9 @@ class BrowserManager:
         return self._own_page
 
     async def close(self) -> None:
+        watcher = globals().get('_dm_event_watcher')
+        if watcher is not None:
+            await watcher.close()
         # cdp / shared 模式：只关我们开的那一个标签页 + 断开连接，
         # **不许关掉浏览器/上下文**（那可能是别的会话正在用的同一个 Chrome）
         shared = self.mode in ("cdp", "shared")
@@ -455,6 +459,164 @@ class BrowserManager:
 
 
 _browser = BrowserManager()
+
+
+class DmEventWatcher:
+    """Wake-up hints only. No frame payload, credentials or message text leave this watcher."""
+    SELECTOR = '[data-message-id],[data-msg-id],[data-e2e="conversation-item"],[class*="MessageItem"],[class*="MessageList"]'
+
+    def __init__(self):
+        self.context = None
+        self.pages = {}
+        self.tasks = set()
+        self.queue = asyncio.Queue(maxsize=1)
+        self.stopped = False
+        self.sequence = 0
+
+    def _spawn(self, coro):
+        if self.stopped:
+            coro.close()
+            return
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+
+    def _emit(self, reason):
+        if self.stopped: return
+        self.sequence += 1
+        if self.queue.full():
+            try: self.queue.get_nowait()
+            except asyncio.QueueEmpty: pass
+        self.queue.put_nowait({"changed": True, "reason": reason, "sequence": self.sequence})
+
+    @staticmethod
+    def _douyin(page):
+        host = (urlparse(str(page.url)).hostname or '').lower()
+        return host == 'douyin.com' or host.endswith('.douyin.com')
+
+    async def start(self, context):
+        if self.context is context and not self.stopped:
+            return
+        if self.context is not None:
+            await self.close()
+        self.stopped = False
+        self.context = context
+        self._on_page = lambda page: self._spawn(self.bind(page))
+        context.on('page', self._on_page)
+        for page in list(context.pages):
+            await self.bind(page)
+        self._emit('connected')
+
+    async def bind(self, page):
+        for old in list(self.pages):
+            if old.is_closed(): self.pages.pop(old, None)
+        if page in self.pages or len(self.pages) >= 8 or self.stopped:
+            return
+        info = {"listeners": [], "signature": None, "pending": False}
+        self.pages[page] = info
+        def listen(target, event, fn):
+            target.on(event, fn)
+            info['listeners'].append((target, event, fn))
+        def hint(reason):
+            self._hint(page, reason)
+        def socket(ws):
+            # Actual transport names vary; a frame only schedules a DOM comparison.
+            # Heartbeats and irrelevant frames cannot trigger a reply without a changed snapshot.
+            listen(ws, 'framereceived', lambda *_: hint('websocket'))
+        listen(page, 'websocket', socket)
+        listen(page, 'response', lambda r: hint('http') if any(s in str(r.url).lower() for s in ('/im/', '/message/', '/conversation/', '/inbox/')) else None)
+        listen(page, 'domcontentloaded', lambda *_: self._spawn(self._install(page, info)))
+        try:
+            await page.expose_function('__dshDyMessageChanged', lambda: hint('dom'))
+        except Exception:
+            pass  # Binding can already exist after navigation or watcher restart.
+        await self._install(page, info)
+
+    def _hint(self, page, reason):
+        # Resolve current state on each callback: exposed bindings survive restart/navigation.
+        info = self.pages.get(page)
+        if info is not None and not self.stopped and self._douyin(page) and not info['pending']:
+            info['pending'] = True
+            self._spawn(self._changed(page, info, reason))
+
+    async def _install(self, page, info):
+        if self.stopped or page.is_closed() or not self._douyin(page): return
+        try:
+            await page.evaluate(r"""(selector) => {
+                window.__dshDyMessageObserver?.disconnect();
+                const relevant=n=>{const e=n?.nodeType===1?n:n?.parentElement;return !!e&&(e.matches(selector)||e.closest(selector)||e.querySelector(selector))};
+                window.__dshDyMessageObserver=new MutationObserver(changes=>{
+                    if(changes.some(c=>relevant(c.target)||[...c.addedNodes,...c.removedNodes].some(relevant)))
+                        window.__dshDyMessageChanged?.();
+                });
+                window.__dshDyMessageObserver.observe(document.body,{subtree:true,childList:true,characterData:true,
+                    attributes:true,attributeFilter:['src','data-message-id','data-msg-id','data-direction']});
+            }""", self.SELECTOR)
+            await self._changed(page, info, 'page-ready')
+        except Exception:
+            pass  # Page navigation/disconnection is repaired on the next start/reconcile.
+
+    async def _changed(self, page, info, reason, emit=True):
+        try:
+            await asyncio.sleep(0.15)
+            if self.stopped or page.is_closed() or not self._douyin(page): return
+            value = await page.evaluate(r"""(selector) => Array.from(document.querySelectorAll(selector)).slice(-120).map(e=>[
+                e.getAttribute('data-message-id')||e.getAttribute('data-msg-id')||'',
+                (e.innerText||'').slice(-1500),Array.from(e.querySelectorAll('img')).map(x=>x.currentSrc||x.src)
+            ])""", self.SELECTOR)
+            signature = hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
+            if signature != info['signature']:
+                info['signature'] = signature
+                if emit: self._emit(reason)
+        except Exception:
+            pass
+        finally:
+            info['pending'] = False
+
+    async def acknowledge(self):
+        # Switching conversations during a read creates DOM changes of our own.
+        # Settle those before draining hints; next incoming change still wakes the waiter.
+        pending = list(self.tasks)
+        if pending: await asyncio.gather(*pending, return_exceptions=True)
+        for page, info in list(self.pages.items()):
+            await self._changed(page, info, 'reconciled', emit=False)
+        while not self.queue.empty():
+            try: self.queue.get_nowait()
+            except asyncio.QueueEmpty: break
+
+    async def wait(self, seconds=25):
+        try:
+            event = await asyncio.wait_for(self.queue.get(), timeout=max(0.01, min(float(seconds), 30)))
+        except asyncio.TimeoutError:
+            event = {"changed": False, "reason": "heartbeat", "sequence": self.sequence}
+        closed = event.get('reason') == 'closed'
+        return {"ok": not closed, "mode": "events", **event, **({"error": "消息监听已关闭"} if closed else {})}
+
+    async def close(self):
+        self.stopped = True
+        if self.context:
+            try: self.context.remove_listener('page', self._on_page)
+            except Exception: pass
+        for page, info in list(self.pages.items()):
+            for target, event, fn in info['listeners']:
+                try: target.remove_listener(event, fn)
+                except Exception: pass
+            if not page.is_closed() and self._douyin(page):
+                try: await asyncio.wait_for(page.evaluate('() => window.__dshDyMessageObserver?.disconnect()'), 2)
+                except Exception: pass
+        tasks = list(self.tasks)
+        for task in tasks: task.cancel()
+        if tasks: await asyncio.gather(*tasks, return_exceptions=True)
+        self.pages.clear()
+        self.context = None
+        while not self.queue.empty():
+            try: self.queue.get_nowait()
+            except asyncio.QueueEmpty: break
+        self.queue.put_nowait({"changed": False, "reason": "closed", "sequence": self.sequence})
+
+
+_dm_event_watcher = None
 
 
 _OPERATION = ContextVar("douyin_operation", default=None)
@@ -799,12 +961,28 @@ def _parse_aweme(aw: dict) -> dict:
 
 def _parse_comment(c: dict) -> dict:
     user = c.get("user") or {}
+    attachments = []
+    def collect(value, kind="image"):
+        if isinstance(value, list):
+            for item in value: collect(item, kind)
+        elif isinstance(value, dict):
+            for url in value.get("url_list") or []:
+                if isinstance(url, str) and url.startswith(("https://", "http://")):
+                    attachments.append({"url": url, "kind": kind, "alt": str(value.get("alt") or value.get("description") or "")[:200]})
+            for key in ("image", "origin", "display_image", "thumb_image"):
+                if key in value: collect(value[key], kind)
+    collect(c.get("image_list") or [])
+    collect(c.get("sticker") or c.get("emoji") or {}, "sticker")
+    attachments = list({x["url"]: x for x in attachments}.values())[:8]
     return {
         "cid": str(c.get("cid") or ""),
         "user": user.get("nickname") or "",
         "text": (c.get("text") or "").strip(),
         "digg": _num(c.get("digg_count", 0)),
         "time": _fmt_ts(c.get("create_time")),
+        "kind": "sticker" if any(x["kind"] == "sticker" for x in attachments) else "image" if attachments else "text",
+        "media": [x["url"] for x in attachments],
+        "attachments": attachments,
     }
 
 
@@ -1030,7 +1208,8 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
                 for (const n of nodes) {
                     if (out.length >= num) break;
                     const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
-                    if (!txt || txt.length < 2) continue;
+                    const images=Array.from(n.querySelectorAll('img')).filter(x=>!x.closest('[class*="avatar"],[class*="Avatar"]'));
+                    if ((!txt || txt.length < 2) && !images.length) continue;
                     const cidNode = n.querySelector('[data-cid]');
                     let user = '';
                     try {
@@ -1041,6 +1220,9 @@ async def _scrape_comments_dom(page, num: int = 30) -> list[dict]:
                         cid: cidNode ? cidNode.getAttribute('data-cid') : "",
                         user: user,
                         text: txt.slice(0, 200),
+                        kind: images.length?'image':'text',
+                        media: images.map(x=>x.currentSrc||x.src),
+                        attachments: images.map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind:'image'})),
                     });
                 }
                 return out;
@@ -1633,6 +1815,26 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
     return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", status="unknown", aweme_id=aid)
 
 
+async def _find_media_comment(items, source, cid):
+    """Match a media comment by real CID or unique media+author, never API row order."""
+    expected = {urlparse(x['url']).path for x in _parse_comment(source or {}).get('attachments', [])}
+    nickname = str(((source or {}).get('user') or {}).get('nickname') or '')
+    direct, matches = [], []
+    for i in range(min(await items.count(), 100)):
+        item = items.nth(i)
+        data = await item.evaluate(r"""el => ({
+            cid:el.getAttribute('data-cid')||el.getAttribute('data-comment-id')||'',
+            users:Array.from(el.querySelectorAll('a[href*="/user/"],[data-e2e="comment-user-name"]')).map(x=>(x.innerText||'').trim()),
+            media:Array.from(el.querySelectorAll('img')).filter(x=>!x.closest('[class*="avatar"],[class*="Avatar"]')).map(x=>x.currentSrc||x.src)
+        })""")
+        if str(data.get('cid') or '') == str(cid): direct.append(item)
+        actual = {urlparse(u).path for u in data.get('media', []) if isinstance(u, str)}
+        if expected and expected.intersection(actual) and nickname and nickname in data.get('users', []):
+            matches.append(item)
+    if len(direct) == 1: return direct[0]
+    return matches[0] if not direct and len(matches) == 1 else None
+
+
 async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, mention: str = "", reply_index: int = -1) -> dict:
     aid = _extract_aweme_id(aweme_id)
     if not aid:
@@ -1727,6 +1929,7 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
             if str(reply_cid) in ordered:
                 idx = ordered.index(str(reply_cid))
             api_text = ""
+            api_items = []
             if idx is None:
                 # 图文作品不抛 /comment/list/ 这个 XHR：直接问接口拿顺序，再按序号映射回 DOM
                 try:
@@ -1764,9 +1967,14 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
             items = page.locator("[data-e2e='comment-item']")
             source_comment = next((c for item in cmt_net.items for c in item["data"].get("comments", [])
                                    if str(c.get("cid")) == str(reply_cid)), None)
+            source_comment = source_comment or next((c for c in api_items if str(c.get('cid')) == str(reply_cid)), None)
             need_text = str((source_comment or {}).get("text") or api_text or "").strip()
             target = None
-            if need_text:
+            if _parse_comment(source_comment or {}).get('attachments') or not need_text:
+                target = await _find_media_comment(items, source_comment, reply_cid)
+                if target is None:
+                    return _err('图片/表情评论无法唯一定位，未回复；请展开评论后重试', aweme_id=aid)
+            elif need_text:
                 # DOM 不暴露 cid，而且渲染顺序可能和接口顺序不一致 ⇒ 按正文找（只要可见的），找不到就滚
                 for _ in range(12):
                     cnt = await items.count()
@@ -1793,10 +2001,6 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                     await page.wait_for_timeout(1200)
                 if target is None:
                     return _err("评论面板里没找到这条评论（滚了 12 屏），未回复", aweme_id=aid, notes=notes)
-            else:
-                if await items.count() <= idx:
-                    return _err(f"评论序号 {idx} 超出页面已渲染的条数", aweme_id=aid)
-                target = items.nth(idx)
 
             try:
                 # Playwright 的 scroll_into_view 要求元素本来就可见；先用 JS 滚进视野，再 JS 点「回复」
@@ -3020,7 +3224,8 @@ async def memory_write(content: str, type: str = "fact", tags: str = "", importa
     """把一条记忆写进「记忆插件」的库（memory.db）。私信/视频互动的记忆共用这一份。"""
     import sqlite3
     import uuid
-    db = os.environ.get("DSH_MEMORY_DB") or str(Path.home() / ".dsh" / "memory-system" / "memory.db")
+    _dsh_home = os.environ.get("DSH_HOME") or str(Path.home() / ".dsh")
+    db = os.environ.get("DSH_MEMORY_DB") or str(Path(_dsh_home) / "memory-system" / "memory.db")
     try:
         conn = sqlite3.connect(db, timeout=10)
         cur = conn.cursor()
@@ -3057,7 +3262,8 @@ async def memory_write(content: str, type: str = "fact", tags: str = "", importa
 async def memory_recent(limit: int = 12) -> str:
     """读「记忆插件」的最近记忆（所有工作区共享），给私信/评论回复当上下文。"""
     import sqlite3
-    db = os.environ.get("DSH_MEMORY_DB") or str(Path.home() / ".dsh" / "memory-system" / "memory.db")
+    _dsh_home = os.environ.get("DSH_HOME") or str(Path.home() / ".dsh")
+    db = os.environ.get("DSH_MEMORY_DB") or str(Path(_dsh_home) / "memory-system" / "memory.db")
     try:
         conn = sqlite3.connect(db, timeout=10)
         rows = conn.execute(
@@ -3070,9 +3276,80 @@ async def memory_recent(limit: int = 12) -> str:
         return _err(f"读记忆失败：{type(exc).__name__}: {exc}")
 
 
+
+@restricted_tool()
+async def memory_context(limit: int = 16) -> str:
+    """读「记忆插件」里最该带上的上下文：角色卡（称呼/风格/约束）+ 最近记忆。给私信快回当上下文用。"""
+    import sqlite3
+    _dsh_home = os.environ.get("DSH_HOME") or str(Path.home() / ".dsh")
+    db = os.environ.get("DSH_MEMORY_DB") or str(Path(_dsh_home) / "memory-system" / "memory.db")
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        conn.row_factory = sqlite3.Row
+        lines = []
+        try:
+            row = conn.execute("select data from character_card where id=1").fetchone()
+            card = json.loads(row["data"]) if row and row["data"] else {}
+            ident = card.get("identity") or {}
+            prefs = card.get("preferences") or {}
+            cons = card.get("constraints") or []
+            who = []
+            if ident.get("name"):
+                who.append("称呼：" + str(ident["name"]))
+            if prefs.get("communication_style"):
+                who.append("说话风格：" + str(prefs["communication_style"]))
+            if cons:
+                who.append("约束：" + "；".join(str(x) for x in cons[:3]))
+            if who:
+                lines.append("【你是谁】" + " · ".join(who))
+        except Exception:
+            pass
+        rows = conn.execute(
+            "select type, content, created_at from memories where superseded_by is null "
+            "order by created_at desc limit ?", (max(3, min(int(limit), 40)),)
+        ).fetchall()
+        conn.close()
+        items = []
+        for r in rows:
+            c = str(r["content"] or "").replace("\n", " ").strip()
+            if not c or c.startswith("我:") or c.startswith("大肥鱼:"):
+                continue
+            items.append("- [%s] %s" % (r["type"], c[:70]))
+        if items:
+            lines.append("【最近的记忆】\n" + "\n".join(items[:14]))
+        return _ok(context="\n".join(lines), count=len(items))
+    except Exception as exc:
+        return _err(f"读记忆失败：{type(exc).__name__}: {exc}")
+
+
+@restricted_tool()
+async def douyin_dm_events(wait_seconds: float = 25, acknowledge: bool = False, stop: bool = False) -> str:
+    """Internal long poll: wake on page message changes, never return transport payloads."""
+    global _dm_event_watcher
+    try:
+        if stop:
+            if _dm_event_watcher is not None: await _dm_event_watcher.close()
+            return j(_ok(stopped=True, mode='events', changed=False))
+        async with _browser.lock:
+            context = await _browser.context()
+            page = await _browser.page_chat()
+            # A fresh page needs the IM entry page, but existing conversations stay in place.
+            if page.url in ('about:blank', ''):
+                await _goto(page, 'https://www.douyin.com/jingxuan', settle=1)
+            if _dm_event_watcher is None:
+                _dm_event_watcher = DmEventWatcher()
+            await _dm_event_watcher.start(context)
+            if acknowledge:
+                await _dm_event_watcher.acknowledge()
+        # Crucial: waiting for an event must not hold the account/browser lock.
+        return j(await _dm_event_watcher.wait(wait_seconds))
+    except Exception as exc:
+        return j(_err('消息监听未连接：' + str(exc), mode='events'))
+
+
 @restricted_tool()
 async def douyin_dm_snapshot(nickname: str = "", limit: int = 20) -> str:
-    """只读：按时间顺序返回和某人的最近 N 条私信文本（方向由宿主判定）。"""
+    """只读：按时间顺序返回私信 ID、方向、文本及媒体附件；未知方向不猜测。"""
     async def impl():
         ctx = await _browser.context()
         page = await _browser.page_chat()
@@ -3089,7 +3366,7 @@ async def douyin_dm_snapshot(nickname: str = "", limit: int = 20) -> str:
         await page.wait_for_timeout(1000)
         msgs = await _message_snapshot(page)
         tail = msgs[-max(1, min(int(limit), 50)):]
-        return _ok(items=[{"text": str(m.get("text") or "").strip()[:300], "media": len(m.get("media") or [])} for m in tail])
+        return _ok(items=tail, count=len(tail))
     return j(await _guard(impl, 90))
 
 
@@ -3183,7 +3460,8 @@ async def douyin_comments(aweme_id: str, num: int = 30, compact: bool = False,
             skip = {str(x) for x in exclude_cids}
             items = [x for x in items if str(x.get("cid")) not in skip]
         if compact:
-            items = [{"cid": str(x.get("cid")), "user": x.get("user", ""), "text": str(x.get("text", ""))[:30]} for x in items]
+            items = [{"cid": str(x.get("cid")), "user": x.get("user", ""), "text": str(x.get("text", ""))[:30],
+                      "kind": x.get("kind", "text"), "media": x.get("media", []), "attachments": x.get("attachments", [])} for x in items]
         res["items"] = items
         res["count"] = len(items)
         return res
@@ -3481,23 +3759,37 @@ async def _message_snapshot(page):
         const v=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
         const out=[];
         const seen=new Set();
-        const push=(id,direction,text,media,awemeId)=>{
+        const hash=s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h.toString(16)};
+        const occurrences=new Map();
+        const push=(id,direction,text,media,awemeId,kind='text',attachments=[],senderId='',conversationId='')=>{
+            if(id.startsWith('dom')){
+                const value=JSON.stringify([direction,text,media.map(u=>{try{return new URL(u).origin+new URL(u).pathname}catch{return u}}),awemeId]);
+                const count=occurrences.get(value)||0;occurrences.set(value,count+1);
+                id='dom:'+hash(value)+':'+count;
+            }
             const key=id+'|'+(text||'').slice(0,24)+'|'+(awemeId||'');
             if(seen.has(key))return;
             seen.add(key);
             out.push({messageId:id,direction,text:text,image:media,images:media,
-                      media:media,awemeId:awemeId||''});
+                      media:media,awemeId:awemeId||'',kind,attachments,senderId,conversationId,
+                      idSource:id.startsWith('dom:')?'dom':'platform'});
         };
         // 1) 首选：带 data-message-id 的节点
         for(const e of Array.from(document.querySelectorAll('[data-message-id],[data-msg-id]'))){
             if(!v(e))continue;
             const id=e.getAttribute('data-message-id')||e.getAttribute('data-msg-id');
             const self=e.getAttribute('data-is-self')||e.getAttribute('data-self');
-            const direction=e.getAttribute('data-direction')||((self==='true'||self==='1')?'outbound':(self==='false'||self==='0')?'inbound':'unknown');
+            const senderId=e.getAttribute('data-sender-id')||e.getAttribute('data-from-user-id')||'';
+            const selfId=document.querySelector('[data-current-user-id]')?.getAttribute('data-current-user-id')||'';
+            const direction=senderId&&selfId?(senderId===selfId?'outbound':'inbound'):(e.getAttribute('data-direction')||((self==='true'||self==='1')?'outbound':(self==='false'||self==='0')?'inbound':'unknown'));
             const card=e.querySelector('a[href*="/video/"]');
+            const imgs=Array.from(e.querySelectorAll('img')).filter(x=>!x.closest('[class*="avatar"],[class*="Avatar"]'));
+            const kind=card?'video':e.querySelector('[class*="Emoji"],[class*="emoji"]')?'sticker':imgs.length?'image':'text';
             push(id,direction,(e.innerText||'').trim(),
-                 Array.from(e.querySelectorAll('img')).map(x=>x.currentSrc||x.src),
-                 card?((card.href.match(/video\/(\d+)/)||[])[1]||''):'');
+                 imgs.map(x=>x.currentSrc||x.src),
+                 card?((card.href.match(/video\/(\d+)/)||[])[1]||''):'',kind,
+                 imgs.map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})),senderId,
+                 e.closest('[data-conversation-id]')?.getAttribute('data-conversation-id')||'');
         }
         if(out.length) return out;
         // 2) 兜底：按气泡 DOM 识别（抖音私信没有 data-message-id）
@@ -3538,7 +3830,9 @@ async def _message_snapshot(page):
                 }
             }
             const imgs=Array.from(row.e.querySelectorAll('img')).map(x=>x.currentSrc||x.src);
-            push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId);
+            const kind=row.kind==='share'?'video':row.kind==='emoji'?'sticker':row.kind;
+            push('dom'+idx+'-'+row.kind,dir,(row.e.innerText||'').trim(),imgs,awemeId,kind,
+                 Array.from(row.e.querySelectorAll('img')).map(x=>({url:x.currentSrc||x.src,alt:x.alt||'',kind})));
             idx++;
         }
         return out;
@@ -3595,7 +3889,7 @@ async def _send_chat_part(page, editor, part):
         # ⭐ 表情包优先：先「收藏」tab（17 张大肥鱼），再「表情」tab（214 张通用表情）；都按心情标签挑
         expected_media = ""
         pick_idx = max(0, int(part.get("pick", 0) or 0))
-        kw = str(keyword or "").replace(" ", "")
+        kw = str(keyword or "").replace(" ", "").replace("大肥鱼", "").replace("表情包", "").replace("表情", "")
 
         def _norm_key(x):
             s = str(x or "").split("?")[0]
@@ -3648,6 +3942,19 @@ async def _send_chat_part(page, editor, part):
                     best_s, best_i = s, i
             return best_s, best_i
 
+        def _last_sticker():
+            try:
+                f = HOME / "last-sticker.txt"
+                return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+            except Exception:
+                return ""
+
+        def _remember_sticker(src):
+            try:
+                (HOME / "last-sticker.txt").write_text(str(src or ""), encoding="utf-8")
+            except Exception:
+                pass
+
         fav_pick = None
         for tab, meta_file in ((2, "favorites2.json"), (1, "favorites.json")):
             srcs = await _fav_srcs(tab)
@@ -3657,12 +3964,21 @@ async def _send_chat_part(page, editor, part):
             if score > 0:
                 fav_pick = bi
                 expected_media = srcs[bi]
+                _remember_sticker(expected_media)
                 break
         if fav_pick is None:
             srcs = await _fav_srcs(2)
             if srcs:
-                fav_pick = max(0, min(pick_idx, len(srcs) - 1))
+                last = _last_sticker()
+                # 没匹配到标签：别永远发第一张，随机挑一张，并尽量避开上一张
+                pool = [i for i in range(len(srcs)) if srcs[i] != last] or list(range(len(srcs)))
+                if pick_idx and 0 <= pick_idx < len(srcs):
+                    fav_pick = pick_idx
+                else:
+                    import random
+                    fav_pick = random.choice(pool)
                 expected_media = srcs[fav_pick]
+                _remember_sticker(expected_media)
 
         if fav_pick is not None:
             await page.evaluate("""(arg) => {
@@ -3730,9 +4046,19 @@ async def _send_chat_part(page, editor, part):
                 body = ""
             if expected in body and expected not in before_body:
                 return _ok(verified=True, messageId="body-text", kind=kind, evidence="body-text-appears")
-        # ⭐ 表情包不再用「出站数量/表情气泡数量增加」兜底：
-        #    打开表情面板本身就会让计数变化，会把没发出去误判成成功（2026-10-27 实测）。
-        #    只认上面「新出站消息里带同一张表情图」这一条，否则如实返回 unknown。
+        # 兜底 2：出站气泡数量增加了（表情包/图片这类比文本更难精确比对）
+        if kind == "sticker":
+            now_out = sum(1 for m in msgs if m.get("direction") == "outbound")
+            if now_out > before_out:
+                return _ok(verified=True, messageId="outbound-count", kind=kind, evidence="outbound-count-increased")
+            # 兜底 3：表情气泡数量增加了（收藏表情最稳的判据）
+            try:
+                now_emoji = await page.evaluate(r"""() => document.querySelectorAll('[class*="MessageItemEmojiemojiBox"]').length""")
+                if now_emoji > before_emoji:
+                    return _ok(verified=True, messageId="emoji-count", kind=kind, evidence="emoji-bubble-increased")
+            except Exception:
+                pass
+            # （删掉了「按图片路径匹配」的兜底：它会把表情面板里的预览图当成已发送，误判成功）
     return _err("已操作但没有读取到新出站消息，停止自动重发", status="unknown", kind=kind)
 
 
@@ -3781,10 +4107,7 @@ async def douyin_inbox(limit: int = 12, nickname: str = "") -> str:
             messages = await _message_snapshot(page)
             last = messages[-1] if messages else None
             item = {**last, "name": name, "peerId": "", "preview": (last or {}).get("text", "")} if last else None
-            # 和她的会话里，方向识别不出来时默认当她发的（我们自己发的几何上通常能判成 outbound）
-            if item and item.get("direction") not in ("inbound", "outbound"):
-                item["direction"] = "inbound"
-            items = [item] if item else []
+            items = [item] if item and item.get("direction") == "inbound" else []
             return _ok(items=items, count=len(items), lastDirection=(item or {}).get("direction", ""),
                       notes=["只读了指定联系人；lastDirection=最后一条是谁发的"])
         icon = await _first_of(page, ['[data-e2e="im-entry"]'], 3000)
@@ -3843,7 +4166,7 @@ async def douyin_chat_batch(nickname: str, messages: str = "") -> str:
 
 
 @restricted_tool()
-async def douyin_chat_sticker(nickname: str, keyword: str = "大肥鱼", pick: int = 0, flip: int = 0) -> str:
+async def douyin_chat_sticker(nickname: str, keyword: str = "", pick: int = 0, flip: int = 0) -> str:
     async def impl():
         ctx = await _browser.context()
         page = await _browser.page_chat()

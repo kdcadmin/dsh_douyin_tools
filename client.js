@@ -129,6 +129,7 @@ window.__ModuleLoader__.load({
       ['like', '互动'],
       ['dm', '私信'],
       ['sticker', '表情包'],
+      ['mem', '记忆'],
       ['adv', '高级'],
     ]
 
@@ -144,6 +145,13 @@ window.__ModuleLoader__.load({
     function Section(tab, title, ...kids) {
       return h('div', { 'data-dy-sec': '', 'data-dy-group': tab, 'data-dy-away': undefined }, ...kids)
     }
+
+    // 记忆页在 apply(ctx) 里定义，Panel 在 factory 层 —— 跨作用域不能直接引用，
+    // 用一个桥把组件挂过来，避免 Panel 渲染时 ReferenceError 导致整页白屏。
+    const DouyinMemBridge = { Comp: null }
+    const DouyinMemTab = () => (DouyinMemBridge.Comp
+      ? h(DouyinMemBridge.Comp)
+      : h('div', { 'data-dy-page': '' }, h('div', { 'data-dy-note': '' }, '记忆页加载中…')))
 
     function Panel() {
       const [st, setSt] = React.useState(null)
@@ -176,7 +184,7 @@ window.__ModuleLoader__.load({
             reportLevel: String(c.reportLevel || 'full'),
             personaPrompt: String(c.personaPrompt || ''),
             autoReply: Boolean(c.autoReply), replyPerRun: c.replyPerRun ?? 3, replyPerDay: c.replyPerDay ?? 10,
-            replyRandom: c.replyRandom !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareWithNote: c.shareWithNote !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmAutoReply: c.dmAutoReply !== false, dmAutoIntervalSec: Number(c.dmAutoIntervalSec) || 15, dmReply: Boolean(c.dmReply), dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: Boolean(c.autoCommentPlain), plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakSticker: String(c.streakSticker || '大肥鱼'), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
+            replyRandom: c.replyRandom !== false, replyAllDay: c.replyAllDay !== false, replyVideoIds: String(c.replyVideoIds || ''), replyIntervalMin: c.replyIntervalMin ?? 30, replyOncePerUser: Boolean(c.replyOncePerUser), skipLive: c.skipLive !== false, shareToNick: String(c.shareToNick || ''), replyWorksDays: c.replyWorksDays ?? 3, autoClean: c.autoClean !== false, shareWithNote: c.shareWithNote !== false, shareNote: String(c.shareNote || ''), msgAllowTo: String(c.msgAllowTo || ''), dmAutoReply: c.dmAutoReply !== false, dmAutoIntervalSec: Number(c.dmAutoIntervalSec) || 15, dmReply: Boolean(c.dmReply), dmReplyOnlyTo: String(c.dmReplyOnlyTo || ''), dmReplyPerContact: c.dmReplyPerContact ?? 1, dmReplyPerDay: c.dmReplyPerDay ?? 5, sharePerDay: c.sharePerDay ?? 10, autoCommentPlain: Boolean(c.autoCommentPlain), plainCommentPerDay: c.plainCommentPerDay ?? 10, pickPerRound: c.pickPerRound ?? 2, skipOverMin: c.skipOverMin ?? 60, skimOverMin: c.skimOverMin ?? 5, streakNick: String(c.streakNick || ''), streakSticker: String(c.streakSticker || '大肥鱼'), streakPerDay: c.streakPerDay ?? 1, askDoubao: Boolean(c.askDoubao),
             autoLike: Boolean(c.autoLike), autoComment: Boolean(c.autoComment),
             autoPublish: Boolean(c.autoPublish), publishDraft: Boolean(c.publishDraft),
             commentPerDay: Number(c.commentPerDay) || 0, publishPerDay: Number(c.publishPerDay) || 0,
@@ -236,7 +244,7 @@ window.__ModuleLoader__.load({
             keywords: String(draft.keywords || '').split(/[、,，\s]+/).map((s) => s.trim()).filter(Boolean),
             reportLevel: draft.reportLevel, personaPrompt: draft.personaPrompt,
             autoLike: draft.autoLike, autoComment: draft.autoComment,
-            autoReply: draft.autoReply, replyPerRun: Number(draft.replyPerRun) || 0,
+            autoReply: draft.autoReply, replyPerRun: Number(draft.replyPerRun) || 0, replyAllDay: draft.replyAllDay !== false,
             replyPerDay: Number(draft.replyPerDay) || 0, replyRandom: draft.replyRandom !== false,
             replyVideoIds: String(draft.replyVideoIds || ''), replyIntervalMin: Number(draft.replyIntervalMin) || 30, replyOncePerUser: Boolean(draft.replyOncePerUser), skipLive: draft.skipLive !== false, shareToNick: String(draft.shareToNick || ''), replyWorksDays: Number(draft.replyWorksDays) || 3, autoClean: draft.autoClean !== false, shareWithNote: draft.shareWithNote !== false, shareNote: String(draft.shareNote || ''), msgAllowTo: String(draft.msgAllowTo || ''), dmReply: Boolean(draft.dmReply), dmReplyOnlyTo: String(draft.dmReplyOnlyTo || ''), dmReplyPerContact: Number(draft.dmReplyPerContact) || 1, dmReplyPerDay: Number(draft.dmReplyPerDay) || 0, sharePerDay: Number(draft.sharePerDay) || 0, autoCommentPlain: Boolean(draft.autoCommentPlain), plainCommentPerDay: Number(draft.plainCommentPerDay) || 0, pickPerRound: Number(draft.pickPerRound) || 2, skipOverMin: Number(draft.skipOverMin) || 60, skimOverMin: Number(draft.skimOverMin) || 5, streakNick: String(draft.streakNick || ''), streakSticker: String(draft.streakSticker || '大肥鱼'), streakPerDay: Number(draft.streakPerDay) || 0, askDoubao: Boolean(draft.askDoubao),
             autoPublish: draft.autoPublish, publishDraft: draft.publishDraft,
@@ -273,6 +281,17 @@ window.__ModuleLoader__.load({
             setTone('warn')
           }
         } catch (e) { setMsg('跑一轮失败：' + String(e.message || e)); setTone('warn') }
+        setBusy('')
+      }
+
+      const checkUpdate = async () => {
+        setBusy('update'); setMsg('正在检查更新…')
+        try {
+          const r = await jget('/update/check')
+          if (!r || r.ok === false) { setMsg('检查更新失败：' + (r?.error || '网络不通')); setTone('warn') }
+          else if (r.hasUpdate) { setMsg('发现新版本 v' + r.latest + '（本地 v' + r.local + '）：' + r.url); setTone('warn') }
+          else { setMsg('已是最新版本（v' + (r.local || '未知') + '）'); setTone('good') }
+        } catch (e) { setMsg('检查更新失败：' + String(e.message || e)); setTone('warn') }
         setBusy('')
       }
 
@@ -453,7 +472,8 @@ window.__ModuleLoader__.load({
               st.loggedIn ? '抖音已登录' : '抖音未登录'),
             h('span', { 'data-dy-badge': '' }, 'v' + (st.build?.version || '未知')),
             st.headless ? h('span', { 'data-dy-badge': '' }, 'headless: ' + st.headless.status) : null),
-          h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'run'), onClick: runNow }, '现在跑一轮')),
+          h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'run'), onClick: runNow }, '现在跑一轮'),
+          h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'update'), onClick: checkUpdate }, busy === 'update' ? '检查中…' : '检查更新')),
 
         /* ── tabs ── */
         h('div', { 'data-dy-tabs': '' }, TABS.map(([id, label]) => h('button', {
@@ -631,6 +651,10 @@ window.__ModuleLoader__.load({
           h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '自动回我自己视频的评论'),
               ),
             Sw({ on: Boolean(draft.autoReply), onChange: (v) => set('autoReply', v) })),
+          draft.autoReply ? h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '白天也回（不限谷时）'),
+              Note('关掉就只在谷时窗口里回')),
+            Sw({ on: draft.replyAllDay !== false, onChange: (v) => set('replyAllDay', v) })) : null,
           draft.autoReply ? h('div', { 'data-dy-sub': '' },
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '每次回几条')),
@@ -770,14 +794,13 @@ window.__ModuleLoader__.load({
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'dm', 'data-dy-away': tab === 'dm' ? undefined : '' },
           h('div', { 'data-dy-h': '' }, '后台自动回复'),
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '后台静默回私信'),
-              Note('每 N 秒看一次收件箱（默认 15），有新消息就自动回；不占对话窗口')),
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '消息事件触发回复'),
+              Note('网页消息变化时唤醒回复；每 120 秒补漏。需要登录且保持插件运行')),
             Sw({ on: Boolean(draft.dmAutoReply !== false), onChange: (v) => set('dmAutoReply', v) })),
           h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '多久看一次（秒）'),
-              Note('默认 15 秒；这就是「跟我聊天」这条，和下面的陌生人巡检完全分开')),
-            h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '90px' }, value: draft.dmAutoIntervalSec ?? 15,
-              onChange: (e) => set('dmAutoIntervalSec', Number(e.target.value) || 15) })),
+            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '监听方式'),
+              Note('监听现有网页连接及消息区域变化；旧的秒数设置不再控制私信读取频率'))),
+          dmInfo?.watcher ? Note(dmInfo.watcher.error ? '监听异常：' + dmInfo.watcher.error : dmInfo.watcher.connected ? '事件监听已连接（切回本页刷新状态）' : '事件监听待连接或已关闭') : null,
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只回谁（昵称）'),
               Note('在「可以主动发消息的人」名单里再筛一次；留空 = 名单里的人全回')),
@@ -860,6 +883,9 @@ window.__ModuleLoader__.load({
         ),
 
         /* ══════════ 高级 ══════════ */
+        h('div', { 'data-dy-sec': '', 'data-dy-group': 'mem', 'data-dy-away': tab === 'mem' ? undefined : '' },
+          h(DouyinMemTab)),
+
         h('div', { 'data-dy-sec': '', 'data-dy-group': 'adv', 'data-dy-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-dy-row': '' },
             h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'save'), onClick: save }, '保存'),
@@ -1025,7 +1051,6 @@ window.__ModuleLoader__.load({
         }
 
         const MemTabs = [
-          { id: 'graph', label: '图谱' },
           { id: 'character', label: '角色卡' },
           { id: 'timeline', label: '时间线' },
           { id: 'clean', label: '清理' },
@@ -1471,7 +1496,7 @@ window.__ModuleLoader__.load({
         }
 
         const MemoryPage = () => { try {
-          const [tab, setTab] = React.useState('graph')
+          const [tab, setTab] = React.useState('character')
           const [char, setChar] = React.useState(null)
           const [tl, setTl] = React.useState(null)
           const [g, setG] = React.useState(null)
@@ -1541,8 +1566,7 @@ window.__ModuleLoader__.load({
               h(Card, null, '没装可选记忆插件，只显示本插件自己的记忆文件和人设；装不装都不影响刷抖音。'),
               rawBody(),
               h(PersonaBox)) : null,
-            memOk !== false && tab === 'graph' ? h(Guard, { Comp: MemGraph, props: { data: g, busy }, label: '图谱' }) : null,
-            memOk !== false && tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
+              memOk !== false && tab === 'character' ? h(Guard, { Comp: CharEditor, props: { data: char, onSaved: () => load(true) }, label: '角色卡' }) : null,
             memOk !== false && tab === 'timeline' ? h(Guard, { Comp: Timelines, props: { items: (tl && (tl.results || tl)) || [], busy }, label: '时间线' }) : null,
             memOk !== false && tab === 'clean' ? h(Guard, { Comp: Cleanup, props: {}, label: '清理' }) : null,
             memOk !== false && tab === 'raw' ? rawBody() : null,
@@ -1564,11 +1588,10 @@ window.__ModuleLoader__.load({
 
         // 兜底：任何渲染异常都画成红字，不再白屏（2026-10-26 使用者连续两次看到空白）
         const MemorySafe = () => h(Guard, { Comp: MemoryPage, label: '记忆页' })
+        DouyinMemBridge.Comp = MemorySafe
 
-        slots.inject('settings.section', () => slots.register(
-          { name: 'settings.section', id: 'douyin-memory', order: 32, label: '记忆' },
-          () => h(MemorySafe),
-        ))
+        // 记忆页不再单独出现在设置列表里：已嵌入「刷抖音」页的「记忆」tab（在表情包旁边）
+        // 别人安装抖音插件时会自带这个 tab，不需要额外记忆插件入口。
 
         // ⭐ 会话头第三个 tab：抖音刷过的视频（使用者 2026-10-23 要求跟 B站 那个并排）
         try {
@@ -1576,7 +1599,7 @@ window.__ModuleLoader__.load({
             name: 'conversation.view',
             id: 'douyin-watched',
             order: 21,
-            label: '抖音刷过的视频',
+            label: '抖音视频',
             scope: 'session',
           }, () => h(DouyinWatchedTab)))
         } catch (e) { /* 老版本没有这个槽位就算了 */ }

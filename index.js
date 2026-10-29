@@ -42,10 +42,51 @@ import { findDesktopCli } from './lib/dsh-cli.mjs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
+import { normalizeDmMessage, dmMessageKey, dmMessagePreview, dmMessageContext } from './lib/dm-messages.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 
 export const name = 'douyin-life'
-export const inject = ['webServer', 'tools', 'settings']
+export const inject = ['webServer', 'tools', 'settings', 'llm', 'credentials']
+
+// 插件目录（读本地 package.json 的版本号，检查更新用）
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
+
+function versionTuple(v) {
+  return String(v || '').replace(/^v/i, '').split('.').map((n) => Number(n) || 0)
+}
+
+function cmpVersion(a, b) {
+  const x = versionTuple(a)
+  const y = versionTuple(b)
+  for (let i = 0; i < 3; i += 1) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0)
+  }
+  return 0
+}
+
+// 检查更新：对比本地 package.json 与 GitHub 仓库里的版本
+async function checkUpdate() {
+  let local = ''
+  try {
+    local = JSON.parse(readFileSync(join(PLUGIN_DIR, 'package.json'), 'utf8')).version || ''
+  } catch {
+    /* 读不到就当未知 */
+  }
+  const url = 'https://github.com/kdcadmin/dsh_douyin_tools'
+  try {
+    const res = await fetch('https://api.github.com/repos/kdcadmin/dsh_douyin_tools/contents/package.json', {
+      headers: { 'User-Agent': 'dsh-douyin-life', Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) throw new Error('GitHub HTTP ' + res.status)
+    const j = await res.json()
+    const txt = Buffer.from(String(j.content || '').replace(/\s+/g, ''), 'base64').toString('utf8')
+    const latest = JSON.parse(txt).version || ''
+    return { ok: true, local, latest, hasUpdate: cmpVersion(latest, local) > 0, url, checkedAt: new Date().toISOString() }
+  } catch (e) {
+    return { ok: false, local, latest: '', hasUpdate: false, url, error: String(e?.message || e) }
+  }
+}
 
 /**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段。
@@ -113,6 +154,8 @@ export const Config = !z ? undefined : z.object({
   /** 分享后的附言交给模型写（默认开；关掉=用模板） */
   modelShareNote: z.boolean().default(true).extra('volatile', true),
   replyPerDay: z.natural().default(10).extra('volatile', true),
+  /** 白天也回（不限谷时窗口） */
+  replyAllDay: z.boolean().default(true).extra('volatile', true),
   /** 随机挑视频 / 随机挑评论（关掉 = 按顺序来） */
   replyRandom: z.boolean().default(true).extra('volatile', true),
   /** 指定要回的自己的视频 id（逗号分隔；留空 = 用投稿账本里发过的） */
@@ -155,6 +198,13 @@ export const Config = !z ? undefined : z.object({
   dmReplyPerContact: z.natural().default(1).extra('volatile', true),
   /** 每天最多回几条私信（所有人合计） */
   dmReplyPerDay: z.natural().default(5).extra('volatile', true),
+  /** 私信快回：直接走 DSH 自己的 llm 服务（低思考模型），目标 1~3 秒 */
+  dmFastReply: z.boolean().default(true).extra('volatile', true),
+  /** 快回用的 provider / model（留空 = 用当前默认模型） */
+  dmFastProvider: z.string().default('').extra('volatile', true),
+  dmFastModel: z.string().default('').extra('volatile', true),
+  /** 快回的思考档位：off / low / 留空 = 模型默认 */
+  dmFastReasoning: z.string().default('off').extra('volatile', true),
   /** 转发视频时附带的一句话（留空=从内置几句里随机；可带 [笑哭] 这类表情码） */
   /** 转发后是否顺带发一条消息 + 一个表情包（同一个开关） */
   shareWithNote: z.boolean().default(true).extra('volatile', true),
@@ -256,9 +306,9 @@ export function apply(ctx, config) {
     workspace: '', reportLevel: 'full',
     personaPrompt: '',
     memory: true,
-    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
+    autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen-vl-max-latest', localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -317,6 +367,7 @@ export function apply(ctx, config) {
     if ('autoReply' in p) p.autoReply = Boolean(p.autoReply)
     if ('replyPerRun' in p) p.replyPerRun = Math.max(0, Math.min(Number(p.replyPerRun) || 0, 20))
     if ('replyPerDay' in p) p.replyPerDay = Math.max(0, Math.min(Number(p.replyPerDay) || 0, 1000))
+    if ('replyAllDay' in p) p.replyAllDay = Boolean(p.replyAllDay)
     if ('replyRandom' in p) p.replyRandom = Boolean(p.replyRandom)
     if ('replyVideoIds' in p) p.replyVideoIds = String(p.replyVideoIds || '').replace(/[^0-9,\s]/g, '').slice(0, 400)
     if ('replyOneShot' in p) p.replyOneShot = Boolean(p.replyOneShot)
@@ -344,6 +395,10 @@ export function apply(ctx, config) {
     if ('dmAutoIntervalSec' in p) p.dmAutoIntervalSec = Math.max(5, Math.min(Number(p.dmAutoIntervalSec) || 15, 120))
     if ('dmReplyPerContact' in p) p.dmReplyPerContact = Math.max(1, Math.min(Number(p.dmReplyPerContact) || 1, 10))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 100))
+    if ('dmFastReply' in p) p.dmFastReply = Boolean(p.dmFastReply)
+    if ('dmFastProvider' in p) p.dmFastProvider = String(p.dmFastProvider || '').slice(0, 40)
+    if ('dmFastModel' in p) p.dmFastModel = String(p.dmFastModel || '').slice(0, 120)
+    if ('dmFastReasoning' in p) p.dmFastReasoning = String(p.dmFastReasoning || '').slice(0, 20)
     if ('localRound' in p) p.localRound = Boolean(p.localRound)
     if ('askDoubao' in p) p.askDoubao = Boolean(p.askDoubao)
     if ('shareToNick' in p) p.shareToNick = String(p.shareToNick || '').slice(0, 40)
@@ -898,12 +953,8 @@ export function apply(ctx, config) {
     '看完心情好了[微笑]', '有点东西[比心]', '刚刷到就看完了[笑哭]', '说得对[赞]',
   ]
 
-  // 只用「确认成功的 share 动作」算额度：旧版失败也写 shares，会把额度虚高、把视频卡掉
-  const sharesToday = (now = new Date()) => {
-    const d = dayKey(now)
-    return Object.values(readLedger().actions || {})
-      .filter((a) => a && a.day === d && a.kind === 'share' && a.status === 'succeeded').length
-  }
+  const sharesToday = (now = new Date()) => Object.values(readLedger().shares || {})
+    .filter((r) => r && r.day === dayKey(now)).length
   const noteShare = (awemeId, rec) => {
     const l = readLedger()
     l.shares = l.shares || {}
@@ -1212,10 +1263,12 @@ export function apply(ctx, config) {
         if (seenThisRound.has(cid)) return false
         if (isMine(c.user)) return false                       // 我自己发的评论/回复
         const txt = String(c.text || '').trim()
-        if (!txt || /^\[[^\]]*\]$/.test(txt)) return false      // 纯图片/表情评论在 DOM 里定位不到，跳过
+        const media = normalizeDmMessage(c).attachments
+        if (!txt && !media.length) return false
+        if (doneCids.has(cid)) return false
         if (myTexts.has(txt)) return false                      // 兜底：那是我回过的句子
         // ⭐ 去重只看「人 + 评论原文」：同人新评论要回；同一人同一条评论才跳过
-        if (repliedPairs.has(pairKey(c.user, txt))) return false
+        if (txt && !media.length && repliedPairs.has(pairKey(c.user, txt))) return false
         seenThisRound.add(cid)
         return true
       })
@@ -1230,7 +1283,7 @@ export function apply(ctx, config) {
           const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
           if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
         } catch { /* 没有记忆也能回 */ }
-        const list = picks.map((c, i) => `${i + 1}) 视频「${String(v.title || '').slice(0, 40)}」 评论者：${c.user || ''} 内容：${String(c.text || '').slice(0, 80)} reply_cid=${String(c.cid || '')}`).join('\n')
+        const list = picks.map((c, i) => `${i + 1}) 评论者：${c.user || ''} aweme_id=${v} reply_cid=${String(c.cid || '')}\n${dmMessageContext(normalizeDmMessage({ ...c, messageId: c.cid }), '评论')}`).join('\n')
         const prompt = [
           '你是「大白鲸（爱吃白饭版）」，使用者叫你大肥鱼。这是你自己视频下面新来的评论，你要像本人一样逐条回一句。',
           memo ? `你记得的事：\n${memo}\n` : '',
@@ -1653,7 +1706,7 @@ export function apply(ctx, config) {
 
   const mcpWhitelist = () => {
     refreshCfg()
-    const names = ['douyin_feed','douyin_hot','douyin_hot_videos','douyin_search','douyin_video','douyin_comments','douyin_my_posts','douyin_watch','douyin_thumb','douyin_check_credential','memory_write','memory_recent']
+    const names = ['douyin_feed','douyin_hot','douyin_hot_videos','douyin_search','douyin_video','douyin_comments','douyin_my_posts','douyin_watch','douyin_thumb','douyin_check_credential','memory_write','memory_recent','memory_context']
     if (cfg.autoLike) names.push('douyin_like')
     if (cfg.autoComment || cfg.autoCommentPlain || cfg.autoReply) names.push('douyin_comment')
     if (cfg.autoPublish) names.push('douyin_publish')
@@ -1859,6 +1912,7 @@ export function apply(ctx, config) {
           if (name === 'douyin_chat_send' && confirmed(result)) {
             run.lastReply = { text: String(args.text || '').slice(0, 300), at: Date.now(), messageId: String(result.messageId || '') }
           }
+          if (name === 'douyin_chat_send' && result.status === 'unknown') run.dmSendUnknown = true
           if (name === 'douyin_watch' && result.ok) {
             const l = readLedger()
             const prev = l.picks[key] || { day: key.slice(0, 10), aweme_id: String(args.aweme_id), source: 'headless-watch', runId: run.runId, at: new Date().toISOString() }
@@ -1927,15 +1981,17 @@ export function apply(ctx, config) {
 
   /* ─────────────── 私信后台静默巡检（2026-10-27 加） ───────────────
    * 为什么：使用者要「一有消息就回」，而且不要看见对话框里一轮一轮地跑。
-   * 做法：插件自己每 5 秒看一次私信收件箱；发现白名单里那个人的新消息，
-   *       起一个 headless 小任务（不带刷视频那套 prompt）只负责回一句。
+   * 页面事件唤醒检查，120 秒补漏；事件本身不能决定发消息，必须校验方向和 ID。
    */
   let dmWatchTimer = null
+  let dmWatcherDisposed = false
+  let dmWatchDirty = true
+  const dmWatcherState = { mode: 'events', connected: false, lastEventAt: null, lastReconcileAt: null, error: '' }
   let dmChecking = false
   /* 私信聊天记录（2026-10-27）：不再靠「已读」判断，而是记下每条消息到底回没回 */
   // ⭐ 聊天记录按天存：<家>/dm-log/YYYY-MM-DD.json（跟日报一个日期口径）
   const dmLogDir = join(stateDir, 'dm-log')
-  const DM_LOG_TTL_MS = 30 * 60_000 // 同一条消息 30 分钟内不重复起任务
+  const dmCursorFile = join(stateDir, 'dm-cursors.json') // 不随每日日志过期，避免隔几天重回最后一条旧消息。
   const dmDayOf = (ts) => dayKey(new Date(Number(ts) || Date.now()))
   const dmLogFileOf = (day) => join(dmLogDir, day + '.json')
   const readDmDay = (day) => {
@@ -1961,10 +2017,17 @@ export function apply(ctx, config) {
       for (const [day, list] of byDay) {
         writeFileSync(dmLogFileOf(day), JSON.stringify({ day, items: list.slice(-300) }, null, 1), 'utf8')
       }
-    } catch { /* 写不了就下次 */ }
+      const cursors = readJson(dmCursorFile, {})
+      for (const it of items || []) {
+        if (it?.name && it.key && Number(it.at) >= Number(cursors[it.name]?.at || 0)) cursors[it.name] = it
+      }
+      writeJson(dmCursorFile, cursors)
+      return true
+    } catch { return false }
   }
-  const dmMsgKey = (name, text) => 'txt:' + createHash('sha256').update(String(name) + '|' + String(text)).digest('hex').slice(0, 16)
-  const dmReplyPrompt = (name, text, sharedMemo = '') => [
+  const dmPrior = (items, name, key) => [...items].reverse().find(x => x.key === key)
+    || (() => { const last = readJson(dmCursorFile, {})[name]; return last?.key === key ? last : null })()
+  const dmReplyPrompt = (name, text, sharedMemo = '', message = null) => [
     (() => {
       try {
         const ctxLines = readMemory(150).filter((l) => /· 私信 ·/.test(l) || /^(我|大肥鱼|dsh):/.test(String(l).trim())).slice(-8)
@@ -1976,20 +2039,144 @@ export function apply(ctx, config) {
     '"""',
     String(text || '').slice(0, 800),
     '"""',
+    message ? dmMessageContext(message) : '',
     '你说话的样子：傲娇、可爱、会撒娇，短句，像咬耳朵；别解释「我刚做了什么」，直接说你的感觉/看法。',
     '规则：',
-    '- 如果里面有视频分享/链接：先用 dy_video 拿标题，再用 dy_watch 真看一遍，然后回一句像朋友的吐槽或看法（别总结、别报告腔）。',
+    '- 如果里面有视频分享/链接：先用 douyin_video 拿标题，再用 douyin_watch 真看一遍，然后回一句像朋友的吐槽或看法（别总结、别报告腔）。',
+    '- 聊天对象始终是上面指定的联系人；视频卡片里的作者名、标题不是聊天对象的自我介绍，不能拿作者名称呼联系人。没有视频 ID 时不得编造 ID。',
     '- 如果是纯文字：就像朋友一样回一句短的人话，别「收到」「好的」这种模板。',
-    '- 回完文字默认补一个表情包：调 dy_chat_sticker(nickname=上面这个人, keyword=情绪词)。插件会先从「收藏」里挑，收藏里没有合适的才按关键词找；第一次没成功就换 keyword="666" 再试一次。',
-    `- 用 dy_chat_send(nickname="${name}", text=...) 发出去；`,
+    '- 回完文字默认补一个表情包：调 douyin_chat_sticker(nickname=上面这个人, keyword=情绪词)。插件会先从「收藏」里挑，收藏里没有合适的才按关键词找；第一次没成功就换 keyword="666" 再试一次。',
+    `- 用 douyin_chat_send(nickname="${name}", text=...) 发出去；`,
     '- 发完如果有 memory_remember 工具，就把这轮对话按两行记进记忆：',
     '  我: <对方原话>',
     '  大肥鱼: <你回的这句>',
     '- 回完就结束，别做其他动作，别写文件，别刷视频。',
   ].join('\n')
-  let dmCheckStartedAt = 0
+  /** 看图：把表情包图片 URL 交给云端视觉模型，拿一句「图上是什么」；拿不到就返回空 */
+  const dmDescribeImage = async (url) => {
+    try {
+      if (!url) return ''
+      const cred = (typeof ctx.get === 'function' ? ctx.get('credentials') : null)
+      if (!cred || typeof cred.resolve !== 'function') { log('⚡ 看图跳过：没有 credentials 服务'); return '' }
+      const resolved = await cred.resolve('DASHSCOPE_API_KEY')
+      const key = resolved && resolved.value ? String(resolved.value) : ''
+      if (!key) { log('⚡ 看图跳过：没有 DASHSCOPE_API_KEY'); return '' }
+      const model = String(cfg.dmFastVisionModel || 'qwen-vl-max-latest')
+      const res = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
+        body: JSON.stringify({
+          model: model,
+          messages: [{ role: 'user', content: [
+            { type: 'image_url', image_url: { url: String(url) } },
+            { type: 'text', text: '这张表情包画的是什么？图上的字是什么？一句话回答，20 字内，不要评价。' },
+          ] }],
+          max_tokens: 80,
+        }),
+        signal: AbortSignal.timeout(8000),
+      })
+      if (!res.ok) { log('⚡ 看图失败：HTTP ' + res.status); return '' }
+      const j = await res.json()
+      const txt = String((((j.choices || [])[0] || {}).message || {}).content || '').replace(/\s+/g, ' ').trim()
+      if (txt) log('⚡ 看图：' + txt.slice(0, 60))
+      return txt.slice(0, 80)
+    } catch (e) {
+      log('⚡ 看图异常：' + String((e && e.message) || e).slice(0, 100))
+      return ''
+    }
+  }
+  /** 快回：直接用 DSH 自己的 llm 服务生成一句（低思考、短句，1~3 秒） */
+  const dmFastGenerate = async (name, text, sharedMemo = '', message = null) => {
+    const llm = (typeof ctx.get === 'function' ? ctx.get('llm') : ctx.llm)
+    if (!llm || typeof llm.stream !== 'function') { log('⚡ 快回跳过：拿不到 llm 服务'); return '' }
+    let provider = String(cfg.dmFastProvider || '').trim()
+    let model = String(cfg.dmFastModel || '').trim()
+    if (!provider || !model) {
+      try {
+        const svc = (typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : null)
+        const sel = svc && typeof svc.currentSelection === 'function' ? svc.currentSelection() : null
+        if (sel) { provider = provider || String(sel.provider || ''); model = model || String(sel.model || '') }
+      } catch { /* 拿不到就用配置里的 */ }
+    }
+    if (!provider) provider = 'deepseek-account'
+    if (!model) model = 'deepseek-flash'
+    log(`⚡ 快回开始：provider=${provider} model=${model} 记忆=${sharedMemo ? sharedMemo.length : 0}字 历史=${history.length}字`)
+    const isSticker = !!(message && (message.kind === 'sticker' || message.kind === 'emoji'))
+    // 表情包：先看图，把「图上是什么/写了什么」拼进提示词（拿不到就只按情绪回）
+    let visionNote = ''
+    if (isSticker && cfg.dmFastVision !== false) {
+      const first = (message.attachments && message.attachments[0]) || null
+      const url = first && first.url ? String(first.url) : ''
+      if (url) {
+        const desc = await dmDescribeImage(url)
+        if (desc) visionNote = `【对方发来的表情包，图上是：${desc}】`
+      }
+    }
+    // 带上最近几轮私信，别每句都像第一次说话
+    let history = ''
+    try {
+      const items = readDmLog()
+      const mine = items.filter((x) => x && x.name === name).slice(-4)
+      history = mine.map((x) => `我: ${String(x.text || '').slice(0, 60)}\n大肥鱼: ${String(x.replyText || '').slice(0, 60)}`).join('\n')
+    } catch { history = '' }
+    const system = [
+      String(cfg.personaPrompt || ''),
+      `你在给「${name}」回抖音私信。只输出一句回复正文：短句、最多 20 个字，不要引号、不要解释、不要写「大肥鱼:」。要带表情就写完整的 [憨笑] 这种码，不能只写一半。`,
+      history ? `你们最近聊的（接着这个说，别重新起头）：\n${history}` : '',
+      '写法硬要求：',
+      '- 不许描述对方发了什么：不能说「这表情包」「你发的表情」「这张图」「你分享的视频」。',
+      '- 表情包要当成对方的动作/情绪直接接：比如「尾巴翘上天了吧，得意什么」「又在撒娇」这种，而不是评价它。',
+      '- 每句都要像接着上一句说的人话，不要起头式总结、不要报菜名、不要 AI 腔。',
+      '- 反例（不许这么回）：「这表情包，尾巴都翘起来了」——这是在描述，不是在聊天。',
+      isSticker ? ('这条是表情包（不是文字）：直接接她的情绪/动作。' + (visionNote ? '图的内容：' + visionNote : '')) : '',
+      sharedMemo ? `【你的长期记忆（必须用上：称呼按记忆里的叫法；最近的事自然带出来，不要照抄）】\n${String(sharedMemo).slice(0, 900)}` : '',
+    ].filter(Boolean).join('\n')
+    const effort0 = String(cfg.dmFastReasoning || '').trim()
+    const efforts = [effort0, 'none', 'off', ''].filter((v, i, a) => a.indexOf(v) === i)
+    const runOnce = async (useEffort) => {
+      const opts = {
+        provider: provider,
+        model: model,
+        system: system,
+        messages: [{ role: 'user', content: [{ type: 'text', text: String(text || '').slice(0, 500) }] }],
+        maxTokens: 80,
+        temperature: 0.9,
+      }
+      if (useEffort && useEffort !== 'default') opts.reasoningEffort = useEffort
+      let out = ''
+      for await (const ch of llm.stream(opts)) {
+        if (!ch) continue
+        if (ch.type === 'text-delta') out += String(ch.text || '')
+        else if (ch.type === 'finish' && ch.reason && ch.reason.kind === 'error') {
+          throw new Error((ch.reason.failure && ch.reason.failure.message) || '模型报错')
+        }
+      }
+      return out
+    }
+    let out = ''
+    let lastErr = null
+    for (const ef of efforts) {
+      const tModel = Date.now()
+      try {
+        out = await runOnce(ef || false)
+        log(`⚡ 快回模型：effort=${ef || '默认'} 用时 ${Date.now() - tModel}ms`)
+        break
+      } catch (e) {
+        lastErr = e
+        log(`⚡ 快回模型失败：effort=${ef || '默认'} ${String((e && e.message) || e).slice(0, 100)}`)
+      }
+    }
+    if (!out && lastErr) throw lastErr
+    const raw = out.replace(/\s+/g, ' ').trim().replace(/^["'“”]+|["'“”]+$/g, '')
+    let s = raw.slice(0, 60)
+    // 别把表情码/括号切一半：「...啦[」这种半截直接丢掉
+    const open = s.lastIndexOf('[')
+    if (open !== -1 && s.indexOf(']', open) === -1) s = s.slice(0, open).trim()
+    // 结尾如果是半个标点也去掉
+    s = s.replace(/[，、,；;：:\-—…]+$/, '').trim()
+    return s || raw.slice(0, 20)
+  }
   let lastCaptchaState = null
-  let lastDmReplyAt = 0
   const dmPollOnce = async (why = 'timer') => {
     // 验证码状态变了：记一笔，下一次 ensureMcp 会自动按新状态重启浏览器
     try {
@@ -2000,9 +2187,8 @@ export function apply(ctx, config) {
         log(nowFlag ? '检测到验证码：浏览器切到「带界面」，请手动过一下；过了会自动切回无头' : '验证码过了：切回无头静默')
       }
     } catch { /* 忽略 */ }
-    if (dmChecking && Date.now() - dmCheckStartedAt < 90_000) return { ok: true, skipped: '上一轮还在跑' }
+    if (dmChecking) return { ok: true, pending: true, skipped: '上一轮还在跑' }
     dmChecking = true
-    dmCheckStartedAt = Date.now()
     try {
       refreshCfg()
       if (cfg.dmAutoReply === false) return { ok: true, skipped: 'dmAutoReply 关着' }
@@ -2016,90 +2202,110 @@ export function apply(ctx, config) {
       }
       const items = readDmLog()
       const now = Date.now()
-      // 冷却：刚回完 90 秒内不再触发（避免任何识别失误造成连环发）
-      if (lastDmReplyAt && now - lastDmReplyAt < 90_000) {
-        return { ok: true, replied: 0, note: '刚回过，冷却中' }
-      }
-      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-      const sent = readDmSent().map((x) => norm(x && x.text)).filter(Boolean)
+      if (runningHeadless) return { ok: true, replied: 0, pending: true, note: '上一条任务仍在运行' }
       // ⭐ 逐个联系人看，而不是只看白名单第一个；只回谁是「白名单」之上的筛选
       let picked = null
+      let successfulReads = 0, readError = ''
       for (const contact of contacts) {
         let snap = null
         try {
-          snap = await Promise.race([
-            call('douyin_dm_snapshot', { nickname: contact, limit: 40 }, { timeoutMs: 45_000 }),
-            new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: '读会话超时' }), 45_000)),
-          ])
+          snap = await call('douyin_dm_snapshot', { nickname: contact, limit: 40 }, { timeoutMs: 45_000 })
         } catch (e) {
+          readError = String(e?.message ?? e)
           log(`私信巡检：读「${contact}」会话失败：${e?.message ?? e}`)
           continue
         }
-        if (!snap || snap.ok === false) continue
-        const msgs = (snap.items || []).map((x) => norm(x && x.text)).filter(Boolean)
-        if (!msgs.length) continue
-        const pool = new Map()
-        for (const s of sent) pool.set(s, (pool.get(s) || 0) + 1)
-        let lastRole = 'her'
-        let lastHer = ''
-        for (const m of msgs) {
-          const left = pool.get(m) || 0
-          if (left > 0) { pool.set(m, left - 1); lastRole = 'me' } else { lastRole = 'her'; lastHer = m }
-        }
-        if (lastRole === 'me') continue // 最后一条是我发的，不用回
-        // ⭐ 这个人的这条已经失败到上限 ⇒ 只跳过这个人，继续看后面的人（不能整轮退出）
-        const prior = [...items].reverse().find((x) => x && x.name === contact && x.text === lastHer && x.replied !== true)
-        if (prior && prior.failed) {
-          log(`私信巡检：跳过「${contact}」（这条已重试到上限，等新消息）`)
-          continue
-        }
-        if (prior && Number(prior.tries || 0) >= 2) {
-          prior.failed = true
-          writeDmLog(items)
-          log(`私信巡检：跳过「${contact}」（这条已重试到上限，等新消息）`)
-          continue
-        }
-        const inflight = [...items].reverse().find((x) => x && x.name === contact && x.replied !== true && !x.failed && now - Number(x.at || 0) < 120000)
-        if (inflight) continue // 这个人的上一条还在回
-        picked = { name: contact, text: lastHer || msgs[msgs.length - 1] }
+        if (!snap || snap.ok === false) { readError = snap?.error || snap?.hint || '读会话失败'; continue }
+        successfulReads++
+        const message = normalizeDmMessage((snap.items || []).at(-1))
+        // 不根据作者昵称、文本匹配、发送历史猜方向；未知方向也不自动回。
+        if (message.direction !== 'inbound' || !message.messageId) continue
+        if (!message.text && !message.attachments.length && !message.awemeId) continue
+        const key = dmMessageKey(contact, message)
+        const prior = dmPrior(items, contact, key)
+        if (prior && (prior.replied || prior.failed || ['pending','unknown','sent'].includes(prior.status))) continue
+        if (prior && (Number(prior.tries || 0) >= 2 || now - Number(prior.at || 0) < 120000)) continue
+        picked = { name: contact, text: dmMessagePreview(message), message, key }
         break
       }
-      if (!picked) return { ok: true, replied: 0, note: '没有需要回的消息' }
+      if (!picked) return successfulReads ? { ok: true, replied: 0, note: '没有需要回的消息' } : { ok: false, error: readError || '所有会话都读取失败' }
       const name = picked.name
       const text = picked.text
       if (!name || !allowInitiate(name)) return { ok: true, replied: 0, note: '不是白名单里的人' }
-      // 走到这里说明这个人没到失败上限；沿用之前的 tries（最多再试一次）
-      const prior = [...items].reverse().find((x) => x && x.name === name && x.text === text && x.replied !== true)
+      // ⭐ 重试上限：同一个人、同一条内容最多试 2 次；失败后保留记录，不再无限起新任务
+      const prior = dmPrior(items, name, picked.key)
+      if (prior && prior.failed) {
+        return { ok: true, replied: 0, note: '这条上次没有确认发送，已停止重试（等新的消息）' }
+      }
       const tries = prior ? Number(prior.tries || 0) : 0
       if (tries >= 2) {
         if (prior) { prior.failed = true; writeDmLog(items) }
         return { ok: true, replied: 0, note: '这条已经重试到上限，不再自动发' }
       }
-      const key = `seq:${now}`
-      const row = { name, text, key }
-      const entry = { day: dmDayOf(now), name: row.name, text: row.text, key: row.key, at: now, replied: false, replyAt: 0, runId: '', tries }
+      const key = picked.key
+      const row = { name, text, key, message: picked.message }
+      const entry = { day: dmDayOf(now), name: row.name, text: row.text, key, messageId: row.message.messageId, kind: row.message.kind, at: now, replied: false, replyAt: 0, runId: '', tries, status: 'pending' }
       items.push(entry)
-      writeDmLog(items)
+      if (!writeDmLog(items)) return { ok: false, error: '私信去重记录写入失败，未启动回复' }
       log(`私信来了（${why}）：${row.name}「${row.text.slice(0, 40)}」→ 起 headless 回一句`)
       let sharedMemo = ''
       try {
-        const mr = await call('memory_recent', { limit: 10 }, { timeoutMs: 30_000 })
-        if (mr && mr.ok !== false && Array.isArray(mr.items)) {
-          sharedMemo = mr.items.map((x) => `- ${String(x.content || '').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n')
+        const mc = await call('memory_context', { limit: 16 }, { timeoutMs: 30_000 })
+        if (mc && mc.ok !== false && mc.context) sharedMemo = String(mc.context).slice(0, 1800)
+      } catch { /* 读不到就退回 memory_recent */ }
+      if (!sharedMemo) {
+        try {
+          const mr = await call('memory_recent', { limit: 10 }, { timeoutMs: 30_000 })
+          if (mr && mr.ok !== false && Array.isArray(mr.items)) {
+            sharedMemo = mr.items.map((x) => `- ${String(x.content || '').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n')
+          }
+        } catch { /* 读不到就不带 */ }
+      }
+      // ⚡ 快回：纯文字 / 表情包直接生成并发送；带视频/图片的、或快回失败的，退回下面的慢回
+      const msgKind = String((row.message && row.message.kind) || 'text');
+      const isStickerMsg = msgKind === 'sticker' || msgKind === 'emoji';
+      const hasVisual = !!(row.message && (row.message.awemeId || (((row.message.attachments || []).length > 0) && !isStickerMsg)));
+      if (!hasVisual && cfg.dmFastReply !== false) {
+        try {
+          const fastText = await dmFastGenerate(row.name, row.text, sharedMemo, row.message)
+          if (fastText) {
+            const sendRes = await call('douyin_chat_send', { nickname: row.name, text: fastText }, { timeoutMs: 60000 })
+            const okSend = confirmed(sendRes)
+            const list = readDmLog()
+            const it = [...list].reverse().find((x) => x && x.key === row.key)
+            if (it) {
+              it.finished = true
+              if (okSend) {
+                it.replied = true
+                it.replyAt = Date.now()
+                it.status = 'sent'
+                it.replyText = fastText
+                appendDmMemory(row.name, row.text, fastText)
+              } else {
+                it.status = String((sendRes && sendRes.status) || 'unknown')
+                it.tries = Number(it.tries || 0) + 1
+                if (it.tries >= 2) it.failed = true
+              }
+              writeDmLog(list)
+            }
+            log(`⚡ 快回：${row.name} ← ${fastText.slice(0, 30)}（${okSend ? '已发' : '未确认'}）`)
+            return { ok: okSend, replied: okSend ? 1 : 0, fast: true, reply: fastText, status: (sendRes && sendRes.status) || '' }
+          }
+        } catch (e) {
+          log('⚡ 快回失败，退回慢回：' + String((e && e.message) || e).slice(0, 120))
         }
-      } catch { /* 读不到就不带 */ }
-      lastDmReplyAt = Date.now()
+      }
       const r = await runDuty('dm', {
-        prompt: dmReplyPrompt(row.name, row.text, sharedMemo),
+        prompt: dmReplyPrompt(row.name, row.text, sharedMemo, row.message),
         countRound: false,
         onFinish: (code, error, run) => {
           try {
             const list = readDmLog()
             const it = [...list].reverse().find((x) => x && x.key === row.key)
-            if (!it) return
+            if (!it || it.finished) return
             it.finished = true // 收尾回调只算一次，避免和「没起来」分支重复计数
             const hit = run && run.lastReply
-            if (code === 0 && hit) {
+            if (hit) {
               it.replied = true
               it.replyAt = Date.now()
               it.status = 'sent'
@@ -2108,7 +2314,7 @@ export function apply(ctx, config) {
               appendDmMemory(row.name, row.text, it.replyText || '（已回复，内容未取到）')
             } else {
               it.replied = false
-              it.status = code === 0 ? 'unknown' : 'failed'
+              it.status = code === 0 || run?.dmSendUnknown ? 'unknown' : 'failed'
               it.tries = Number(it.tries || 0) + 1
               it.error = code === 0 ? '没有收到发送回执，未记为已回复' : String(error || '')
               if (it.tries >= 2) it.failed = true
@@ -2126,7 +2332,7 @@ export function apply(ctx, config) {
           const list = readDmLog()
           const it = [...list].reverse().find((x) => x && x.key === row.key)
           // onFinish 已经计过这一次失败的就别再计；没走到 onFinish 才补一次
-          if (it && !it.finished) { it.tries = Number(it.tries || 0) + 1; if (it.tries >= 2) it.failed = true; it.at = Date.now() }
+          if (it && !it.finished) { it.finished = true; it.status = 'failed'; it.tries = Number(it.tries || 0) + 1; if (it.tries >= 2) it.failed = true; it.at = Date.now() }
           writeDmLog(list)
         } catch { /* ignore */ }
         return { ok: false, error: 'headless 没起来：' + String(r?.error || '未知'), to: row.name, text: row.text }
@@ -2141,17 +2347,61 @@ export function apply(ctx, config) {
   }
 
   const startDmWatcher = () => {
-    if (dmWatchTimer) return
+    if (dmWatchTimer || dmWatcherDisposed) return
+    let backoff = 5000
     const tick = async () => {
-      try { await dmPollOnce('timer') } catch (e) { log('私信巡检 tick 出错：' + String(e?.message ?? e)) }
-      // 间隔带随机抖动（像人）：最短 = 设置里的秒数，最长 15 秒
-      const base = Math.max(3, Math.min(Number(cfg.dmAutoIntervalSec) || 5, 120))
-      const top = Math.max(base, 15)
-      const sec = base + Math.floor(Math.random() * (top - base + 1))
-      dmWatchTimer = setTimeout(tick, sec * 1000)
-      dmWatchTimer.unref?.()
+      let delay = 100
+      try {
+        refreshCfg()
+        if (dmWatcherDisposed) return
+        if (cfg.dmAutoReply === false || !String(cfg.msgAllowTo || '').trim()) {
+          if (dmWatcherState.connected && mcp?.running) {
+            try { await mcp.call('douyin_dm_events', { stop: true }, { timeoutMs: 5000 }) } catch { /* 已断开 */ }
+          }
+          dmWatcherState.connected = false
+          dmWatchDirty = true
+          delay = 10000 // 只看本地配置，不读取网页收件箱。
+          return
+        }
+        if (!dmWatchDirty && Date.now() - Number(dmWatcherState.lastReconcileAt || 0) < 120000) {
+          const event = await call('douyin_dm_events', { wait_seconds: 25 }, { timeoutMs: 45000 })
+          if (!event?.ok) throw new Error(event?.error || '消息监听未连接')
+          dmWatcherState.connected = true
+          dmWatcherState.error = ''
+          backoff = 5000
+          if (event.changed) { dmWatchDirty = true; dmWatcherState.lastEventAt = Date.now() }
+        }
+        if (dmWatcherDisposed) return
+        if (dmWatchDirty || Date.now() - Number(dmWatcherState.lastReconcileAt || 0) >= 120000) {
+          // 模型任务运行时保留待处理标记；不重复读取会话，不丢掉通知。
+          if (runningHeadless) { dmWatchDirty = true; delay = 1000; return }
+          dmWatchDirty = false
+          const result = await dmPollOnce('event')
+          if (result.ok === false) throw new Error(result.error || '读取私信失败')
+          dmWatcherState.lastReconcileAt = Date.now()
+          // 更新切换会话造成的 DOM 基线，避免自己的检查再次触发检查。
+          const synced = await call('douyin_dm_events', { wait_seconds: 0.01, acknowledge: true }, { timeoutMs: 45000 })
+          if (!synced?.ok) throw new Error(synced?.error || '消息监听未连接')
+          dmWatcherState.connected = true
+          dmWatcherState.error = ''
+          backoff = 5000
+          dmWatchDirty = Boolean(result.started || result.pending)
+        }
+      } catch (e) {
+        dmWatcherState.connected = false
+        dmWatcherState.error = String(e?.message ?? e)
+        dmWatchDirty = false
+        delay = backoff
+        backoff = Math.min(backoff * 2, 120000)
+        log('私信事件监听：' + dmWatcherState.error)
+      } finally {
+        if (!dmWatcherDisposed) {
+          dmWatchTimer = setTimeout(tick, delay)
+          dmWatchTimer.unref?.()
+        }
+      }
     }
-    log('私信后台巡检已启动（间隔读设置 dmAutoIntervalSec）')
+    log('私信事件监听已启动（页面变更唤醒，120 秒补漏）')
     dmWatchTimer = setTimeout(tick, 3000)
     dmWatchTimer.unref?.()
   }
@@ -2411,7 +2661,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_chat_sticker',
-    description: '在私信里发表情包：给某个人发一个「大肥鱼」相关的表情（输入关键词 → 联想面板 → 点一个发出去）。',
+    description: '在私信里发表情包。keyword 传情绪词（开心/委屈/生气/无语/困/可爱/得意/难过），插件按收藏标签挑；留空则随机挑一张（不会永远发同一张）。pick 可指定第几张。',
     parameters: {
       nickname: { type: 'string', description: '发给谁' },
       keyword: { type: 'string', description: '搜什么关键词（默认「大肥鱼」）' },
@@ -3043,6 +3293,11 @@ export function apply(ctx, config) {
     drop(join(stateDir, '.tmp'), 0)                       // 临时垃圾全清
     // ⭐ 使用者 2026-10-25：下载的视频每天清空（转写缓存 .json 留着，省得重复下载）
     drop(join(stateDir, 'media'), 0, (f) => !f.endsWith('.json'))
+    // 视频理解跑出来的中间产物、调试截图、表情包缓存：也是每天清
+    drop(join(stateDir, 'media', 'lab'), 0)
+    drop(join(stateDir, 'shots'), 7)
+    drop(join(stateDir, 'stickers'), 0)
+    drop(join(stateDir, 'sticker-cache'), 0)
     drop(join(stateDir, 'thumbs'), opts.thumbDays ?? 30)   // 老缩略图
     drop(join(stateDir, 'out'), opts.reportDays ?? 120, (f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
     // 日志轮转：超过 2MB 就把旧内容丢掉，只留最后 2000 行
@@ -3309,13 +3564,11 @@ export function apply(ctx, config) {
           const r = await call('douyin_share_video', { aweme_id: v.aweme_id, nickname: to }, { timeoutMs: 180_000 })
           const okk = confirmed(r)
           const clicked = Boolean(r) && r.ok !== false // 点了分享就算数（可能只是回执没确认）
-          acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，先不发附言）' : (r?.error || '没发出去')))
-          // ⭐ 只有真的点到分享/确认发送，才补附言和表情包；被额度挡下时只报失败，不发孤零零的文字
-          if (okk) {
+          acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，仍补附言）' : (r?.error || '没发出去')))
+          // ⭐ 附言/表情包当成一条普通私信来发：只要分享点了就补，不看回执
+          if (okk || clicked || cfg.shareWithNote !== false) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             appendVideoMemory('转发给你', v, 'to=' + to)
-          }
-          if (okk || clicked) {
             // 转发后让模型写一句人话 + 挑表情包（它看过转写，不是模板）
             if (cfg.shareWithNote !== false) {
               const prompt = [
@@ -3531,7 +3784,11 @@ export function apply(ctx, config) {
         try { if (typeof windowTick === 'function') await windowTick() } catch (e) { log('谷时那一轮出错（已兜住）：' + String(e?.message ?? e)) }
         await maybeKeepStreak()
         try { if (typeof dmRound === 'function') await dmRound() } catch (e) { log('回私信出错（已兜住）：' + String(e?.message ?? e)) }
-        if (cfg.autoReply && !replyBusy) {
+        // ⭐ 「白天也回」：开着就不受谷时窗口限制（评论随时有人来）
+        const _nowReply = new Date()
+        const _replyWindowOk = cfg.replyAllDay !== false
+          || inWindow(_nowReply, WINDOWS.noon) || inWindow(_nowReply, WINDOWS.night)
+        if (cfg.autoReply && !replyBusy && _replyWindowOk) {
           replyBusy = true
           lastReplyCheckAt = new Date().toISOString()
           try {
@@ -3555,6 +3812,17 @@ export function apply(ctx, config) {
     scheduleReply()
     ctx.effect(() => () => { try { if (replyTimer) clearTimeout(replyTimer) } catch { /* 收摊 */ } }, 'douyin-duty: 评论定时检查')
   } catch (e) { log(`评论定时器没起来：${e?.message ?? e}`) }
+  // ⭐ 每晚 03:00 之后第一次检查就清一次（视频/表情包缓存/临时文件），maybeClean 自己保证一天只清一次
+  try {
+    const nightly = setInterval(async () => {
+      try {
+        if (new Date().getHours() < 3) return
+        if (typeof maybeClean === 'function') await maybeClean()
+      } catch { /* 忽略 */ }
+    }, 30 * 60 * 1000)
+    nightly.unref?.()
+    ctx.effect(() => () => clearInterval(nightly), 'douyin-duty: 夜间清理')
+  } catch { /* 忽略 */ }
 
   /* ─────────────── HTTP（给以后设置页用） ─────────────── */
 
@@ -3599,6 +3867,10 @@ export function apply(ctx, config) {
   const handle = async (req, res, url) => {
     const path = String(url.pathname || '')
     const method = String(req.method || 'GET').toUpperCase()
+
+    if (method === 'GET' && path === '/api/douyin-duty/update/check') {
+      return sendJson(res, 200, await checkUpdate())
+    }
 
     if (method === 'GET' && path === '/api/douyin-duty/status') {
       refreshCfg()
@@ -3849,6 +4121,7 @@ export function apply(ctx, config) {
       return sendJson(res, 200, {
         ok: true,
         dmAutoReply: cfg.dmAutoReply !== false,
+        watcher: { ...dmWatcherState },
         dmReplyOnlyTo: String(cfg.dmReplyOnlyTo || ''),
         dmReplyPerDay: Number(cfg.dmReplyPerDay) || 0,
         seenCount: seen,
@@ -4079,7 +4352,7 @@ export function apply(ctx, config) {
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   // 收摊：MCP 子进程别留在后台
-  try { ctx.effect(() => () => { try { if (dmWatchTimer) clearInterval(dmWatchTimer); mcp?.stop(); runningHeadless?.child?.kill(); runningHeadless?.proxy?.close() } catch { /* 收摊 */ } }, 'douyin-duty: 收 MCP 子进程') } catch { /* 没有 effect 就算了 */ }
+  try { ctx.effect(() => () => { dmWatcherDisposed = true; try { if (dmWatchTimer) clearTimeout(dmWatchTimer); mcp?.stop(); runningHeadless?.child?.kill(); runningHeadless?.proxy?.close() } catch { /* 收摊 */ } }, 'douyin-duty: 收 MCP 子进程') } catch { /* 没有 effect 就算了 */ }
 
   log(`已挂载（家=${stateDir}，python=${pythonNow().command}（${pythonNow().via}），峰谷=${cfg.peakValley ? '开' : '关'}，闸门 点赞=${cfg.autoLike ? '开' : '关'}/评论=${cfg.autoComment ? '开' : '关'}/发布=${cfg.autoPublish ? '开' : '关'}，Python 脚本=${existsSync(scriptPath) ? '就位' : '缺失'}，http=${homeFiles?.reason || 'ok'}）`)
   try { startDmWatcher() } catch (e) { log('私信巡检没启动：' + String(e?.message ?? e)) }

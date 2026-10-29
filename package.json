@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "dsh-douyin-life",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH 插件：每天替你刷一轮抖音 —— 看视频读评论挑出值得的、写一份日报，值得的就点赞并在评论里 @ 你；视频那头接你自己的 ComfyUI 出片",
   "keywords": [
     "dsh",
@@ -16,11 +16,12 @@
   "author": "TiAmoSS",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kdcadmin/dsh_douyin_tools.git"
+    "url": "git+https://github.com/kdcadmin/jev-decision-kit.git",
+    "directory": "plugins/dsh-douyin-life"
   },
-  "homepage": "https://github.com/kdcadmin/dsh_douyin_tools",
+  "homepage": "https://github.com/kdcadmin/jev-decision-kit/tree/main/plugins/dsh-douyin-life",
   "bugs": {
-    "url": "https://github.com/kdcadmin/dsh_douyin_tools/issues"
+    "url": "https://github.com/kdcadmin/jev-decision-kit/issues"
   },
   "type": "module",
   "main": "index.js",
@@ -36,7 +37,6 @@
     "lib/",
     "prompts/",
     "docs/AGENT_ONBOARDING.md",
-    "video-understanding-lab/",
     "vendor/douyin-mcp/mcp_server.py",
     "vendor/douyin-mcp/requirements.txt",
     "README.md",
@@ -74,5 +74,12 @@
         "@deepseek-ai/dsh-client-ui-settings-plugins"
       ]
     }
+  },
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "test:proxy": "node tests/proxy-regression.mjs",
+    "test:headless": "node tests/headless-regression.mjs",
+    "test:protocol": "node tests/protocol-smoke.mjs",
+    "test:media:real": "python tests/real-media-smoke.py"
   }
 }
