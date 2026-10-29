@@ -1368,21 +1368,20 @@ export function apply(ctx, config) {
   const appendDmMemory = (name, userText, replyText, when = new Date()) => {
     const day = dayKey(when)
     const hhmm = when.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+    const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 300)
     const block = [
       `\n## ${day} ${hhmm} · 私信 · ${name}`,
-      `我: ${String(userText || '').replace(/\s+/g, ' ').trim().slice(0, 300)}`,
-      `大肥鱼: ${String(replyText || '').replace(/\s+/g, ' ').trim().slice(0, 300)}`,
+      `A（${name}）: ${clean(userText)}`,
+      `B（大肥鱼）: ${clean(replyText)}`,
     ].join('\n') + '\n'
     appendMemory(block)
-    // ⭐ 同时写进「记忆插件」的 memory.db（聊天/视频共用同一份记忆）
+    // ⭐ 同时写进「记忆插件」的 memory.db：A、B 分开两条，一眼能看出谁说了什么、回了没有
     try {
-      call('memory_write', {
-        content: `我: ${String(userText || '').trim().slice(0, 300)}\n大肥鱼: ${String(replyText || '').trim().slice(0, 300)}`,
-        type: 'fact',
-        tags: `私信,${name}`,
-        importance: 0.7,
-        workspace_path: process.cwd(),
-      }, { timeoutMs: 30_000 }).catch(() => {})
+      const ws = process.cwd()
+      call('memory_write', { content: `【私信·A（${name}）】${clean(userText)}`, type: 'fact', tags: `私信,${name},A`, importance: 0.7, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
+      if (clean(replyText)) {
+        call('memory_write', { content: `【私信·B（大肥鱼）】${clean(replyText)}`, type: 'fact', tags: `私信,${name},B`, importance: 0.6, workspace_path: ws }, { timeoutMs: 30_000 }).catch(() => {})
+      }
     } catch { /* 写不进也不影响聊天 */ }
   }
   /** ⭐ 视频互动也同步进记忆：分享/看片/评论都记一行 */
@@ -2268,7 +2267,14 @@ export function apply(ctx, config) {
         // 从新到旧扫，不只信「最后一条」；方向字段不可靠时用「不是我们自己发过的内容」兜底判定入站
         const ourReplies = new Set((items || []).map((x) => String((x && x.replyText) || '').trim()).filter(Boolean))
         const rawList = Array.isArray(snap.items) ? snap.items : []
-        for (let i = rawList.length - 1; i >= 0; i--) {
+        // 找到「我们最后一条回复」的位置：只考虑它之后的消息，否则会自己回自己（自言自语）
+        let lastOursIdx = -1
+        for (let i = 0; i < rawList.length; i++) {
+          const mm = normalizeDmMessage(rawList[i])
+          const tt = String((mm && mm.text) || '').trim()
+          if (tt && ourReplies.has(tt)) lastOursIdx = i
+        }
+        for (let i = rawList.length - 1; i > lastOursIdx; i--) {
           const message = normalizeDmMessage(rawList[i])
           if (!message.messageId) continue
           if (!message.text && !message.attachments.length && !message.awemeId) continue
