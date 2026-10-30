@@ -14,7 +14,7 @@
 1. 装 Python 依赖：`python -m venv <家>/.venv` → `<家>/.venv/Scripts/python -m pip install -r vendor/douyin-mcp/requirements.txt`；设置 `pythonPath` 指到 venv。
 2. 确认本机 Chrome 可用（插件用 `channel=chrome`，不下载浏览器）。
 3. 登录：主人点「浏览器登录」（带界面扫码/短信）或走 `dy_login_start` 二维码。
-4. 模型：默认 `deepseek-account/deepseek-flash`；`headlessModel` 留空=跟随默认；要发片再填 `comfyOutputDir`。
+4. 模型：默认 `deepseek-account/deepseek-flash`；`headlessModel` 留空=跟随默认。
 5. `dy_selfcheck` 全 ok 再用；四个写动作闸门默认关，主人明确要求才开。
 
 ## 0. 先记住这几条（红线）
@@ -60,7 +60,7 @@
     { "name": "家目录可写", "ok": true, "detail": "C:\\Users\\<你>\\.dsh\\douyin-duty", "fix": "..." },
     { "name": "Python 解释器及转写依赖", "ok": true, "detail": "...", "fix": "..." },
     { "name": "MCP 脚本", "ok": true, "detail": "...\\mcp_server.py", "fix": "..." },
-    { "name": "ComfyUI 输出目录", "ok": false, "detail": "E:\\...\\output", "fix": "..." }
+    { "name": "本地成片目录（可选）", "ok": false, "detail": "", "fix": "..." }
   ],
   "mcp": { "ok": true, "chrome": true, "loggedIn": false, "searched": false,
            "mode": "profile", "cdpUrl": "", "headless": true },
@@ -71,7 +71,7 @@
 怎么读：
 
 - `items` 里 **家目录可写 / Python 解释器及转写依赖 / MCP 脚本** 必须 `ok:true`；
-  `ComfyUI 输出目录` 只在主人要投稿时才算数；`视频理解原型` 在「互动前先看片」开着时必须 `ok`（缺 `run.py` 会导致看片不可用）。
+  `本地成片目录`（可选）只在主人要投稿时才算数；`视频理解原型` 在「互动前先看片」开着时必须 `ok`（缺 `run.py` 会导致看片不可用）。
 - `mcp.chrome:true` = 能拉起 Chrome；`mcp.loggedIn:true` = 已登录；
   `mcp.searched:true` = 登录后能搜到东西。
 - 哪条 false：**它的 `fix` 就是下一步**；修完重启一次 DSH 再自检。
@@ -635,7 +635,7 @@ dy_status()
 | `dy_watch` 没转写 | 缺 lab / ffmpeg / 模型没缓存 | 先看 `dy_selfcheck` 的「视频理解原型」那条；装 ffmpeg；首次会自动下载模型（HF 镜像），要离线先设 `DOUYIN_WHISPER_OFFLINE=1` 并提前缓存 |
 | `找不到视频理解原型 run.py` | 安装包不完整 / 被手动删了 | 重装插件（lab 随包发），或 `DOUYIN_VIDEO_LAB` 指向正确目录 |
 | headless 起不来 | 沙箱/CLI 找不到 | 用 `dy_run()` 本机模式；或按 `duty.log` 修 `dshBin` |
-| ComfyUI 输出目录 false | 没装 / 路径不对 | 不投稿可以忽略；投稿再改 `comfyOutputDir` |
+| 本地成片目录（可选）false | 没配 / 路径不对 | 不投稿可以忽略 |
 
 ---
 

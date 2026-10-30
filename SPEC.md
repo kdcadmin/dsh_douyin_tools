@@ -1,7 +1,7 @@
 # dsh-douyin-life 契约（SPEC）
 
 插件中文名「**刷抖音**」。一句话：每天替使用者刷一轮抖音 —— 看视频、读评论、挑值得的写一份日报，值得的就点赞并在评论里 **@ 使用者**；
-视频那一头接他自己的 **ComfyUI**（出片），把成片发到抖音。
+需要发片时，可以把本地渲染好的成片发到抖音（本机可选配置，不绑定工具）。
 
 本文件是**唯一接口契约**。两个实现方（MCP 半边 / 宿主半边）都按它写，不得擅自改名字。
 
@@ -34,7 +34,7 @@
   README.md
 ```
 
-参考实现（**只读，不要改**）：`<DSH_HOME>\profiles\desktop\node_modules\dsh-bili-scroll\`
+参考实现（**只读，不要改**）：`D:\dsh\profiles\desktop\node_modules\dsh-bili-scroll\`
 其中 `package.json` / `cordis.patch.yml` / `lib/hostdeps.mjs` / `lib/mcp.mjs` / `lib/state.mjs` / `prompts/duty.md`
 可以直接照搬改名字，`index.js` 只照**骨架**（工具注册、HTTP、定时器），不要照搬 B站 业务。
 
@@ -118,8 +118,7 @@ export function apply(ctx, config) { ... }
 | `dy_comments` | 热门评论 |
 | `dy_like` | 点赞（受 `autoLike` 闸控制，`force` 可越） |
 | `dy_comment` | 发评论 / 回复（受 `autoComment && mentionName` 闸控制，`force` 可越） |
-| `dy_publish` | 发一条视频（`video_path` 或 `latest=true` 取 ComfyUI 最新成片；受 `autoPublish` 闸控制） |
-| `dy_comfy_list` | 列 ComfyUI 输出目录里最近的成片（`comfyOutputDir`） |
+| `dy_publish` | 发一条视频（`video_path`；受 `autoPublish` 闸控制） |
 | `dy_run` | 立刻跑一轮（起 `dsh --profile headless <prompt>`，把 duty.md 交过去） |
 | `dy_selfcheck` | 真跑一次：登录检查 + 一次搜索，直接回答"能不能用" |
 
@@ -139,13 +138,10 @@ export function apply(ctx, config) { ... }
 照 `lib/state.mjs` 的 `WINDOWS`（谷时：12:00–14:00 / 00:30–08:30，工作日 9–12、14–18 是高峰不跑），
 `ctx.effect(() => () => clearInterval(timer))` 收摊。`perDay` 是**每天总量上限**。
 
-## 4. ComfyUI 桥（宿主侧，纯 HTTP）
+## 4. 本地成片发布（可选）
 
-- 地址 `comfyUrl`（默认 `http://127.0.0.1:8188`）。
-- `dy_comfy_list`：读 `comfyOutputDir`（默认 `E:\Comfy-Desktop\ComfyUI-Shared\output`）里最近 N 个 `.mp4`（按 mtime）。
-- `dy_publish(latest: true)`：取最新一个 mp4 → 调 `douyin_publish`。
-- 可选 `comfyWorkflow`：给了就先 `POST /prompt` 排队、轮询 `/history/<id>` 等出片，只取该 prompt_id 的唯一有效 MP4 输出。
-  ⚠️ 显卡在采样时不要做重活；这里只排队和读文件，不做转码。
+- 相关配置（服务地址 / 成片目录 / 工作流）都是**本机可选配置**，默认留空；不影响刷视频、读评论、回私信等主流程。
+- 想发片时把成片路径交给 `dy_publish(video_path=...)` 即可（默认草稿、闸门默认关）。
 
 ## 5. duty.md 口径
 
@@ -160,5 +156,5 @@ export function apply(ctx, config) { ... }
 1. `node --check index.js`、`python -m py_compile vendor/douyin-mcp/mcp_server.py` 通过。
 2. `python vendor/douyin-mcp/mcp_server.py --selftest` 能在没有登录的情况下跑完并打印 JSON（`needLogin`）。
 3. 宿主半边能用 stub ctx 冒烟：注册出 31 个工具、HTTP 路由挂上、`dy_status` 返回结构正确。
-4. 装进 `<DSH_HOME>\profiles\desktop`：`dependencies` 加 `link:D:/jev-decision-kit/plugins/dsh-douyin-life`，
+4. 装进 `D:\dsh\profiles\desktop`：`dependencies` 加 `link:D:/jev-decision-kit/plugins/dsh-douyin-life`，
    `dsh.profile.bundles` 加 `dsh-douyin-life`，`node_modules` 里建到源码目录的 junction。**重启 dsh 后生效。**

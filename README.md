@@ -2,7 +2,7 @@
 
 > DSH 插件。每天替使用者刷抖音：**刷推荐流 → 看片（转写）→ 读评论 → 挑片写日报**，
 > 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
-> 另一头接他自己的 **ComfyUI** 出片，把成片发到抖音。
+> 需要发片时，也可以把本地渲染好的成片发到抖音（本地可选配置，不绑定任何渲染工具）。
 
 **登录**：设置页点「浏览器登录」→ 直接弹出带界面的 Chrome 打开抖音登录页，在里面扫码或收短信验证码，登录成功后自动切回后台无头运行（也可以继续用「截图登录」拿二维码）。
 
@@ -23,7 +23,7 @@
    然后把设置里的 **`pythonPath` 指到 `<家>/.venv/Scripts/python.exe`**。
 2. **确认 Chrome** —— 用本机已装的 Chrome（插件用 `channel=chrome` 拉起持久 profile，不额外下载浏览器）；没有 Chrome 先装。
 3. **登录** —— 让主人点设置页「**浏览器登录**」（会弹带界面 Chrome，扫码 / 短信验证码都在窗口里完成，成功后自动切回无头）；也可以用 `dy_login_start` 出二维码。
-4. **配模型 / 出片目录** —— DSH 里把模型配成能用的（默认 `deepseek-account` / `deepseek-flash`）；`headlessModel` 留空=跟随默认模型。要发 ComfyUI 的片子才填 `comfyOutputDir`（默认空，不填只影响发片）。
+4. **配模型 / 出片目录** —— DSH 里把模型配成能用的（默认 `deepseek-account` / `deepseek-flash`）；`headlessModel` 留空=跟随默认模型。要发本地成片才填成片目录（默认空，不填只影响发片）。
 5. **自检 + 闸门** —— 跑 `dy_selfcheck`，`ok:true` 再用；`autoLike / autoComment / autoPublish / autoReply` **默认全关**，主人明确要才打开。
 
 ## 第一次用：把这份交给你的 agent
@@ -138,7 +138,6 @@ dsh plugin --profile desktop add link:<插件目录的绝对路径>
 | `dy_comments` | 评论（接口优先，**图文作品直接 DOM 抠**；不编数据） |
 | `dy_my_posts` / `dy_my_videos` | 我自己发的作品（按天过滤）/ 投稿账本 |
 | `dy_thumb` | 给视频截缩略图 |
-| `dy_comfy_list` | 列 ComfyUI 输出目录里最近的 `.mp4` |
 | `dy_remember` | 往 `<家>/memory/YYYY-MM.md` 记一行 |
 
 ### 动手（都有闸门）
@@ -160,7 +159,7 @@ dsh plugin --profile desktop add link:<插件目录的绝对路径>
 | 工具 | 干什么 |
 |---|---|
 | `dy_run` | 立刻跑一轮（默认**本机直跑**，不 spawn headless；`mode: "headless"` 才起子会话） |
-| `dy_selfcheck` | 真跑一次环境自检（家目录 / Python / MCP / ComfyUI + 一次登录检查） |
+| `dy_selfcheck` | 真跑一次环境自检（家目录 / Python / MCP + 一次登录检查） |
 | `dy_cleanup` | 立刻清一次：临时垃圾、老缩略图、老日报、日志轮转、媒体音轨、浏览器 Cache |
 | `dy_chrome_open` | 把「本人已登录的 Chrome」拉起来并开 CDP 端口（之后所有动作都走它） |
 | `dy_login_start` / `dy_login_poll` | 扫码登录 |
@@ -261,8 +260,6 @@ dsh plugin --profile desktop add link:<插件目录的绝对路径>
 | `cdpUrl` / `cdpPort` / `chromePath` | `9222` / 9222 / `''` | 复用「本人已登录的 Chrome」 |
 | `headlessProfile` / `headlessModel` / `overlayMcp` / `workspace` | headless / `''` / true / `''` | 起子会话时的参数 |
 | `dshBin` | `''` | dsh 的 bin.js（空 = 自动探测，含 `app.asar` 路径） |
-| `comfyUrl` / `comfyOutputDir` | `127.0.0.1:8188` / ComfyUI output | ComfyUI 地址 / 成片目录 |
-| `comfyWorkflow` / `comfyWaitSeconds` / `comfyListLimit` | `''` / 900 / 20 | 可选工作流 / 等出片上限 / 列表条数 |
 
 > 每个字段都带 `.extra('volatile', true)`（否则 `settings.update()` 报 `has no volatile fields`）。
 > **新增字段必须同时改四处**：`Config`（schema）、`DEFAULTS`、`clampPatch`、`client.js` 的 load/save，
@@ -294,7 +291,6 @@ dsh plugin --profile desktop add link:<插件目录的绝对路径>
 | MCP 起不来 / Python 缺 | 工具返回 `{ok:false, error, hint}`，**不抛异常** |
 | 抖音没登录 | `{ok:false, needLogin:true, hint}` |
 | 评论发不出去 | **回读确认**不到就报失败；连续失败 2 次当轮停止评论（点赞/转发照做） |
-| ComfyUI 目录不存在 / 出片超时 | `dy_comfy_list` 给 `exists:false`；`dy_publish` 给 `ok:false` + 怎么改 |
 
 加载路径每一步都包 `try/catch`：**插件加载失败比少个功能糟得多**。
 

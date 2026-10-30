@@ -457,7 +457,7 @@ window.__ModuleLoader__.load({
         try {
           const r = await jget('/comfy/list')
           setComfyList(Array.isArray(r.items) ? r.items.slice(0, 6) : [])
-          if (!r.exists) setMsg('ComfyUI 输出目录不存在：' + (r.dir || '') + '（去「高级」里改）')
+          if (!r.exists) setMsg('本地成片目录不存在：' + (r.dir || '') + '（去「高级」里改）')
         } catch (e) { setMsg('读成片失败：' + String(e.message || e)); setComfyList([]) }
         setBusy('')
       }
@@ -781,7 +781,7 @@ window.__ModuleLoader__.load({
                 value: draft.commentPerRound ?? 1, onChange: (e) => set('commentPerRound', e.target.value.replace(/[^0-9]/g, '')) }))) : null,
           h('div', { 'data-dy-row': '' },
             h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '允许手动工具 / headless 投稿'),
-              Note('片子从 ComfyUI 出（下面「高级」里配它的输出目录）；默认只存草稿，等你看一眼')),
+              Note('发片是本地可选功能（下面「高级」里配成片目录）；默认只存草稿，等你看一眼')),
             Sw({ on: Boolean(draft.autoPublish), onChange: (v) => set('autoPublish', v) })),
           draft.autoPublish ? h('div', { 'data-dy-sub': '' },
             h('div', { 'data-dy-row': '' }, h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-label': '' }, '只存草稿，不点发布')),

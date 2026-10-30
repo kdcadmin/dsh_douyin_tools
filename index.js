@@ -132,7 +132,7 @@ export const Config = !z ? undefined : z.object({
   /** ⭐ 记忆：把每天刷到的、读到的攒起来（<家>/memory/），下一轮开头带上最近几条 */
   memory: z.boolean().default(true).extra('volatile', true),
   /** ComfyUI 地址 */
-  comfyUrl: z.string().default('http://127.0.0.1:8188').extra('volatile', true),
+  comfyUrl: z.string().default('').extra('volatile', true),
   /** ComfyUI 输出目录（`dy_publish(latest:true)` 和 `dy_comfy_list` 都读它） */
   comfyOutputDir: z.string().default('').extra('volatile', true),
   /** 可选：一份 ComfyUI workflow（JSON 正文，或一个 .json 的路径）；非空就先排队出片再投 */
@@ -312,7 +312,7 @@ export function apply(ctx, config) {
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
     shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: false, dmDuringHeadless: true, localRound: true,
-    comfyUrl: 'http://127.0.0.1:8188',
+    comfyUrl: '',
     comfyOutputDir: '',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
     commentPerDay: 10, publishPerDay: 1, publishTitle: '', publishTags: '',

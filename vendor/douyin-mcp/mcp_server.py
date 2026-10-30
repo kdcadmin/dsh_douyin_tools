@@ -78,6 +78,8 @@ SEARCH_URL = "https://www.douyin.com/search/{kw}?type={type}"
 CREATOR_UPLOAD = "https://creator.douyin.com/creator-micro/content/upload"
 
 HEADLESS = os.environ.get("DOUYIN_HEADLESS", "1") != "0"
+# 带界面打开时，若为登录流程，浏览器起来后自动打开抖音登录页（扫码/短信都在这个窗口完成）
+OPEN_LOGIN = os.environ.get("DOUYIN_OPEN_LOGIN", "0") == "1"
 # ⭐ 复用「本人已经登录的 Chrome」：宿主设了 DOUYIN_CDP_URL（默认 http://127.0.0.1:9222）就先连它。
 #   连不上才退回插件自己的持久 profile（那条要扫一次码）。
 CDP_URL = (os.environ.get("DOUYIN_CDP_URL") or "").strip()
@@ -213,6 +215,40 @@ def _find_chrome() -> str:
     return ""
 
 
+EDGE_CANDIDATES = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    str(Path(os.environ.get("LOCALAPPDATA") or "") / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+]
+
+
+def _find_edge() -> str:
+    env = os.environ.get("DOUYIN_EDGE_PATH", "").strip()
+    for c in ([env] if env else []) + EDGE_CANDIDATES:
+        try:
+            if c and Path(c).is_file():
+                return c
+        except Exception:
+            continue
+    return ""
+
+
+def _browser_channel():
+    """返回 (channel, exe)：优先 Chrome，没有就 Edge，都没有就 None（用 Playwright 自带 Chromium）。"""
+    explicit = os.environ.get("DOUYIN_BROWSER_CHANNEL", "").strip().lower()
+    chrome, edge = _find_chrome(), _find_edge()
+    if explicit in ("chrome", "msedge", "msedge-beta", "msedge-dev", "msedge-canary"):
+        return explicit, (chrome if explicit == "chrome" else edge)
+    if chrome:
+        return "chrome", chrome
+    if edge:
+        return "msedge", edge
+    return None, ""
+
+
+BROWSER_CHANNEL, BROWSER_EXE = _browser_channel()
+
+
 def _port_open(port: int, timeout: float = 0.6) -> bool:
     import socket
     s = socket.socket()
@@ -275,6 +311,7 @@ class BrowserManager:
         self._chat_page = None
         self.owned_pages = set()
         self.mode = "profile"          # profile | cdp
+        self._login_page_opened = False
         self.cdp_note = ""
         self.lock = asyncio.Lock()
 
@@ -377,7 +414,7 @@ class BrowserManager:
         try:
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(PROFILE_DIR),
-                channel="chrome",
+                **({"channel": BROWSER_CHANNEL} if BROWSER_CHANNEL else {}),
                 headless=HEADLESS,
                 locale="zh-CN",
                 viewport={"width": 1440, "height": 900},
@@ -402,7 +439,23 @@ class BrowserManager:
         self._ctx.set_default_timeout(15000)
         self._ctx.set_default_navigation_timeout(40000)
         self.mode = "profile"
-        log(f"Chrome 起来了：profile={PROFILE_DIR} headless={HEADLESS}")
+        log(f"浏览器起来了：channel={BROWSER_CHANNEL or 'bundled'} profile={PROFILE_DIR} headless={HEADLESS}")
+        if OPEN_LOGIN and not self._login_page_opened:
+            self._login_page_opened = True
+            try:
+                pg = await self._ctx.new_page()
+                await _goto(pg, "https://www.douyin.com/jingxuan", settle=3)
+                for sel in ("text=登录", "[data-e2e='login-button']"):
+                    try:
+                        loc = pg.locator(sel).first
+                        if await loc.count():
+                            await loc.click(timeout=4000)
+                            break
+                    except Exception:
+                        continue
+                log("登录页已打开（带界面）：扫码或短信验证码都在这个窗口里完成")
+            except Exception as exc:
+                log(f"打开登录页失败：{type(exc).__name__}: {exc}")
         return self._ctx
 
     async def page_chat(self):
@@ -1430,15 +1483,8 @@ async def _ensure_login_panel(page) -> str:
     if await _first_of(page, QR_SELS, 1500) is not None:
         return "qr"
     if await _first_of(page, PANEL_SELS, 1000) is not None:
-        # 弹层在但停在「验证码登录」tab 时，切回扫码 tab
-        if await _first_of(page, QR_SELS, 500) is None:
-            try:
-                tab = page.get_by_text("扫码登录", exact=False).first
-                if await tab.count() and await tab.is_visible(timeout=500):
-                    await tab.click(timeout=3000)
-                    await page.wait_for_timeout(1500)
-            except Exception:
-                pass
+        # 2026-10-30 的登录窗是左右同时开的：左边二维码，右边验证码/密码。
+        # 不要再点「扫码登录」把右边收起来。
         return "qr" if await _first_of(page, QR_SELS, 1000) is not None else "panel"
 
     clicked = False
@@ -1534,7 +1580,11 @@ async def _login_qr_core(page, ctx) -> dict:
         needLogin=True,
         bytes=size,
         qrSha=sha,
-        hint="用抖音APP「扫一扫」扫码（约 180 秒有效）；扫完调 douyin_login_poll",
+        hint="同一个登录窗左边是二维码、右边是手机号和验证码，两条路都开着，不用关掉重开。"
+             "扫码用抖音「扫一扫」，扫完调 douyin_login_poll；"
+             "要改走短信就在这个窗口上调 douyin_login_sms，它不会刷新二维码。",
+        smsVisible=await _sms_fields_visible(page),
+        methods=["qr", "sms"] if await _sms_fields_visible(page) else ["qr"],
         notes=notes,
     )
 
@@ -1558,49 +1608,150 @@ SMS_CODE_SELS = [
 ]
 
 
+async def _sms_fields_visible(page) -> bool:
+    return await _first_of(page, SMS_PHONE_SELS, 400) is not None
+
+
+async def _captcha_visible(page) -> bool:
+    """图形验证真的盖在登录窗上时才算。页面里常驻的隐藏 verify iframe 不算。"""
+    try:
+        return bool(await page.evaluate("""() => {
+            const fs = Array.from(document.querySelectorAll('iframe[src*="nocaptcha"], iframe[src*="captcha"], [class*="captcha"]'));
+            return fs.some((e) => {
+                const r = e.getBoundingClientRect();
+                const st = getComputedStyle(e);
+                return r.width > 120 && r.height > 120 && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.1;
+            });
+        }"""))
+    except Exception:
+        return False
+
+
 async def _switch_to_sms_tab(page) -> bool:
-    """把登录弹层切到「验证码登录」tab。"""
+    """右边已经是手机号输入时什么都不点。只有停在「密码登录」时才切到验证码。"""
+    if await _sms_fields_visible(page):
+        return True
     for label in ("验证码登录", "短信验证登录", "验证码 登录"):
         if await _click_text(page, label, exact=False):
             await page.wait_for_timeout(900)
+            return await _sms_fields_visible(page)
+    return False
+
+
+async def _receive_code_visible(page) -> bool:
+    """扫码之后的二次验证上，先出现「收验证码」，点开才有「获取验证码」。"""
+    if await _visible_text(page, "收验证码", exact=True) is not None:
+        return True
+    return await _visible_text(page, "接收验证码", exact=False) is not None
+
+
+async def _open_receive_code(page) -> bool:
+    """先点「收验证码」。这一下没点，后面的「获取验证码」出不来。"""
+    if await _click_text(page, "收验证码", exact=True):
+        await page.wait_for_timeout(900)
+        return True
+    if await _click_text(page, "接收验证码", exact=False):
+        await page.wait_for_timeout(900)
+        return True
+    return False
+
+
+async def _click_get_code(page) -> bool:
+    for label in ("获取验证码", "发送验证码", "获取短信验证码"):
+        if await _click_text(page, label, exact=False):
             return True
     return False
 
 
 async def _sms_start_core(page, ctx, phone: str) -> dict:
-    """填手机号 + 点「获取验证码」，把短信发出去。返回 needCode=True。"""
+    """二次验证：先点「收验证码」，再点「获取验证码」。号码已经带在弹层上时不用重填。"""
     digits = re.sub(r"\D", "", str(phone or ""))
-    if len(digits) != 11:
+    if digits and len(digits) != 11:
         return _err("手机号要给 11 位数字", phone=phone)
-    await _goto(page, f"{HOME_URL}?_t={int(time.time() * 1000)}", settle=3.0)
-    st = await _login_state(page, ctx)
-    if st["loggedIn"]:
-        return _ok(loggedIn=True, already=True, hint="已经登录了，不用再发短信")
-    await _ensure_login_panel(page)
-    if not await _switch_to_sms_tab(page):
+    second = await _receive_code_visible(page)
+    panel_open = (
+        second
+        or await _first_of(page, PANEL_SELS, 600) is not None
+        or await _first_of(page, QR_SELS, 400) is not None
+    )
+    # 二次验证或登录窗已经开着就留在这一页，刷新会把扫码结果清掉。
+    if not panel_open:
+        await _goto(page, f"{HOME_URL}?_t={int(time.time() * 1000)}", settle=3.0)
+        st = await _login_state(page, ctx)
+        if st["loggedIn"]:
+            return _ok(loggedIn=True, already=True, hint="已经登录了，不用再发短信")
+        await _ensure_login_panel(page)
+    else:
+        st = await _login_state(page, ctx)
+        if st["loggedIn"]:
+            return _ok(loggedIn=True, already=True, hint="已经登录了，不用再发短信")
+    receive_clicked = await _open_receive_code(page)
+    if not await _sms_fields_visible(page) and not receive_clicked:
+        if not await _switch_to_sms_tab(page):
+            # 二次验证可能只剩按钮，没有「验证码登录」tab
+            if not await _click_get_code(page):
+                notes = [(await _body_text(page, 300))[:200]]
+                return _err("没找到「收验证码」或「获取验证码」（弹层可能改版）", notes=notes)
+            await page.wait_for_timeout(1800)
+            return await _sms_sent_result(page, digits, receive_clicked=False)
+    box = await _first_of(page, SMS_PHONE_SELS, 2000)
+    if box is not None:
+        current = ""
+        readonly = False
+        try:
+            current = re.sub(r"\D", "", await box.input_value() or "")
+        except Exception:
+            current = ""
+        try:
+            readonly = bool(await box.get_attribute("readonly") or await box.get_attribute("disabled"))
+        except Exception:
+            readonly = False
+        if not readonly and len(current) < 4:
+            if len(digits) != 11:
+                return _err(
+                    "二次验证的手机号是空的。把 11 位号码给我，我再点「获取验证码」。",
+                    needPhone=True,
+                    receiveClicked=receive_clicked,
+                )
+            try:
+                await box.click(timeout=3000)
+                await box.fill(digits)
+            except Exception as exc:
+                return _err(f"填手机号失败：{type(exc).__name__}: {exc}", receiveClicked=receive_clicked)
+            await page.wait_for_timeout(300)
+    if not await _click_get_code(page):
         notes = [(await _body_text(page, 300))[:200]]
-        return _err("没找到「验证码登录」这个 tab（弹层可能改版）", notes=notes)
-    box = await _first_of(page, SMS_PHONE_SELS, 4000)
-    if box is None:
-        return _err("没找到手机号输入框", notes=[(await _body_text(page, 300))[:200]])
-    try:
-        await box.click(timeout=3000)
-        await box.fill(digits)
-    except Exception as exc:
-        return _err(f"填手机号失败：{type(exc).__name__}: {exc}")
-    await page.wait_for_timeout(300)
-    clicked = await _click_text(page, "获取验证码", exact=False)
-    if not clicked:
-        clicked = await _click_text(page, "发送验证码", exact=False)
-    if not clicked:
-        clicked = await _click_text(page, "获取短信验证码", exact=False)
+        return _err(
+            "已经点了「收验证码」，但没找到「获取验证码」",
+            receiveClicked=receive_clicked,
+            notes=notes,
+        )
     await page.wait_for_timeout(1800)
+    return await _sms_sent_result(page, digits, receive_clicked=receive_clicked)
+
+
+async def _sms_sent_result(page, digits: str, receive_clicked: bool) -> dict:
     body = await _body_text(page, 1200)
     sent = ("秒后" in body) or ("重新获取" in body) or ("已发送" in body)
-    hint = ("短信已发出" if sent else "点了「获取验证码」，但没看到倒计时（可能没发出去）") + \
-           "：把收到的 6 位验证码给我（调 douyin_login_sms_submit），我填进去点登录"
-    log(f"短信验证码：phone={digits[:3]}****{digits[-2:]} sent={sent}")
-    return _ok(needCode=True, phone=digits, sent=sent, hint=hint)
+    captcha = await _captcha_visible(page)
+    qr_visible = await _first_of(page, QR_SELS, 400) is not None
+    if captcha:
+        hint = "点了「获取验证码」之后弹出图形验证。请本人在这个窗口里拖完滑块，不要关窗口，也不要重新出二维码。拖完后短信到了再提交验证码。"
+    elif sent:
+        hint = "短信已发出。把收到的验证码给我（调 douyin_login_sms_submit）。不要重新出二维码。"
+    else:
+        hint = "已经按顺序点了「收验证码」和「获取验证码」，但没看到倒计时（可能没发出去）。不要重新出二维码。"
+    shown = f"{digits[:3]}****{digits[-2:]}" if len(digits) == 11 else "弹层自带号码"
+    log(f"短信验证码：phone={shown} sent={sent} captcha={captcha} qr={qr_visible} receive={receive_clicked}")
+    return _ok(
+        needCode=True,
+        phone=digits,
+        sent=sent,
+        needCaptcha=captcha,
+        qrVisible=qr_visible,
+        receiveClicked=receive_clicked,
+        hint=hint,
+    )
 
 
 async def _sms_submit_core(page, ctx, code: str) -> dict:
@@ -1634,7 +1785,12 @@ async def _sms_submit_core(page, ctx, code: str) -> dict:
     if not clicked:
         clicked = await _click_text(page, "登录", exact=True)
     if not clicked:
-        return _err("验证码填好了，但找不到「登录」按钮", code=digits)
+        for label in ("验证", "确认", "确定", "提交"):
+            if await _click_text(page, label, exact=True):
+                clicked = True
+                break
+    if not clicked:
+        return _err("验证码填好了，但找不到「登录」或「验证」按钮", code=digits)
     await page.wait_for_timeout(2500)
     for _ in range(10):
         st = await _login_state(page, ctx)
@@ -1669,15 +1825,27 @@ async def _login_poll_core(page, ctx) -> dict:
     except Exception:
         body = ""
     scanned = any(k in body for k in ("已扫描", "请在手机", "确认登录", "手机上确认", "扫码成功"))
+    captcha = await _captcha_visible(page)
+    sms_visible = await _sms_fields_visible(page)
+    receive = await _receive_code_visible(page)
+    second_copy = any(k in body for k in ("二次验证", "身份验证", "安全验证", "验证身份", "为保障账号安全"))
+    first_panel = ("请输入手机号" in body and "扫码登录" in body) or ("登录后免费畅享" in body)
     state = "waiting_scan" if qr_visible else "no_qr"
     if scanned and qr_visible:
         state = "scanned_need_confirm"
+    if receive or (second_copy and not first_panel):
+        state = "need_sms"
+    if captcha:
+        state = "need_captcha"
     hints = {
-        "waiting_scan": "还没扫到：把这张二维码对着抖音「扫一扫」",
+        "waiting_scan": "还没扫到。扫完如果弹出二次验证，接着调 douyin_login_sms，它会先点「收验证码」再点「获取验证码」。",
         "scanned_need_confirm": "扫到了，但手机上还没点「确认登录」—— 去手机上点一下那一步",
-        "no_qr": "二维码已经不在页面上了（过期/刷新）⇒ 重新调 douyin_login_qr 出一张新的",
+        "no_qr": "二维码已经不在页面上了。如果是扫完弹出了二次验证，调 douyin_login_sms，不要重新出码。",
+        "need_sms": "扫码之后弹出了二次验证。接着调 douyin_login_sms：先点「收验证码」，再点「获取验证码」。不要重新出二维码。号码如果弹层里已经有，phone 可以空着。",
+        "need_captcha": "同一个窗口里弹出了图形验证。请本人拖完滑块，不要关窗口，也不要重新出码。",
     }
     return _ok(loggedIn=False, needLogin=True, state=state, qrVisible=qr_visible,
+               smsVisible=sms_visible, needCaptcha=captcha, receiveVisible=receive,
                scanned=scanned, hint=hints[state],
                evidence={"cookie": st["cookie"], "avatar": st["avatar"]})
 
@@ -1813,6 +1981,16 @@ async def _like_core(page, ctx, aweme_id: str, undo: bool) -> dict:
         return _err("双击了但状态仍是未点赞（这条视频可能不支持双击点赞）",
                     aweme_id=aid, status="unknown", state=after["state"])
     return _err("没有点赞按钮，双击后也读不到状态节点（无法核对，不敢报成功）", status="unknown", aweme_id=aid)
+
+
+def _norm_comment_text(s: str) -> str:
+    """评论正文归一化：去掉 [看] 这类表情码、空白、标点，只留中英数字，便于模糊匹配。"""
+    import re
+    s = str(s or "")
+    s = re.sub(r"\[[^\]]{1,8}\]", "", s)
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", s)
+    return s
 
 
 async def _find_media_comment(items, source, cid):
@@ -1976,6 +2154,9 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                     return _err('图片/表情评论无法唯一定位，未回复；请展开评论后重试', aweme_id=aid)
             elif need_text:
                 # DOM 不暴露 cid，而且渲染顺序可能和接口顺序不一致 ⇒ 按正文找（只要可见的），找不到就滚
+                need_norm = _norm_comment_text(need_text)
+                head = need_norm[:24]
+                tail = need_norm[-24:] if len(need_norm) > 24 else ""
                 for _ in range(12):
                     cnt = await items.count()
                     for i in range(cnt):
@@ -1983,9 +2164,24 @@ async def _comment_core(page, ctx, aweme_id: str, text: str, reply_cid: str, men
                         try:
                             if not await it.is_visible():
                                 continue
-                            if need_text[:20] in (await it.inner_text()):
+                            raw = await it.inner_text()
+                            if not raw:
+                                continue
+                            if need_text[:20] in raw:
                                 target = it
                                 break
+                            got = _norm_comment_text(raw)
+                            if got and head and head in got:
+                                target = it
+                                break
+                            if got and tail and tail in got:
+                                target = it
+                                break
+                            nick = str(((source_comment or {}).get("user") or {}).get("nickname") or "").strip()
+                            if nick and nick in raw and need_norm:
+                                if need_norm[:8] in got or need_norm[-8:] in got:
+                                    target = it
+                                    break
                         except Exception:
                             continue
                     if target is not None:
@@ -2782,10 +2978,11 @@ async def douyin_hot_videos(sentence_id: str = "", word: str = "", num: int = 10
 
 
 @restricted_tool()
-async def douyin_login_sms(phone: str) -> str:
-    """短信验证码登录第一步：切到「验证码登录」、填手机号、点「获取验证码」。
+async def douyin_login_sms(phone: str = "") -> str:
+    """扫码后的二次验证：先点「收验证码」，再点「获取验证码」。
 
-    返回 {ok, needCode, phone, sent, hint}；拿到短信后调 douyin_login_sms_submit(code)。
+    弹层里已经带出手机号时 phone 可以空着。返回 {ok, needCode, sent, hint}；
+    短信到了再调 douyin_login_sms_submit(code)。不要为了发短信重新出二维码。
     """
     async def _impl():
         ctx = await _browser.context()
@@ -3067,15 +3264,19 @@ async def _watch_core(page, aweme_id: str, seconds: int = 300, frames: int = 10)
         except Exception:
             pass
 
-    lab_candidates = [
-        Path(os.environ["DOUYIN_VIDEO_LAB"]) if os.environ.get("DOUYIN_VIDEO_LAB") else None,
-        Path(__file__).resolve().parent / "video-understanding-lab",
-        Path(__file__).resolve().parents[2] / "video-understanding-lab",
-    ]
-    lab_dir = next((p for p in lab_candidates if p and (p / "run.py").is_file()), lab_candidates[1])
+    lab_candidates = []
+    if os.environ.get("DOUYIN_VIDEO_LAB"):
+        lab_candidates.append(Path(os.environ["DOUYIN_VIDEO_LAB"]))
+    here = globals().get("__file__")
+    if here:
+        script = Path(here).resolve()
+        lab_candidates.append(script.parent / "video-understanding-lab")
+        if len(script.parents) > 2:
+            lab_candidates.append(script.parents[2] / "video-understanding-lab")
+    lab_dir = next((p for p in lab_candidates if (p / "run.py").is_file()), None)
+    if lab_dir is None:
+        return _err("找不到视频理解原型 run.py（安装包应自带 video-understanding-lab；也可设 DOUYIN_VIDEO_LAB）", path="video-understanding-lab/run.py")
     entry = lab_dir / "run.py"
-    if not entry.exists():
-        return _err("找不到视频理解原型 run.py（安装包应自带 video-understanding-lab；也可设 DOUYIN_VIDEO_LAB）", path=str(entry))
     case = media_dir / "lab" / f"{aid}-{int(time.time())}"
     case.parent.mkdir(parents=True, exist_ok=True)
     cdp = (CDP_URL if _browser.mode == "cdp" else "") or f"http://127.0.0.1:{SHARED_PORT}"
@@ -3606,7 +3807,7 @@ async def douyin_comment(aweme_id: str, text: str, reply_cid: str = "", mention:
         page = await _browser.page()
         return await _comment_core(page, ctx, aweme_id, text, reply_cid, mention, reply_index)
 
-    return j(await _guard(_impl, 70))
+    return j(await _guard(_impl, 150))
 
 
 async def _share_core(page, ctx, aweme_id: str, nickname: str) -> dict:
@@ -3830,7 +4031,7 @@ async def _message_snapshot(page):
         const seen=new Set();
         const hash=s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h.toString(16)};
         const occurrences=new Map();
-        const avatarOf=(e)=>{let p=e;for(let i=0;i<10&&p;i++){for(const img of Array.from(p.querySelectorAll('img'))){const src=img.currentSrc||img.src||'';const r=img.getBoundingClientRect();if(r.width>=20&&r.width<=90&&/(aweme-avatar|\/img\/|avatar)/i.test(src))return src;}p=p.parentElement;}return ''};
+        const avatarOf=(e)=>{let p=e;for(let i=0;i<10&&p;i++){if(typeof p.querySelectorAll==='function'){for(const img of Array.from(p.querySelectorAll('img'))){if(typeof img.getBoundingClientRect!=='function')continue;const src=img.currentSrc||img.src||'';const r=img.getBoundingClientRect();if(r.width>=20&&r.width<=90&&/(aweme-avatar|\/img\/|avatar)/i.test(src))return src;}}p=p.parentElement;}return ''};
         const push=(id,direction,text,media,awemeId,kind='text',attachments=[],senderId='',conversationId='',avatar='')=>{
             if(id.startsWith('dom')){
                 const value=JSON.stringify([direction,text,media.map(u=>{try{return new URL(u).origin+new URL(u).pathname}catch{return u}}),awemeId]);
