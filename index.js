@@ -1110,12 +1110,19 @@ export function apply(ctx, config) {
     let ids = []
     let titles = []
     let source = 'none'
+    const titleById = new Map()
     try {
       // ⭐ 按使用者要求：只回「3 天内」的评论区，不再跟随设置里的 replyWorksDays
       const r = await call('douyin_my_posts', { days: 3 }, { timeoutMs: 90_000 })
       const list = Array.isArray(r?.items) ? r.items : []
-      ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
-      titles = list.map((x) => x.title)
+      for (const x of list) {
+        const id = String(x?.aweme_id || '').trim()
+        if (!id) continue
+        const title = String(x?.title || x?.desc || '').replace(/\s+/g, ' ').trim()
+        ids.push(id)
+        titles.push(title)
+        if (title) titleById.set(id, title)
+      }
       if (ids.length) source = 'douyin_my_posts'
     } catch (e) {
       log('取今日作品失败：' + String(e?.message ?? e))
@@ -1136,7 +1143,7 @@ export function apply(ctx, config) {
       source = source === 'none' ? 'replyVideoIds' : source + '+replyVideoIds'
       ids = [...new Set([...ids, ...extras])]
     }
-    return { ids, source, titles, extras }
+    return { ids, source, titles, extras, titleById }
   }
   const myVideoIds = () => {
     const fromCfg = String(cfg.replyVideoIds || '').split(/[^0-9]+/).map((s) => s.trim()).filter((s) => s.length >= 6)
@@ -1239,7 +1246,7 @@ export function apply(ctx, config) {
     const runOnce = async (useEffort) => {
       const opts = {
         provider, model, system: sys,
-        messages: [{ role: 'user', content: [{ type: 'text', text: `视频：${String(videoTitle || '').slice(0, 60)}\n评论原文：${String(text || '').slice(0, 300)}` }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: `${String(videoTitle || '').trim() ? `视频：${String(videoTitle).trim().slice(0, 60)}` : '视频：（没有标题）'}\n评论原文：${String(text || '').slice(0, 300)}` }] }],
         maxTokens: 80, temperature: 0.9,
       }
       if (useEffort && useEffort !== 'default') opts.reasoningEffort = useEffort
@@ -1328,31 +1335,57 @@ export function apply(ctx, config) {
       if (!fresh.length) { out.push({ aweme_id: v, ok: true, skipped: '这个视频没有新评论' }); continue }
       if (rand) fresh = shuffle(fresh)
       // ⭐ 评论区统一在本机回（串行、不走 headless）：
-      //    纯文字 → 模型直接回；带图/表情 → 先用视觉模型看懂，再让模型回；模型失败才退回模板
+      //    纯文字 → 模型直接回，模型失败才用模板；带图先看懂，看不懂或模型没写出就不发
       const todo = fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
       let memo = ''
       try {
         const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
         if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
       } catch { /* 没记忆也能回 */ }
+      const videoTitle = String((got.titleById && got.titleById.get(v)) || '').trim()
+      const refusal = '这个我不太方便聊，换个话题吧。'
+      const hitsSensitive = (s) => SENSITIVE_WORDS.some((k) => String(s || '').includes(k))
       for (const c of todo) {
         if (out.filter((x) => x.sent).length >= want) break
         let replyText = ''
         let sensitive = false
         let visionNote = ''
-        try {
-          const att = (normalizeDmMessage(c).attachments || []).filter((x) => x && x.url)
-          if (att.length) {
-            try {
-              const desc = await dmDescribeImage(String(att[0].url))
-              if (desc) visionNote = desc
-              log(`评论看图：${String(c.user || '').slice(0, 12)} → ${String(desc || '').slice(0, 40)}`)
-            } catch (e) { log('评论看图失败：' + String((e && e.message) || e).slice(0, 80)) }
+        const att = (normalizeDmMessage(c).attachments || []).filter((x) => x && x.url)
+        const commentText = String(c.text || '')
+        if (hitsSensitive(commentText)) {
+          replyText = refusal
+          sensitive = true
+        } else if (att.length) {
+          try {
+            const desc = await dmDescribeImage(String(att[0].url))
+            if (desc) {
+              visionNote = desc
+              log(`评论看图：${String(c.user || '').slice(0, 12)} → ${String(desc).slice(0, 40)}`)
+            } else {
+              log(`评论看图失败：${String(c.user || '').slice(0, 12)} 没有拿到图上的内容`)
+            }
+          } catch (e) { log('评论看图失败：' + String((e && e.message) || e).slice(0, 80)) }
+          if (!visionNote) {
+            out.push({ aweme_id: v, cid: String(c.cid), comment: commentText.slice(0, 40), skipped: '看图失败，这条先不回', sent: false })
+            continue
           }
-          replyText = await localCommentReply({ videoTitle: v, user: String(c.user || ''), text: String(c.text || ''), visionNote, memo })
-        } catch (e) { log('本机回评论失败（退回模板）：' + String((e && e.message) || e).slice(0, 100)) }
+          if (hitsSensitive(visionNote)) {
+            replyText = refusal
+            sensitive = true
+          }
+        }
         if (!replyText) {
-          const tpl = pickReply(c.text)
+          try {
+            replyText = await localCommentReply({ videoTitle, user: String(c.user || ''), text: commentText, visionNote, memo })
+          } catch (e) { log('本机回评论失败：' + String((e && e.message) || e).slice(0, 100)) }
+        }
+        if (!replyText) {
+          if (att.length) {
+            log(`图片评论模型没写出回复，不用模板：${String(c.user || '').slice(0, 12)}`)
+            out.push({ aweme_id: v, cid: String(c.cid), comment: commentText.slice(0, 40), vision: visionNote, skipped: '模型没写出回复，图片评论不用模板', sent: false })
+            continue
+          }
+          const tpl = pickReply(commentText)
           replyText = tpl.text
           sensitive = tpl.sensitive
         }

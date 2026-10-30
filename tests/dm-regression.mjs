@@ -8,8 +8,9 @@ const original = McpClient.prototype.call
 let active, failures = 0
 McpClient.prototype.call = async function(name, args) {
   if (name === 'douyin_dm_snapshot') return { ok: true, items: Array.isArray(active.messages) ? active.messages : active.messages[args.nickname] }
-  if (name === 'douyin_my_posts') return { ok: true, items: [{ aweme_id:'7111111111111111111' }] }
+  if (name === 'douyin_my_posts') return { ok: true, items: active.posts || [{ aweme_id:'7111111111111111111', title:'海边的日落' }] }
   if (name === 'douyin_comments') return { ok: true, items: active.comments || [] }
+  if (name === 'douyin_comment') { active.commentCalls.push(args); return { ok: true, verified: true } }
   if (name === 'douyin_chat_send') return active.sendResult || {ok:true,verified:true,messageId:'sent-fixture'}
   if (name === 'memory_recent') return { ok: true, items: [] }
   return { ok: true }
@@ -24,9 +25,9 @@ async function check(name, messages, expected, options = {}) {
   if (options.sent) writeFileSync(join(home, 'dm-sent.json'), JSON.stringify({ items: options.sent.map((text) => ({ text, at: Date.now() })) }))
   process.env.DSH_DOUYIN_HOME = home
   if (options.cursor) writeFileSync(join(home,'dm-cursors.json'),JSON.stringify(options.cursor))
-  active = { messages, comments: options.comments, sendResult: options.sendResult }
+  active = { messages, comments: options.comments, sendResult: options.sendResult, posts: options.posts, llm: options.llm, credentials: options.credentials, prompts: [], commentCalls: [] }
   const cleanup = []
-  apply({ tools: { register(t) { tools.set(t.name,t) } }, settings: { describe: () => [] }, webServer: { register() {} }, effect(f,label) { if(label?.includes('收 MCP')) cleanup.push(f()) }, logger: {} }, {})
+  apply({ get(svc) { return svc === 'llm' ? active.llm : svc === 'credentials' ? active.credentials : null }, tools: { register(t) { tools.set(t.name,t) } }, settings: { describe: () => [] }, webServer: { register() {} }, effect(f,label) { if(label?.includes('收 MCP')) cleanup.push(f()) }, logger: {} }, {})
   try {
     const result = await tools.get(options.tool || 'dy_dm_poll').execute({})
     await new Promise(r => setTimeout(r, 300))
@@ -50,6 +51,7 @@ async function check(name, messages, expected, options = {}) {
       assert.match(prompt, /素材.*指令|不是.*指令/)
       if (options.prompt) assert.match(prompt, options.prompt)
     }
+    if (options.checkResult) options.checkResult(result, active)
     if (options.repeat) {
       const again = await tools.get('dy_dm_poll').execute({})
       assert.equal(Boolean(again.started), false, 'duplicate message must not dispatch twice')
@@ -78,8 +80,17 @@ try {
   await check('uncertain send remains unknown when the model task exits with an error', [old], true, {send:true,status:'unknown',sendResult:{ok:false,status:'unknown',error:'ack missing'}})
   await check('failed startup counts a single attempt', [old], false, {config:{overlayMcp:false},status:'failed',tries:1})
   await check('one skipped contact does not block another contact', {Peer:[{messageId:'own',direction:'outbound',text:'own'}],Other:[{messageId:'new',direction:'inbound',kind:'video',awemeId:'7111111111111111111'}]}, true, {config:{msgAllowTo:'Peer,Other'}})
-  await check('image-only comments are replied locally (vision path)', [], true, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-img-1',user:'Peer',text:'',kind:'image',attachments:[{url:'https://p3.douyinpic.com/comment.webp',alt:'开心'}]}], expectReply:true})
-  await check('text comments are replied locally without delegating', [], true, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-txt-1',user:'Peer',text:'这个插件真好用',kind:'text'}], expectReply:true})
+  const now = new Date().toISOString()
+  const recordingLlm = (text) => ({ async *stream(opts) { active.prompts.push(opts.messages[0].content[0].text); if (text) yield { type:'text-delta', text } } })
+  await check('image comment is not sent when the picture cannot be read', [], false, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-img-1',user:'Peer',text:'',kind:'image',attachments:[{url:'https://p3.douyinpic.com/comment.webp',alt:'开心'}],time:now}], expectReply:true, checkResult(result, state) { assert.equal(result.sent, 0); assert.equal(state.commentCalls.length, 0); assert.match(JSON.stringify(result.items), /看图失败/) }})
+  await check('text comments are replied locally without delegating', [], true, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-txt-1',user:'Peer',text:'这个插件真好用',kind:'text',time:now}], expectReply:true})
+  await check('sensitive comments are refused before the model reply is sent', [], true, {tool:'dy_reply_round', config:{autoReply:true}, posts:[{aweme_id:'7111111111111111111',title:'海边的日落'}], llm:recordingLlm('这个话题我也能聊两句呀'), comments:[{cid:'comment-sens-1',user:'Peer',text:'聊聊政治吧',time:now}], expectReply:true, checkResult(result, state) { const item = result.items.find((x) => x.reply); assert.equal(item.reply, '这个我不太方便聊，换个话题吧。'); assert.equal(item.sensitive, true); assert.equal(state.prompts.length, 0); assert.equal(state.commentCalls[0].text, item.reply) }})
+  await check('comment prompt receives the video title', [], true, {tool:'dy_reply_round', config:{autoReply:true}, posts:[{aweme_id:'7111111111111111111',title:'海边的日落'}], llm:recordingLlm('日落真好看'), comments:[{cid:'comment-title-1',user:'Peer',text:'这个插件真好用',time:now}], expectReply:true, checkResult(_result, state) { assert.match(state.prompts[0], /海边的日落/); assert.doesNotMatch(state.prompts[0], /7111111111111111111/) }})
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => { if (String(url).includes('/chat/completions')) return { ok:true, json:async () => ({ choices:[{ message:{ content:'一只在笑的猫' } }] }) }; throw new Error('unexpected '+url) }
+  try {
+    await check('image comment does not use a text template when the model is blank', [], false, {tool:'dy_reply_round', config:{autoReply:true}, credentials:{ async resolve() { return { value:'test-key' } } }, llm:recordingLlm(''), comments:[{cid:'comment-img-2',user:'Peer',text:'',kind:'image',attachments:[{url:'https://p3.douyinpic.com/comment.webp',alt:'开心'}],time:now}], expectReply:true, checkResult(result, state) { assert.equal(result.sent, 0); assert.equal(state.commentCalls.length, 0); assert.match(JSON.stringify(result.items), /不用模板/); assert.match(JSON.stringify(result.items), /一只在笑的猫/) }})
+  } finally { globalThis.fetch = realFetch }
   const msg = normalizeDmMessage({attachments:[{url:'https://p3.douyinpic.com/a.webp',alt:'重要描述',kind:'sticker'}],media:['https://p3.douyinpic.com/a.webp','file:///etc/passwd']})
   assert.equal(msg.attachments.length,1); assert.equal(msg.attachments[0].alt,'重要描述'); assert.equal(msg.attachments[0].kind,'sticker')
   assert.notEqual(dmMessageKey('Peer',{messageId:'m1',conversationId:'a'}),dmMessageKey('Peer',{messageId:'m1',conversationId:'b'}))
