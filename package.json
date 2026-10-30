@@ -1,6 +1,6 @@
 {
   "name": "dsh-douyin-life",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "DSH 插件：每天替你刷一轮抖音 —— 看视频读评论挑出值得的、写一份日报，值得的就点赞并在评论里 @ 你；视频那头接你自己的 ComfyUI 出片",
   "keywords": [
     "dsh",
@@ -39,6 +39,13 @@
     "docs/AGENT_ONBOARDING.md",
     "vendor/douyin-mcp/mcp_server.py",
     "vendor/douyin-mcp/requirements.txt",
+    "video-understanding-lab/run.py",
+    "video-understanding-lab/lab.py",
+    "video-understanding-lab/asr.py",
+    "video-understanding-lab/media.py",
+    "video-understanding-lab/capture.py",
+    "video-understanding-lab/evidence.py",
+    "video-understanding-lab/replay.py",
     "README.md",
     "SPEC.md",
     "LICENSE"

@@ -43,7 +43,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { normalizeDmMessage, dmMessageKey, dmMessagePreview, dmMessageContext } from './lib/dm-messages.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
+import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, ensurePersona, charterPath, inWindow, dayKey } from './lib/state.mjs'
 
 export const name = 'douyin-life'
 export const inject = ['webServer', 'tools', 'settings', 'llm', 'credentials', 'attachments']
@@ -134,7 +134,7 @@ export const Config = !z ? undefined : z.object({
   /** ComfyUI 地址 */
   comfyUrl: z.string().default('http://127.0.0.1:8188').extra('volatile', true),
   /** ComfyUI 输出目录（`dy_publish(latest:true)` 和 `dy_comfy_list` 都读它） */
-  comfyOutputDir: z.string().default('E:\\Comfy-Desktop\\ComfyUI-Shared\\output').extra('volatile', true),
+  comfyOutputDir: z.string().default('').extra('volatile', true),
   /** 可选：一份 ComfyUI workflow（JSON 正文，或一个 .json 的路径）；非空就先排队出片再投 */
   comfyWorkflow: z.string().default('').extra('volatile', true),
   /** 等 ComfyUI 出片最多等几秒 */
@@ -295,6 +295,9 @@ export function apply(ctx, config) {
   try { ensureCharter(pluginDir, stateDir, log) } catch (e) {
     log(`铺值班章程失败（已兜住）：${e?.message ?? e}`)
   }
+  try { ensurePersona(pluginDir, stateDir, log) } catch (e) {
+    log(`铺人设失败（已兜住）：${e?.message ?? e}`)
+  }
 
   /* ─────────────── 配置 ─────────────── */
 
@@ -310,7 +313,7 @@ export function apply(ctx, config) {
     headlessModel: '',
     shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: false, dmDuringHeadless: true, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
-    comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
+    comfyOutputDir: '',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
     commentPerDay: 10, publishPerDay: 1, publishTitle: '', publishTags: '',
     cdpUrl: '', cdpPort: 9222, chromePath: '',
@@ -1155,7 +1158,7 @@ export function apply(ctx, config) {
       const lines = [
         '刚看了个视频，里面说「' + cut + '」，笑死，给你看看。',
         '这个有点意思：「' + cut + '」——你也看看。',
-        '刷到个视频，讲的「' + cut + '」，我看完有点想笑，发你。',
+        '刷到个视频，讲的「' + cut + '」，看着有点想笑，发你。',
         '看到一句「' + cut + '」，配这视频绝了，你瞅瞅。',
       ]
       return pick(lines)
@@ -1247,7 +1250,7 @@ export function apply(ctx, config) {
       const repliedPairs = new Set()
       try {
         for (const rec of Object.values(readLedger().replies || {})) {
-          if (rec && rec.user && rec.comment) repliedPairs.add(pairKey(rec.user, rec.comment))
+          if (rec && rec.ok === true && rec.user && rec.comment) repliedPairs.add(pairKey(rec.user, rec.comment))
         }
       } catch { /* 没账本 */ }
       const seenThisRound = new Set()
@@ -1283,18 +1286,20 @@ export function apply(ctx, config) {
       })
       if (!fresh.length) { out.push({ aweme_id: v, ok: true, skipped: '这个视频没有新评论' }); continue }
       if (rand) fresh = shuffle(fresh)
-      // ⭐ 回评论直接用模型（不再有开关/按钮）：把「视频 + 评论 + 共享记忆」交给 headless，
-      //    让它像大肥鱼本人一样回，而不是套「我懂你意思」模板。
-      {
-        const picks = fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
+      // 纯文字在本机用短句回。带图片或表情的评论交给子会话，避免用一句套话假装看过图。
+      const visual = fresh.filter((c) => normalizeDmMessage(c).attachments.length)
+      const textual = fresh.filter((c) => !normalizeDmMessage(c).attachments.length)
+      if (visual.length) {
+        const picks = visual.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
         let memo = ''
         try {
           const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
           if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
         } catch { /* 没有记忆也能回 */ }
+        const voice = String(cfg.personaPrompt || '').trim() || '按这个账号平时的口气，短句'
         const list = picks.map((c, i) => `${i + 1}) 评论者：${c.user || ''} aweme_id=${v} reply_cid=${String(c.cid || '')}\n${dmMessageContext(normalizeDmMessage({ ...c, messageId: c.cid }), '评论')}`).join('\n')
         const prompt = [
-          '你是「大白鲸（爱吃白饭版）」，使用者叫你大肥鱼。这是你自己视频下面新来的评论，你要像本人一样逐条回一句。',
+          `你在回自己视频下面的新评论。说话口径：${voice}。`,
           memo ? `你记得的事：\n${memo}\n` : '',
           `要回的评论：\n${list}\n`,
           '规则：',
@@ -1305,9 +1310,8 @@ export function apply(ctx, config) {
         ].join('\n')
         const r = await runDuty('reply', { prompt, countRound: false })
         out.push({ aweme_id: v, ok: true, delegated: true, candidates: picks.length, started: Boolean(r?.started), error: r?.error })
-        break
       }
-      for (const c of fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))) {
+      for (const c of textual.slice(0, Math.max(0, want - out.filter((x) => x.sent || x.started).length))) {
         const { text, sensitive } = pickReply(c.text)
         try {
           const payload = { aweme_id: v, text, mention: '' }
@@ -2616,7 +2620,7 @@ export function apply(ctx, config) {
     name: 'dy_config',
     description: '读 / 改「刷抖音」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"autoLike":false,"autoComment":false,"mentionName":""}`；'
-      + 'ComfyUI：`{"comfyUrl":"http://127.0.0.1:8188","comfyOutputDir":"E:\\\\Comfy-Desktop\\\\ComfyUI-Shared\\\\output"}`。',
+      + 'ComfyUI：`{"comfyUrl":"http://127.0.0.1:8188","comfyOutputDir":"<本机 ComfyUI 的 output 目录>"}`（目录留空表示还没接）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -3281,7 +3285,7 @@ export function apply(ctx, config) {
         }
         const ls = comfy?.video ? { items: [{ path: comfy.video }] } : listVideos(1)
         if (!ls.items.length) {
-          return { ok: false, error: 'ComfyUI 输出目录里没有 .mp4', dir: ls.dir, dirExists: ls.exists, hint: '把 comfyOutputDir 指到 ComfyUI 的 output 目录（默认 E:\\Comfy-Desktop\\ComfyUI-Shared\\output）' }
+          return { ok: false, error: 'ComfyUI 输出目录里没有 .mp4', dir: ls.dir, dirExists: ls.exists, hint: '把 comfyOutputDir 指到 ComfyUI 的 output 目录' }
         }
         video = ls.items[0].path
       }
@@ -3514,10 +3518,11 @@ export function apply(ctx, config) {
     const roundDate = new Date(), roundDay = dayKey(roundDate)
     const roundReport = reportFileOf(roundDate)
     const quota = Math.max(0, Number(cfg.perDay) || 0)
-    const watched = countWatchedToday()
+    const picked = countPickedToday()
     // perDay=0 表示「不自动刷」，但手动点「现在跑一轮」仍应能跑（最多一轮的 pickPerRound）
+    // 额度按挑中的条数算。只点赞、没转写的也占名额，否则每天条数挡不住重复开一轮。
     const left = quota > 0
-      ? Math.max(0, quota - watched)
+      ? Math.max(0, quota - picked)
       : (opts.manual ? Math.max(1, Number(cfg.pickPerRound) || 2) : 0)
     if (left <= 0) {
       return { ok: true, picked: 0, skipped: quota > 0 ? `今天已经挑够 ${quota} 条了（不再重复挑）` : '每天最多挑几条=0，已停止自动刷', report: roundReport, actions: [] }
@@ -3698,43 +3703,18 @@ export function apply(ctx, config) {
           const clicked = Boolean(r) && r.ok !== false // 点了分享就算数（可能只是回执没确认）
           acts.push('转发给' + to + '：' + (okk ? '已转发（已确认）' : clicked ? '已点分享（回执未确认，仍补附言）' : (r?.error || '没发出去')))
           // ⭐ 附言/表情包当成一条普通私信来发：只要分享点了就补，不看回执
-          if (okk || clicked || cfg.shareWithNote !== false) {
+          if ((okk || clicked) && cfg.shareWithNote !== false) {
             noteShare(v.aweme_id, { to, title: String(v.title || '').slice(0, 40) })
             appendVideoMemory('转发给你', v, 'to=' + to)
-            // 转发后让模型写一句人话 + 挑表情包（它看过转写，不是模板）
-            if (cfg.shareWithNote !== false) {
-              const prompt = [
-                `你刚看完一个视频，要把它分享给你主人（${to}）。`,
-                `视频标题：${String(v.title || '').slice(0, 80)}`,
-                `你看完的内容（转写）：${String(v.transcript || '').slice(0, 400)}`,
-                '请你：用你自己的口吻（傲娇、可爱、会撒娇，短句）写一句 20-40 字的附言，说清这视频讲了啥、你觉得怎么样；',
-                `然后调用 douyin_chat_send(nickname="${to}", text=附言) 发出去；`,
-                `再调用 douyin_chat_sticker(nickname="${to}", keyword=心情词) 发一个合适的表情包（关键词：开心/干饭/压力/困/生气/无语/666）；`,
-                '只做这两件事，别刷视频、别写文件、别发评论。',
-              ].join('\n')
-              const rn = await runDuty('share-note', { prompt, countRound: false })
-              acts.push('附言+表情包：交给模型（' + (rn?.started ? '已起任务' : (rn?.error || '没起来')) + '）')
-              continue
-            }
-            const note = cfg.shareWithNote === false ? '' : makeShareNote(v)
+            const note = makeShareNote(v)
             const mood = pickStickerKeyword(note)
-            const sendTwice = async (fn) => {
-              let r = await fn()
-              if (!(confirmed(r) || r?.verified)) {
-                await new Promise((res) => setTimeout(res, 1500))
-                r = await fn()
-              }
-              return r
-            }
+            const messages = []
+            if (note) messages.push({ kind: 'text', text: note })
+            if (mood) messages.push({ kind: 'sticker', keyword: mood, pick: 0 })
             try {
-              if (cfg.shareWithNote !== false && note) {
-                const r2 = await sendTwice(() => call('douyin_chat_send', { nickname: to, text: note }, { timeoutMs: 180_000 }))
-                acts.push('附言：' + ((confirmed(r2) || r2?.verified) ? '已发' : (r2?.error || '没发出去')))
-              }
-              if (cfg.shareWithNote !== false) {
-                const r3 = await sendTwice(() => call('douyin_chat_sticker', { nickname: to, keyword: mood, pick: 0 }, { timeoutMs: 180_000 }))
-                acts.push('表情包：' + ((confirmed(r3) || r3?.verified) ? '已发' : (r3?.error || '没发出去')))
-              }
+              const r2 = await call('douyin_chat_batch', { nickname: to, messages: JSON.stringify(messages) }, { timeoutMs: 180_000 })
+              const sent = confirmed(r2) || r2?.verified
+              acts.push('附言+表情包：' + (sent ? '已发' : (r2?.error || '没发出去')))
             } catch (e) { acts.push('附言+表情包失败：' + String(e?.message ?? e)) }
           }
         }

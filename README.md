@@ -4,9 +4,7 @@
 > 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
 > 另一头接他自己的 **ComfyUI** 出片，把成片发到抖音。
 
-**装法**：从插件市场 / 源码目录 link 进 profile（**npm 包 0.2.1 尚未发布，公开 npm 查询是 404，先别用 `dsh plugin add dsh-douyin-life`**）。设置页有「刷抖音」一页（**日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级** 六个 tab），左侧还有「记忆」一页（**插件自带**记忆 `<家>/memory/*.md` + 人设 `persona.md`，不依赖任何记忆插件）。
-
-![封面](assets/cover.png)
+**装法**：从插件市场 / npm 装，或把源码目录 link 进 profile。设置页有「刷抖音」一页（**日常 / 刷视频 / 互动 / 私信 / 表情包 / 高级** 六个 tab），左侧还有「记忆」页（**插件自带**记忆 + 人设，不依赖任何记忆插件）。
 
 接口契约见 [`SPEC.md`](./SPEC.md)。发布说明见 [`PUBLISH.md`](./PUBLISH.md)。
 
@@ -19,6 +17,19 @@
 那份文档是**写给 agent 看的**：Chrome 怎么检测/安装/自动打开、扫码和短信验证码怎么登、
 默认记忆/人设怎么用（不用装记忆插件）、收藏表情包怎么巡检、没有收藏时怎么用关键字兜底、
 哪些写动作默认关着不许碰、出问题怎么排查。
+
+## 0.2.1 修复版（2026-10-27）
+
+这次是本地源码修复，未发布 npm、未代替你重启宿主。完整结果见 [修复报告](docs/REPAIR_REPORT_2026-10-27.md)，历史问题见 [审查记录](docs/BUG_AUDIT_2026-10-26.md)。
+
+- 所有写动作经过宿主的授权、额度、串行锁及持久化动作记录；未确认回执返回 unknown，保留额度且不自动重发。
+- headless 的 Python 工具通过带临时凭证的回环代理调用宿主，复用浏览器与账本。当前桌面 CLI 可自动发现，不再依赖旧安装路径，也不强制放开沙箱。
+- 选择数量来自结构化 picks；日报关闭或被编辑不再改变额度。state.count 表示轮数，pickedToday 表示挑片数。
+- 新安装默认关闭普通评论和私信回复；已有显式设置保留。私信需要稳定的对方、会话、新入站消息标识。
+- 本机模式使用转写摘录模板；自由人设只用于模型模式。本机自动投稿与 @豆包暂未接线，界面明确标注；草稿转正式发布由使用者在创作者中心完成。
+- 本轮没有向真实抖音账号发送测试内容。DOM 选择器、消息 ID、平台回执仍需重载后的真机验收。
+
+开发回归：源码目录运行 npm test。回环代理测试用 npm run test:proxy、npm run test:headless；真实 MCP、模型、CLI 验证命令见修复报告。测试不依赖真实账号。
 
 ---
 
@@ -34,41 +45,35 @@
 ### 日常
 ![日常](docs/screenshots/01-日常.png)
 
-### 刷视频
-![刷视频](docs/screenshots/02-刷视频.png)
+### 偏好
+![偏好](docs/screenshots/02-偏好.png)
 
 ### 互动
 ![互动上](docs/screenshots/03-互动-上.png)
 
 ![互动下](docs/screenshots/04-互动-下.png)
 
-### 私信
-![私信](docs/screenshots/05-私信.png)
-
-### 表情包
-![表情包](docs/screenshots/06-表情包.png)
+![投稿](docs/screenshots/05-互动-投稿.png)
 
 ### 高级
-![高级上](docs/screenshots/07-高级-上.png)
+![高级](docs/screenshots/06-高级.png)
 
-![高级下](docs/screenshots/08-高级-下.png)
+### 它刷过的视频（按日期分组，卡片可点进原片）
+![刷过的视频](docs/screenshots/07-刷过的视频.png)
 
 ## 1. 装
 
 ```bash
-# ① 插件市场（推荐）：DSH → 插件 → 搜「刷抖音」→ 安装
-# ② npm（0.2.1 尚未发布，先别用；发布后才是 dsh plugin --profile desktop add dsh-douyin-life）
-# ③ 源码目录（当前可用）
-dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-life
-# 之后重启一次 dsh 才生效
+# npm 上还没有这个包，dsh plugin add dsh-douyin-life 会 404。
+# 用插件目录的绝对路径装，装完重启一次 dsh。
+dsh plugin --profile desktop add link:<插件目录的绝对路径>
 ```
 
-首次启用后**默认走插件自己的浏览器 profile**：直接 `dy_login_start` 出二维码 / `dy_login_sms` 短信登录即可，第一次扫一次码，
-之后登录态一直留在本机。想复用「本人日常已登录的 Chrome」才调 `dy_chrome_open`（它会拉起带调试端口的 Chrome 并把 `cdpUrl` 切到 CDP 模式）。
-完整步骤见 [`docs/AGENT_ONBOARDING.md`](docs/AGENT_ONBOARDING.md)。登录态只落在本机，不上传任何地方。
+首次启用后：先 `dy_chrome_open` 拉起一个带调试端口的 Chrome（默认 http://127.0.0.1:9222），首次在里面扫码 / 验证码登录；
+连不上就退回插件自己的 profile，用 `dy_login_start` 出二维码 PNG 扫码。完整步骤见 [`docs/AGENT_ONBOARDING.md`](docs/AGENT_ONBOARDING.md)。
+登录态只落在本机，不上传任何地方。
 
-**「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright + numpy + faster-whisper + httpx + pillow`（用系统 Chrome，不下载浏览器）→ `环境自检`。
-视频理解原型 `video-understanding-lab/` 随插件包一起发（`dy_watch` 用），缺了会在自检里明确报出来。
+**「高级」页可以一键把运行环境装好**：`装主依赖（建 venv）` → 装 `mcp<2 + playwright`（用系统 Chrome，不下载浏览器）→ `环境自检`。
 
 ---
 
@@ -84,7 +89,6 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `out/YYYY-MM-DD.md` | 每轮日报（按 `### <视频id>` 记） |
 | `ledger.json` | 账本：回过的评论 cid、发过的评论、转发过的视频、私信次数 |
 | `memory/YYYY-MM.md` | **默认记忆**（视频观察、私信对话、续火花…） |
-| `persona.md` | 人设（手写正文 + 每天自动补的「最近观察」段） |
 | `dm-log/YYYY-MM-DD.json` | 私信聊天记录（谁、说了什么、回没回） |
 | `.need-captcha` | 验证码标记：有它时浏览器切「带界面」 |
 | `replied-cids.txt` / `replied-users.txt` | 去重索引（评论 cid / 已回过的用户） |
@@ -163,7 +167,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
    └─ 动作结果（成功/失败原因）也写进日报，不假装成功
 ```
 
-**另一个定时器**（`每隔多少分钟看一次评论和私信`，默认 30 分钟、±20% 抖动）到点会：
+**同一巡检定时器**（`每隔多少分钟看一次评论和私信`，默认 30 分钟、±20% 抖动）到点会：
 
 1. 续火花（每天 1 次）
 2. 看私信 → 谁发来新消息就回一句（每人 1 条/天、合计 5 条/天）
@@ -171,24 +175,14 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 
 ---
 
-## 5. 看片（真转写）
+## 5. 看片（转写）
 
-- 走随包发布的 `video-understanding-lab/`：`capture`（用浏览器 cookie 下载）→ `prepare`（抽帧 + 16k 单声道）→ `asr`（faster-whisper）→ `transcript.json`；
-- `watchSeconds` 是**硬预算**：传给 `prepare --limit-seconds`，只分析前 N 秒，返回 `partial=true`、`duration` 为实际分析时长；
-- 转写缓存 `media/<id>.<秒数>.v4.json`（旧 v3 缓存一律忽略并重跑；避免读到 duration=0 的坏缓存）；模型缓存放 `<家>/models`；`DOUYIN_WHISPER_MODEL` 可选 `tiny/base/small`；
-- 首次转写：缓存里没有模型时会自动按 `HF_ENDPOINT`（默认 hf-mirror）下载；要强制离线就设 `DOUYIN_WHISPER_OFFLINE=1`；
-- `video-understanding-lab/` 随 npm 包发布；也可用 `DOUYIN_VIDEO_LAB` 指向别的原型目录；缺 `run.py` 时 `dy_watch` 明确报「未安装」，依赖看片的评论/转发会跳过；
-- 依赖：`ffmpeg`（系统安装）+ Python 包里的 `faster-whisper` / `numpy` / `pillow` / `playwright`。
-
-**已知限制（实测）**
-
-| 情况 | 结果 |
-|---|---|
-| 普通短视频 | 能看片；只转写前 `watchSeconds` 秒，长片会标 `partial=true` |
-| 长视频 / 大文件 | 不再整条下载；按预算截断转写，超出 256MiB 的原型预算会明确失败 |
-| 图文作品（note） | 评论接口不抛数据 ⇒ **直接 DOM 抠**；「回复某条评论」入口点不到，暂不支持回复 |
-| 短视频评论 | 桌面端没有发送按钮，**回车即发**；发完会**回读确认**，确认不到就算失败（不误报成功） |
-| 缺 lab / ffmpeg / 模型 | `dy_watch` 返回明确原因；不会谎称「看过了」 |
+- 页面 currentSrc 或详情接口提供可信 HTTPS 媒体地址；未知时长/长视频不整条下载，短片下载有 64MB 上限。
+- ffmpeg 输出 16kHz 单声道 PCM16。短片截取、长片分段共享 watchSeconds 总预算，返回 actual sampledRanges 和 partial。
+- 音轨在独立临时目录内生成、合并、转写，任务结束清理。Whisper worker 最多运行 180 秒，超时和取消都会终止进程。
+- 缓存路径为 media/<id>.<秒数>.v2.json，读取时校验 schema 与模型。DOUYIN_WHISPER_MODEL 可选择 tiny/base/small；HF_ENDPOINT 可覆盖镜像，模型缓存放在家目录 models。
+- 默认 watchBeforeAct 开启时，转写失败就跳过依赖内容的评论/转发，不会假装看完。partial=true 的文案明确写采样。
+- 真实 ffmpeg 与缓存 base 模型的本地静音测试已通过；真实抖音取流、页面选择器和发布回执仍需重载后验收。
 
 ---
 
@@ -197,8 +191,8 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 ### 日常
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `perDay` | 5 | 每天最多挑几条（0 = 不自动刷；手动「现在跑一轮」仍可跑一轮） |
-| `peakValley` / `noon` / `night` | false / true / true | 谷时自动刷总开关（默认关）/ 中午 12–14 / 夜间 00:30–08:30 |
+| `perDay` | 5 | 每天最多挑几条（0 = 不自动刷） |
+| `peakValley` / `noon` / `night` | true | 谷时自动刷总开关 / 中午 12–14 / 夜间 00:30–08:30 |
 | `pickPerRound` | 2 | 一次挑几条（别一口气刷完） |
 | `skipOverMin` | 60 | 超过多少分钟就划走 |
 | `skimOverMin` | 5 | 超过多少分钟就跳着看（评论/附言会写明） |
@@ -208,7 +202,7 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 |---|---|---|
 | `keywords` | `[]` | 关注关键词（空 = 用章程默认） |
 | `reportLevel` | full | `full` / `brief` / `off` |
-| `personaPrompt` | `''` | 人设提示词（决定它怎么说话） |
+| `personaPrompt` | `''` | 模型模式人设；本机模式使用转写摘录模板 |
 | `memory` | true | 是否写记忆 |
 
 ### 互动
@@ -231,11 +225,11 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | `msgAllowTo` | `''` | **可以主动发消息的人**（昵称逗号分隔；空 = 谁都不主动发） |
 | `dmReplyOnlyTo` | `''` | **只回谁的私信**（昵称，逗号分隔，可多人；空 = 谁发来都回） |
 | `dmReply` | false | 自动回**陌生人**私信（模板短句） |
-| `dmAutoReply` / `dmAutoIntervalSec` | true / 15 | 后台秒回**白名单**私信 / 多少秒看一次；只有收到平台确认的发送才记为已回复 |
+| `dmAutoReply` / `dmAutoIntervalSec` | true / 15 | 后台秒回**白名单**私信 / 多少秒看一次 |
 | `dmReplyPerContact` / `dmReplyPerDay` | 1 / 5 | 每个联系人每天回几条 / 每天合计 |
 | `streakNick` / `streakPerDay` | `''` / 1 | 续火花发给谁 / 每天几次 |
-| `askDoubao` | false | 遇到不会的视频在评论里 @ 豆包 求解答 |
-| `autoPublish` / `publishPerDay` | false / 1 | 自动投稿 / 每天最多投几条 |
+| `askDoubao` | false | 保留配置；当前不执行，待授权接线 |
+| `autoPublish` / `publishPerDay` | false / 1 | 允许手动工具与 headless 投稿 / 每天最多提交几次；本机轮次不自动投稿 |
 | `publishTitle` / `publishTags` | `''` | 标题模板（`{date}` 会替换）/ 默认话题 |
 | `publishDraft` | true | 投稿默认存草稿 |
 
@@ -243,10 +237,10 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `localRound` | true | 「跑一轮」用本机直跑（不 spawn headless） |
-| `watchBeforeAct` / `watchSeconds` | true / 90 | 动手前先真看片 / 最多听前多少秒 |
+| `watchBeforeAct` / `watchSeconds` | true / 90 | 动手前先真看片 / 总取样秒数预算 |
 | `autoClean` | true | 每天自动清理一次 |
-| `pythonPath` | `python` | `pythonPath` → `.venv` → `uv` → `python` |
-| `cdpUrl` / `cdpPort` / `chromePath` | `''` / 9222 / `''` | 默认 `''` 用插件自己的 profile；填地址才复用「本人已登录的 Chrome」 |
+| `pythonPath` | `python` | 显式解释器 / uv → 家目录 .venv → PATH python |
+| `cdpUrl` / `cdpPort` / `chromePath` | `9222` / 9222 / `''` | 复用「本人已登录的 Chrome」 |
 | `headlessProfile` / `headlessModel` / `overlayMcp` / `workspace` | headless / `''` / true / `''` | 起子会话时的参数 |
 | `dshBin` | `''` | dsh 的 bin.js（空 = 自动探测，含 `app.asar` 路径） |
 | `comfyUrl` / `comfyOutputDir` | `127.0.0.1:8188` / ComfyUI output | ComfyUI 地址 / 成片目录 |
@@ -277,13 +271,12 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 | 情况 | 表现 |
 |---|---|
 | headless 子进程写系统 Temp 被拒（`EPERM mkdtemp`） | 插件把 `TEMP/TMP/TMPDIR` 指到 `<家>/.tmp`；MCP 子进程也带同样变量 |
-| 沙箱不让子进程开命名管道（Playwright `WinError 5`） | 跑一轮时给子进程 `DSH_SANDBOX=danger-full-access`；跑不动就退回**本机直跑**（`localRound`） |
+| 沙箱不让子进程开命名管道（Playwright `WinError 5`） | headless 经回环代理调用宿主浏览器；回环连接也被限制时明确失败，改用本机模式或配置宿主允许的连接 |
 | Chrome 没带调试端口 | `dy_status.cdp.ok=false` + 提示；`dy_chrome_open` 拉起来 |
 | MCP 起不来 / Python 缺 | 工具返回 `{ok:false, error, hint}`，**不抛异常** |
 | 抖音没登录 | `{ok:false, needLogin:true, hint}` |
 | 评论发不出去 | **回读确认**不到就报失败；连续失败 2 次当轮停止评论（点赞/转发照做） |
 | ComfyUI 目录不存在 / 出片超时 | `dy_comfy_list` 给 `exists:false`；`dy_publish` 给 `ok:false` + 怎么改 |
-| 设置 → 记忆 报「读取失败 / 读取不到记忆」（0.2.0 及更早） | 那几版把 图谱 / 角色卡 / 时间线 当成「记忆系统」插件的功能却直接去调 `memory.*`，没装就报错。**0.2.1 起：没装可选记忆插件就自动退回本地 `memory/*.md` + 人设，不再报错**。更新后重启一次 dsh |
 
 加载路径每一步都包 `try/catch`：**插件加载失败比少个功能糟得多**。
 
@@ -292,41 +285,14 @@ dsh plugin --profile desktop add link:D:/jev-decision-kit/plugins/dsh-douyin-lif
 ## 9. 自检
 
 ```bash
-node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）/ 路由通 / 结构对 / 闸门默认关 / 视频理解原型在位
+node selfcheck.mjs      # 55 条断言：宿主能加载 / 工具齐（35 个）/ 路由通 / 结构对 / 闸门默认关
 ```
 
-**验收边界（别把「装上了」当「全通了」）**
-
-- 已用离线/本地方式验证：宿主加载、工具注册、HTTP 路由、六页 UI 可切换、只读工具（热榜/推荐/详情/评论/缩略图）、闸门关闭时的拒绝、记忆降级、看片原型入口与依赖检查；
-- **未做真实账号验收**：点赞 / 评论 / 私信发送 / 转发的平台回执、真实视频的看片转写、登录后的搜索与个人作品读取；这些需要测试账号和联网环境，报告里不写「已通过」；
-- 看片还需要本机 `ffmpeg` + faster-whisper 模型（首次会下载）；未登录也能用热榜/详情/评论（只读）。
-
 ---
 
-## 10. 最近更新（0.2.1 修复补丁 · 2026-10-27）
-
-- **新装默认 profile 模式**（`cdpUrl` 空）：不用先开 Chrome/调试端口；显式 CDP 连不上会自动退回 profile；想复用日常 Chrome 才调 `dy_chrome_open`（会切 CDP）。
-- **看片模块随包发布**：`video-understanding-lab/` 进 npm files/仓库，宿主通过 `DOUYIN_VIDEO_LAB` 指路；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断，返回 `partial`。
-- **私信不再假成功**：只有平台确认的发送才记 `replied=true`；否则 `unknown` 且最多重试一次。秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 筛选，多个联系人逐个巡检。
-- **记忆页无插件降级**：只显示「原始记录 + 人设」，不再 404 红字。
-- **配置保存失败**：本地值优先，不再被宿主旧值盖回去。
-- **`perDay=0`**：只停自动刷，手动「现在跑一轮」仍可跑一轮。
-- **多实例端口隔离**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），默认不再抢 9333。
-- **依赖**：requirements 补 `pillow`；自检新增「视频理解原型」检查、工具清单对齐 35 个。
-- 时段文案改成实际的两段：12:00–14:00、00:30–08:30（不区分周末）。
-
----
-
-## 11. 最近更新（增量说明 · 2026-10-25 ~ 10-26）
+## 10. 最近更新（增量说明 · 2026-10-25 ~ 10-26）
 
 > 只做补充说明，前面章节的结构和内容没动。
-
-**记忆页：没装可选记忆插件也能用（2026-10-26 修）**
-
-- `client.js`：`memory.*` RPC 先探一次（结论缓存，点「刷新」可重探）。没装可选记忆插件时只显示
-  「原始记录」+ 人设编辑，不再红字「读取失败」；装了就会自动升级成 图谱 / 角色卡 / 时间线。
-- `index.js`：`/api/douyin-duty/memory` 不再写死某台机器的库路径，改成按 **DSH 家目录 → `$DSH_HOME` → `%USERPROFILE%\.dsh`** 去找，找不到就不显示库信息，读 md 照旧。
-- 顺手把 `package.json` 里的 `repository` / `homepage` 指回本仓库（原来指向 `jev-decision-kit/plugins/...`，那目录是 gitignore 的，点进去 404）。
 
 **节奏：谷时那一轮并入巡检定时器（只有一个间隔参数）**
 
@@ -364,22 +330,14 @@ node selfcheck.mjs      # 56 条断言：宿主能加载 / 工具齐（35 个）
 
 ---
 
-## 12. 补充：0.2.1 修复验证（2026-10-27 重启后）
+## 补充：0.2.1 修复验证（2026-10-27 重启后）
 
-> 这一节只补这次修复的内容，前面的说明保留不动。
+> 只补充本次修复，不改前面已有说明。
 
-- **重启后实际自检通过**：`mode=profile`、已登录、搜索正常、ffmpeg + whisper 模型就绪、`video-understanding-lab` 在位（`dy_selfcheck` 新增了这一项）。
-- **浏览器**：新装默认走插件自有 profile（`cdpUrl` 空）；显式 CDP 连不上会退回 profile，不再整个挂掉；想复用日常 Chrome 才调 `dy_chrome_open`（成功后会切 CDP）。
-- **看片**：`video-understanding-lab/` 随包发布；`watchSeconds` 传进 `prepare --limit-seconds` 真正截断（返回 `partial`）；缺 lab 时 `dy_watch` 明确报错并跳过依赖看片的互动。
-- **看片缓存**：v4 起校验 `duration>0`，旧 v3 的 `duration=0/partial=false` 坏缓存不再命中。
-- **看片不再依赖 9333**：默认 profile 模式用当前已登录页面拿直链 + cookie 下载；只有 CDP 模式才走原型的 `capture`（不需要用户手动开 9333）。
-- **私信**：只有平台确认的发送才记「已回复」；没回执标 `unknown`、最多重试一次；秒回目标 = `msgAllowTo` 按 `dmReplyOnlyTo` 再筛，多个联系人逐个巡检。
-- **记忆页**：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404 红字。
-- **配置**：宿主设置写失败时以本地 `config.json` 为准；`perDay=0` 只停自动刷，手动「现在跑一轮」仍可跑一轮。
-- **多实例**：profile 调试端口按家目录派生（`DOUYIN_PROFILE_PORT`），不再默认抢 9333；requirements 补 `pillow`。
-- **npm 入口**：0.2.1 还没发布到 npm（公开查询 404）；当前用源码 link/插件市场安装，发布后再恢复 npm 安装说明。
-- **看片**：首次转写会自动下载模型（HF 镜像）；`duration` 按真实 ASR 输出字段 `audioDuration` 读取，`watchSeconds` 截断后 `partial=true`。
-- **私信重试**：同一个人/同一条内容最多起 2 次任务，失败保留 `tries`；收尾回调和「没起来」分支用 `finished` 去重，不会一次失败记两次。
-- **转发附言**：只有分享确认成功才发附言/表情包；被额度或失败挡住时不再发一条没有视频的文字。额度只按确认成功的分享动作计，旧账本里失败也写 `shares` 造成的虚高不再卡人。
-- **表情包回执**：不再用「出站数量/表情气泡数量增加」当成功（打开表情面板就会变），只认新出站消息里带同一张图；否则如实返回 `unknown`，不再假报成功。
-- **验收边界**：只读/离线部分已验；点赞/评论/私信/发布没有做真实账号验收（只验证了闸门关闭时的拒绝），别对外说「全部通过」。
+- 重启后自检通过：`mode=profile`、已登录、搜索正常、ffmpeg + whisper 模型就绪、`video-understanding-lab` 在位。
+- 新装默认走自有 profile（`cdpUrl` 空）；显式 CDP 连不上自动退回；想复用日常 Chrome 才 `dy_chrome_open`。
+- 看片：lab 随包发布；`watchSeconds` 真正截断（`partial=true`）；缺 lab 时明确报错并跳过依赖看片的互动。
+- 私信：只有平台确认的发送才记「已回复」；没回执标 `unknown`、最多重试一次；秒回按 `dmReplyOnlyTo` 在 `msgAllowTo` 内再筛。
+- 记忆页：没装可选记忆插件时显示本地「原始记录 + 人设」，不再 404。
+- 配置保存失败以本地为准；`perDay=0` 只停自动刷，手动可跑；多实例端口按家目录派生（`DOUYIN_PROFILE_PORT`）；requirements 补 `pillow`。
+- 验收边界：只读/离线已验；点赞/评论/私信/发布未做真实账号验收，别对外说「全部通过」。
