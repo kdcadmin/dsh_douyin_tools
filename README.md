@@ -1,5 +1,7 @@
 # dsh-douyin-life（刷抖音）
 
+![封面](assets/cover.png)
+
 > DSH 插件。每天替使用者刷抖音：**刷推荐流 → 看片（转写）→ 读评论 → 挑片写日报**，
 > 顺手做点赞、评论（可 @ 你）、转发视频给你（附一句话 + 一个对味表情包）、续火花、回私信（含陌生人）；
 > 需要发片时，也可以把本地渲染好的成片发到抖音（本地可选配置，不绑定任何渲染工具）。
@@ -63,21 +65,24 @@
 ### 日常
 ![日常](docs/screenshots/01-日常.png)
 
-### 偏好
-![偏好](docs/screenshots/02-偏好.png)
+### 刷视频
+![刷视频](docs/screenshots/02-刷视频.png)
 
 ### 互动
 ![互动上](docs/screenshots/03-互动-上.png)
 
 ![互动下](docs/screenshots/04-互动-下.png)
 
-![投稿](docs/screenshots/05-互动-投稿.png)
+### 私信
+![私信](docs/screenshots/05-私信.png)
+
+### 表情包
+![表情包](docs/screenshots/06-表情包.png)
 
 ### 高级
-![高级](docs/screenshots/06-高级.png)
+![高级上](docs/screenshots/07-高级-上.png)
 
-### 它刷过的视频（按日期分组，卡片可点进原片）
-![刷过的视频](docs/screenshots/07-刷过的视频.png)
+![高级下](docs/screenshots/08-高级-下.png)
 
 ## 1. 装
 
