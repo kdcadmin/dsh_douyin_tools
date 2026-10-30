@@ -9,6 +9,14 @@
 
 ---
 
+## 0.5 安装后 5 步（装完立刻做）
+
+1. 装 Python 依赖：`python -m venv <家>/.venv` → `<家>/.venv/Scripts/python -m pip install -r vendor/douyin-mcp/requirements.txt`；设置 `pythonPath` 指到 venv。
+2. 确认本机 Chrome 可用（插件用 `channel=chrome`，不下载浏览器）。
+3. 登录：主人点「浏览器登录」（带界面扫码/短信）或走 `dy_login_start` 二维码。
+4. 模型：默认 `deepseek-account/deepseek-flash`；`headlessModel` 留空=跟随默认；要发片再填 `comfyOutputDir`。
+5. `dy_selfcheck` 全 ok 再用；四个写动作闸门默认关，主人明确要求才开。
+
 ## 0. 先记住这几条（红线）
 
 1. **这是别人的账号。** 点赞、评论、发布、私信都是「写动作」，默认全部关着。

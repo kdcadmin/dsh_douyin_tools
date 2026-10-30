@@ -10,6 +10,22 @@
 
 接口契约见 [`SPEC.md`](./SPEC.md)。发布说明见 [`PUBLISH.md`](./PUBLISH.md)。
 
+## 装完先让 agent 做的 5 步（写给模型看的）
+
+> 这段是给 **agent** 的执行清单：不跑完这几步，插件「装了但用不了」。按顺序做，别跳。
+
+1. **装 Python 依赖（MCP）** —— 插件自带 Python MCP，依赖在 `vendor/douyin-mcp/requirements.txt`（`mcp<2`、`playwright`、`faster-whisper` 等）。
+   设置页「高级」有**一键装**（建 venv → 装依赖 → 自检）；命令行等价：
+   ```bash
+   python -m venv <家>/.venv
+   <家>/.venv/Scripts/python -m pip install -r vendor/douyin-mcp/requirements.txt
+   ```
+   然后把设置里的 **`pythonPath` 指到 `<家>/.venv/Scripts/python.exe`**。
+2. **确认 Chrome** —— 用本机已装的 Chrome（插件用 `channel=chrome` 拉起持久 profile，不额外下载浏览器）；没有 Chrome 先装。
+3. **登录** —— 让主人点设置页「**浏览器登录**」（会弹带界面 Chrome，扫码 / 短信验证码都在窗口里完成，成功后自动切回无头）；也可以用 `dy_login_start` 出二维码。
+4. **配模型 / 出片目录** —— DSH 里把模型配成能用的（默认 `deepseek-account` / `deepseek-flash`）；`headlessModel` 留空=跟随默认模型。要发 ComfyUI 的片子才填 `comfyOutputDir`（默认空，不填只影响发片）。
+5. **自检 + 闸门** —— 跑 `dy_selfcheck`，`ok:true` 再用；`autoLike / autoComment / autoPublish / autoReply` **默认全关**，主人明确要才打开。
+
 ## 第一次用：把这份交给你的 agent
 
 装好后别自己在设置页瞎点。把下面这句发给你的 AI：
