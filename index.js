@@ -308,7 +308,7 @@ export function apply(ctx, config) {
     memory: true,
     autoReply: false, replyPerRun: 3, replyPerDay: 10, replyAllDay: true, replyRandom: true, replyVideoIds: '', replyOneShot: true, myNickname: '', modelShareNote: true, replyOncePerUser: false, replyIntervalMin: 30, skipLive: true, shareToNick: '', streakSticker: '大肥鱼', streakNick: '', streakPerDay: 1, askDoubao: false,
     headlessModel: '',
-    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: false, localRound: true,
+    shareWithNote: true, shareNote: '', sharePerDay: 10, pickPerRound: 2, watchBeforeAct: true, watchSeconds: 90, watchFrames: 10, skipOverMin: 60, skimOverMin: 5, autoCommentPlain: false, plainCommentPerDay: 10, msgAllowTo: '', dmAutoReply: true, dmAutoIntervalSec: 15, dmReply: false, dmReplyOnlyTo: '', dmReplyPerContact: 1, dmReplyPerDay: 5, dmFastReply: true, dmFastProvider: '', dmFastModel: '', dmFastReasoning: 'off', dmFastVision: true, dmFastVisionModel: 'qwen3-vl-plus', dmFastImageAttach: true, dmAssumeInbound: false, dmDuringHeadless: true, localRound: true,
     comfyUrl: 'http://127.0.0.1:8188',
     comfyOutputDir: 'E:\\Comfy-Desktop\\ComfyUI-Shared\\output',
     comfyWorkflow: '', comfyWaitSeconds: 900, comfyListLimit: 20, publishDraft: true,
@@ -1104,7 +1104,8 @@ export function apply(ctx, config) {
     let titles = []
     let source = 'none'
     try {
-      const r = await call('douyin_my_posts', { days: Math.max(1, Math.min(Number(cfg.replyWorksDays) || 3, 90)) }, { timeoutMs: 90_000 })
+      // ⭐ 按使用者要求：只回「3 天内」的评论区，不再跟随设置里的 replyWorksDays
+      const r = await call('douyin_my_posts', { days: 3 }, { timeoutMs: 90_000 })
       const list = Array.isArray(r?.items) ? r.items : []
       ids = list.map((x) => String(x.aweme_id || '')).filter(Boolean)
       titles = list.map((x) => x.title)
@@ -1257,8 +1258,16 @@ export function apply(ctx, config) {
         out.push({ aweme_id: v, ok: true, skipped: `图文作品：读到 ${cidless.length} 条评论，但回复入口点不到（暂不支持回复）` })
         continue
       }
+      const nowMs = Date.now()
+      const maxAgeMs = 3 * 86400000
       let fresh = list.filter((c) => {
         if (!c) return false
+        // ⭐ 评论发布时间超过 3 天的不回
+        const ct = String(c.time || '').trim()
+        if (ct) {
+          const ms = Date.parse(ct.replace(' ', 'T'))
+          if (!Number.isNaN(ms) && nowMs - ms > maxAgeMs) return false
+        }
         const cid = String(c.cid || ('idx:' + v + ':' + (c.__idx ?? -1)))
         if (seenThisRound.has(cid)) return false
         if (isMine(c.user)) return false                       // 我自己发的评论/回复
@@ -2250,7 +2259,8 @@ export function apply(ctx, config) {
       }
       const items = readDmLog()
       const now = Date.now()
-      if (runningHeadless) return { ok: true, replied: 0, pending: true, note: '上一条任务仍在运行' }
+      // 刷视频那轮在跑时也要能回私信：headless 用独立浏览器，不抢宿主 MCP（dmDuringHeadless 可关）
+      if (runningHeadless && cfg.dmDuringHeadless === false) return { ok: true, replied: 0, pending: true, note: '上一条任务仍在运行' }
       // ⭐ 逐个联系人看，而不是只看白名单第一个；只回谁是「白名单」之上的筛选
       let picked = null
       let successfulReads = 0, readError = ''
@@ -2478,7 +2488,7 @@ export function apply(ctx, config) {
         if (dmWatcherDisposed) return
         if (dmWatchDirty || Date.now() - Number(dmWatcherState.lastReconcileAt || 0) >= 120000) {
           // 模型任务运行时保留待处理标记；不重复读取会话，不丢掉通知。
-          if (runningHeadless) { dmWatchDirty = true; delay = 1000; return }
+          if (runningHeadless && cfg.dmDuringHeadless === false) { dmWatchDirty = true; delay = 1000; return }
           dmWatchDirty = false
           const result = await dmPollOnce('event')
           if (result.ok === false) throw new Error(result.error || '读取私信失败')
