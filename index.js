@@ -1218,6 +1218,43 @@ export function apply(ctx, config) {
   }
 
   /** 回一轮：随机挑视频 → 读该视频评论 → 跳过已回过的 → 回 N 条 */
+  /** 本机回评论：走 llm 服务像本人回；带图/表情的评论先让视觉模型看懂图 */
+  const localCommentReply = async ({ videoTitle = '', user = '', text = '', visionNote = '', memo = '' } = {}) => {
+    const llm = (typeof ctx.get === 'function' ? ctx.get('llm') : ctx.llm)
+    if (!llm || typeof llm.stream !== 'function') return ''
+    const provider = String(cfg.dmFastProvider || '').trim() || 'deepseek-account'
+    const model = String(cfg.dmFastModel || '').trim() || 'deepseek-flash'
+    const sys = [
+      String(cfg.personaPrompt || '').trim(),
+      `你在回自己抖音视频下面的一条评论（评论者：${user || '网友'}）。只输出一句回复正文：口语、短句、最多 20 个字，别用「谢谢支持」「我懂你意思」这类模板，不要引号、不要解释。`,
+      visionNote ? `这条评论带了一张图或表情包，图上的内容是：${visionNote}。回复要接住图里的内容，别问对方发了什么。` : '',
+      memo ? `你记得的事：\n${String(memo).slice(0, 800)}` : '',
+      '对方聊敏感的（政治/医疗/法律/隐私/黄赌毒/荐股）就委婉拒掉。',
+    ].filter(Boolean).join('\n')
+    const effort = String(cfg.dmFastReasoning || 'off').trim()
+    const runOnce = async (useEffort) => {
+      const opts = {
+        provider, model, system: sys,
+        messages: [{ role: 'user', content: [{ type: 'text', text: `视频：${String(videoTitle || '').slice(0, 60)}\n评论原文：${String(text || '').slice(0, 300)}` }] }],
+        maxTokens: 80, temperature: 0.9,
+      }
+      if (useEffort && useEffort !== 'default') opts.reasoningEffort = useEffort
+      let out = ''
+      for await (const ch of llm.stream(opts)) {
+        if (!ch) continue
+        if (ch.type === 'text-delta') out += String(ch.text || '')
+        else if (ch.type === 'finish' && ch.reason && ch.reason.kind === 'error') throw new Error((ch.reason.failure && ch.reason.failure.message) || '模型报错')
+      }
+      return out
+    }
+    let out = ''
+    try { out = await runOnce(effort) } catch { try { out = await runOnce('') } catch { out = '' } }
+    let s = String(out || '').replace(/\s+/g, ' ').trim().replace(/^["'“”]+|["'“”]+$/g, '')
+    s = s.slice(0, 20)
+    const open = s.lastIndexOf('[')
+    if (open !== -1 && s.indexOf(']', open) === -1) s = s.slice(0, open).trim()
+    return s.replace(/[，、,；;：:\-—…]+$/, '').trim()
+  }
   const replyRound = ({ count, random } = {}) => withActionLock(stateDir, async () => {
     refreshCfg()
     if (!cfg.autoReply) return { ok: false, blocked: true, error: '自动回复评论已关闭' }
@@ -1286,47 +1323,49 @@ export function apply(ctx, config) {
       })
       if (!fresh.length) { out.push({ aweme_id: v, ok: true, skipped: '这个视频没有新评论' }); continue }
       if (rand) fresh = shuffle(fresh)
-      // 纯文字在本机用短句回。带图片或表情的评论交给子会话，避免用一句套话假装看过图。
-      const visual = fresh.filter((c) => normalizeDmMessage(c).attachments.length)
-      const textual = fresh.filter((c) => !normalizeDmMessage(c).attachments.length)
-      if (visual.length) {
-        const picks = visual.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
-        let memo = ''
+      // ⭐ 评论区统一在本机回（串行、不走 headless）：
+      //    纯文字 → 模型直接回；带图/表情 → 先用视觉模型看懂，再让模型回；模型失败才退回模板
+      const todo = fresh.slice(0, Math.max(1, want - out.filter((x) => x.sent).length))
+      let memo = ''
+      try {
+        const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
+        if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
+      } catch { /* 没记忆也能回 */ }
+      for (const c of todo) {
+        if (out.filter((x) => x.sent).length >= want) break
+        let replyText = ''
+        let sensitive = false
+        let visionNote = ''
         try {
-          const mr = await call('memory_recent', { limit: 12 }, { timeoutMs: 30_000 })
-          if (mr && mr.ok !== false && Array.isArray(mr.items)) memo = mr.items.map((x) => '- ' + String(x.content || '').replace(/\s+/g, ' ').slice(0, 100)).join('\n')
-        } catch { /* 没有记忆也能回 */ }
-        const voice = String(cfg.personaPrompt || '').trim() || '按这个账号平时的口气，短句'
-        const list = picks.map((c, i) => `${i + 1}) 评论者：${c.user || ''} aweme_id=${v} reply_cid=${String(c.cid || '')}\n${dmMessageContext(normalizeDmMessage({ ...c, messageId: c.cid }), '评论')}`).join('\n')
-        const prompt = [
-          `你在回自己视频下面的新评论。说话口径：${voice}。`,
-          memo ? `你记得的事：\n${memo}\n` : '',
-          `要回的评论：\n${list}\n`,
-          '规则：',
-          '- 每条回复 ≤20 字，口语、有情绪，别用「我懂你意思」「谢谢支持」这类模板；',
-          '- 对方聊敏感的（政治/医疗/法律/隐私/黄赌毒/荐股）就委婉拒掉；',
-          '- 用 douyin_comment(aweme_id, text, reply_cid) 逐条回复；cid 必须用上面给的；',
-          '- 只回这些评论，不要点赞、不要发新评论、不要刷视频、不要写文件；回完就结束。',
-        ].join('\n')
-        const r = await runDuty('reply', { prompt, countRound: false })
-        out.push({ aweme_id: v, ok: true, delegated: true, candidates: picks.length, started: Boolean(r?.started), error: r?.error })
-      }
-      for (const c of textual.slice(0, Math.max(0, want - out.filter((x) => x.sent || x.started).length))) {
-        const { text, sensitive } = pickReply(c.text)
+          const att = (normalizeDmMessage(c).attachments || []).filter((x) => x && x.url)
+          if (att.length) {
+            try {
+              const desc = await dmDescribeImage(String(att[0].url))
+              if (desc) visionNote = desc
+              log(`评论看图：${String(c.user || '').slice(0, 12)} → ${String(desc || '').slice(0, 40)}`)
+            } catch (e) { log('评论看图失败：' + String((e && e.message) || e).slice(0, 80)) }
+          }
+          replyText = await localCommentReply({ videoTitle: v, user: String(c.user || ''), text: String(c.text || ''), visionNote, memo })
+        } catch (e) { log('本机回评论失败（退回模板）：' + String((e && e.message) || e).slice(0, 100)) }
+        if (!replyText) {
+          const tpl = pickReply(c.text)
+          replyText = tpl.text
+          sensitive = tpl.sensitive
+        }
         try {
-          const payload = { aweme_id: v, text, mention: '' }
+          const payload = { aweme_id: v, text: replyText, mention: '' }
           if (String(c.cid || '').trim()) payload.reply_cid = String(c.cid)
-          else payload.reply_index = Number(c.__idx ?? -1)     // 图文作品的评论没有 cid，按序号回
+          else payload.reply_index = Number(c.__idx ?? -1)
           const r = await call('douyin_comment', payload, { timeoutMs: 150_000 })
           const okk = confirmed(r)
           const prev = (readLedger().replies || {})[String(c.cid)] || {}
-          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').trim() })
+          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text: replyText, sensitive, ok: okk, attempts: Number(prev.attempts || 0) + 1, comment: String(c.text || '').trim() })
           if (okk) appendRepliedUser(c.user)
-          out.push({ aweme_id: v, cid: String(c.cid), comment: String(c.text || '').slice(0, 40), reply: text, sensitive, sent: okk, error: okk ? undefined : (r?.error || '没发出去') })
+          out.push({ aweme_id: v, cid: String(c.cid), comment: String(c.text || '').slice(0, 40), reply: replyText, vision: visionNote || undefined, sensitive, sent: okk, error: okk ? undefined : (r?.error || '没发出去') })
         } catch (e) {
           const prev2 = (readLedger().replies || {})[String(c.cid)] || {}
-          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text, sensitive, ok: false, attempts: Number(prev2.attempts || 0) + 1, comment: String(c.text || '').trim(), error: String(e?.message ?? e).slice(0, 80) })
-          out.push({ aweme_id: v, cid: String(c.cid), reply: text, sent: false, error: String(e?.message ?? e) })
+          noteReply(c.cid, { aweme_id: v, user: String(c.user || ''), text: replyText, sensitive, ok: false, attempts: Number(prev2.attempts || 0) + 1, comment: String(c.text || '').trim(), error: String((e && e.message) || e) })
+          out.push({ aweme_id: v, cid: String(c.cid), reply: replyText, sent: false, error: String((e && e.message) || e) })
         }
       }
     }
@@ -2665,9 +2704,10 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_login_start',
-    description: '开始抖音扫码登录：截二维码存成 PNG（家目录里），返回路径。\n'
-      + '用法：拿到 PNG 后用 `present` 把它推给本人（手机抖音 → 扫一扫），再用 `dy_login_poll` 轮询。\n'
-      + '⚠️ 二维码有效期很短，出码要马上递过去；手机上确认时选长期登录。',
+    description: '打开登录窗并截下左边的二维码。右边的手机号和验证码同时开着，不用二选一。\n'
+      + '扫码：把 PNG 给本人扫，然后 dy_login_poll。\n'
+      + '短信：同一个窗口上再调 dy_login_sms，不会刷新这张二维码。\n'
+      + '若弹出图形验证，让本人在这个窗口里拖完，不要关窗、不要重新出码。',
     parameters: {},
     async execute() {
       refreshCfg()
@@ -2682,8 +2722,10 @@ export function apply(ctx, config) {
         png,
         pngExists: exists,
         hint: exists
-          ? '用 present 把这张 PNG 推给本人（手机抖音 → 扫一扫），扫完调 dy_login_poll'
+          ? (obj.hint || '左边二维码、右边短信在同一个窗口。扫完调 dy_login_poll；要短信就接着 dy_login_sms，不要重新出码。')
           : (obj.hint || 'MCP 没截到二维码 —— 可能页面没弹登录层；再调一次，或先用 dy_whoami 看是不是已经登过了'),
+        smsVisible: obj.smsVisible,
+        methods: obj.methods,
         raw: obj.hint ? { hint: obj.hint } : undefined,
       }
     },
@@ -2715,9 +2757,9 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_login_sms',
-    description: '短信验证码登录（第一步）：切到「验证码登录」tab、填手机号、点「获取验证码」。\n'
-      + '用法：先问本人要手机号 → 调这个 → 短信到了让本人把 6 位验证码告诉你 → 调 `dy_login_sms_submit`。\n'
-      + '⚠️ 这是"本人当场授权"的动作：只发给本人确认过的号码，别自己编。',
+    description: '在当前登录窗的右边填手机号并点获取验证码。左边二维码保持不动，不会整页刷新。\n'
+      + '若返回 needCaptcha，图形验证和二维码在同一个窗口，让本人拖完滑块，不要重新出码。\n'
+      + '短信到了再调 dy_login_sms_submit。只发给本人确认过的号码。',
     parameters: {
       phone: { type: 'string', description: '本人手机号（11 位）' },
     },

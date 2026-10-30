@@ -40,8 +40,11 @@ async function check(name, messages, expected, options = {}) {
       assert.equal(cursor.status,options.status,JSON.stringify(cursor))
       if(options.tries) assert.equal(cursor.tries,options.tries)
     }
-    assert.equal(Boolean(options.tool ? result.items?.some(x => x.started) : result.started), expected, JSON.stringify(result))
-    if (expected) {
+    const gotFlag = options.expectReply
+    ? Boolean(result.items?.some((x) => x && x.reply))
+    : Boolean(options.tool ? result.items?.some((x) => x.started) : result.started)
+  assert.equal(gotFlag, expected, JSON.stringify(result))
+    if (expected && !options.expectReply) {
       const prompt = JSON.parse(readFileSync(argv,'utf8')).at(-1)
       assert.match(prompt, /表情|图片|视频/)
       assert.match(prompt, /素材.*指令|不是.*指令/)
@@ -75,7 +78,8 @@ try {
   await check('uncertain send remains unknown when the model task exits with an error', [old], true, {send:true,status:'unknown',sendResult:{ok:false,status:'unknown',error:'ack missing'}})
   await check('failed startup counts a single attempt', [old], false, {config:{overlayMcp:false},status:'failed',tries:1})
   await check('one skipped contact does not block another contact', {Peer:[{messageId:'own',direction:'outbound',text:'own'}],Other:[{messageId:'new',direction:'inbound',kind:'video',awemeId:'7111111111111111111'}]}, true, {config:{msgAllowTo:'Peer,Other'}})
-  await check('image-only comments reach the reply task', [], true, {tool:'dy_reply_round', config:{autoReply:true},comments:[{cid:'comment-img-1',user:'Peer',text:'',kind:'image',attachments:[{url:'https://p3.douyinpic.com/comment.webp',alt:'开心'}]}],prompt:/comment-img-1/})
+  await check('image-only comments are replied locally (vision path)', [], true, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-img-1',user:'Peer',text:'',kind:'image',attachments:[{url:'https://p3.douyinpic.com/comment.webp',alt:'开心'}]}], expectReply:true})
+  await check('text comments are replied locally without delegating', [], true, {tool:'dy_reply_round', config:{autoReply:true}, comments:[{cid:'comment-txt-1',user:'Peer',text:'这个插件真好用',kind:'text'}], expectReply:true})
   const msg = normalizeDmMessage({attachments:[{url:'https://p3.douyinpic.com/a.webp',alt:'重要描述',kind:'sticker'}],media:['https://p3.douyinpic.com/a.webp','file:///etc/passwd']})
   assert.equal(msg.attachments.length,1); assert.equal(msg.attachments[0].alt,'重要描述'); assert.equal(msg.attachments[0].kind,'sticker')
   assert.notEqual(dmMessageKey('Peer',{messageId:'m1',conversationId:'a'}),dmMessageKey('Peer',{messageId:'m1',conversationId:'b'}))
