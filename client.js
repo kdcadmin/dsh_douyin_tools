@@ -306,11 +306,33 @@ window.__ModuleLoader__.load({
         setBusy('')
       }
 
+      // ⭐ 一键登录：宿主用带界面 Chrome 打开抖音登录页，扫码/短信都在那个窗口里做，登录成功后自动切回无头
+      const browserLogin = async () => {
+        setBusy('login'); setMsg('正在打开浏览器…')
+        try {
+          const r = await jpost('/login/browser', {})
+          setMsg(r.ok ? (r.hint || '浏览器已打开：在里面扫码 / 收验证码，登录成功后会自动切回后台') : (r.error || '打不开浏览器'))
+          setTone(r.ok ? 'good' : 'warn')
+          if (r.ok) {
+            for (let i = 0; i < 90; i++) {
+              await new Promise((res) => setTimeout(res, 2000))
+              let p = null
+              try { p = await jpost('/login/poll', {}) } catch { p = null }
+              if (!p) continue
+              if (p.state === 'need_sms') setShowSms(true)
+              if (p.loggedIn) { setMsg('登录成功，已切回后台无头运行'); setTone('good'); setQr(null); await load(); break }
+            }
+          }
+        } catch (e) { setMsg('打开浏览器失败：' + String(e.message || e)); setTone('warn') }
+        setBusy('')
+      }
+
       const loginPoll = async () => {
         setBusy('poll')
         try {
           const r = await jpost('/login/poll', {})
-          setMsg(r.loggedIn ? '登录成功，登录态已经留在那个 Chrome 里' : ('还没扫：' + (r.hint || '')))
+          if (r.state === 'need_sms') setShowSms(true)
+          setMsg(r.loggedIn ? '登录成功，登录态已经留在那个 Chrome 里' : (r.hint || '还没登上'))
           setTone(r.loggedIn ? 'good' : 'warn')
           if (r.loggedIn) { setQr(null); await load() }
         } catch (e) { setMsg('查询失败：' + String(e.message || e)); setTone('warn') }
@@ -358,7 +380,7 @@ window.__ModuleLoader__.load({
       }
 
       const sendSms = async () => {
-        if (smsPhone.length !== 11) { setMsg('先填 11 位手机号'); setTone('warn'); return }
+        if (smsPhone && smsPhone.length !== 11) { setMsg('手机号要 11 位；弹层里已经有号码就留空'); setTone('warn'); return }
         setBusy('sms'); setMsg('正在发短信…')
         try {
           const r = await jpost('/login/sms', { phone: smsPhone })
@@ -501,9 +523,10 @@ window.__ModuleLoader__.load({
                 h('div', { 'data-dy-label': '' }, st.loggedIn ? '账号：已登录' : '账号：还没登录'),
                 Note(st.loggedIn
                   ? '登录态留在这个 Chrome 里，之后不用再扫'
-                  : '不登录也能看热榜 / 详情 / 评论；搜索、点赞、评论、投稿要登录')),
-              h('button', { 'data-dy-btn': '', 'data-primary': st.loggedIn ? undefined : '', disabled: Boolean(busy === 'login'), onClick: loginStart },
-                st.loggedIn ? '重新扫码' : '扫码登录'),
+                  : '点「浏览器登录」会直接弹出 Chrome 登录页：在里面扫码或收短信验证码，成功后自动切回后台；不登录也能看热榜 / 详情 / 评论')),
+              h('button', { 'data-dy-btn': '', 'data-primary': st.loggedIn ? undefined : '', disabled: Boolean(busy === 'login'), onClick: browserLogin },
+                st.loggedIn ? '重新登录' : '浏览器登录'),
+              h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'login'), onClick: loginStart }, '截图登录'),
               h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'poll'), onClick: loginPoll }, '我扫完了'),
               h('button', { 'data-dy-btn': '', disabled: Boolean(busy === 'sms'), onClick: () => { setShowSms((v) => !v); setMsg('') } },
                 showSms ? '收起收验证码' : '收验证码登录')),
@@ -514,7 +537,7 @@ window.__ModuleLoader__.load({
               h('input', { 'data-dy-input': '', 'data-dy-num': '', style: { width: '110px' }, placeholder: '验证码',
                 value: smsCode, onChange: (e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6)) }),
               h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy === 'sms'), onClick: submitSms }, '提交验证码'),
-              Note(st.loggedIn ? '已经登录了；换号时才需要这一步' : '扫码之后如果抖音要短信验证，就走这里：发验证码 → 把收到的 6 位填进来 → 提交')) : null,
+              Note(st.loggedIn ? '已经登录了；换号时才需要这一步' : '扫码后弹出二次验证：点「发验证码」会先点「收验证码」，再点「获取验证码」。号码弹层里已经有就留空，短信到了把 6 位填进来再提交')) : null,
             qr?.qr ? h('div', { 'data-dy-qr': '' },
               h('img', { src: qr.qr, alt: '抖音登录二维码' }),
               h('div', { 'data-dy-note': '' }, '手机抖音 → 扫一扫 → 选「长期 / 记住我」。', h('br'), '扫完点「我扫完了」。')) : null),

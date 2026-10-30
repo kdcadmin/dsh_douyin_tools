@@ -572,7 +572,10 @@ export function apply(ctx, config) {
   let mcpKey = ''
   const captchaFlagFile = join(stateDir, '.need-captcha')
   const hasCaptchaFlag = () => { try { return existsSync(captchaFlagFile) } catch { return false } }
-  const mcpKeyNow = () => { const p = pythonNow(); return `${p.command}|${p.args.join(' ')}|${scriptPath}|${cfg.cdpUrl}|${hasCaptchaFlag() ? 'headed' : 'headless'}|${existsSync(scriptPath) ? statSync(scriptPath).mtimeMs : 0}` }
+  // ⭐ 点「浏览器登录」时创建：MCP 用带界面模式重启，并自动打开抖音登录页（扫码/短信都在窗口里完成）
+  const loginBrowserFlagFile = join(stateDir, '.login-browser')
+  const hasLoginBrowserFlag = () => { try { return existsSync(loginBrowserFlagFile) } catch { return false } }
+  const mcpKeyNow = () => { const p = pythonNow(); return `${p.command}|${p.args.join(' ')}|${scriptPath}|${cfg.cdpUrl}|${(hasCaptchaFlag() || hasLoginBrowserFlag()) ? 'headed' : 'headless'}|${existsSync(scriptPath) ? statSync(scriptPath).mtimeMs : 0}` }
 
   const ensureMcp = async () => {
     if (mcp && mcpKey === mcpKeyNow()) return mcp
@@ -594,7 +597,8 @@ export function apply(ctx, config) {
         DSH_DOUYIN_HOME: stateDir,
         DOUYIN_ALLOW_WRITES: '1',
         // ⭐ 2026-10-27：平时无头静默；一旦检测到验证码，就切成带界面让本人手动过（过完自动切回）
-        DOUYIN_HEADLESS: hasCaptchaFlag() ? '0' : '1',
+        DOUYIN_HEADLESS: (hasCaptchaFlag() || hasLoginBrowserFlag()) ? '0' : '1',
+        DOUYIN_OPEN_LOGIN: hasLoginBrowserFlag() ? '1' : '0',
         DOUYIN_CDP_URL: String(cfg.cdpUrl || ''),
         // 多实例隔离：每个家目录一个独立端口；视频理解原型也用这个端口连同一份浏览器
         DOUYIN_PROFILE_PORT: String(profilePort),
@@ -2704,9 +2708,9 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_login_start',
-    description: '打开登录窗并截下左边的二维码。右边的手机号和验证码同时开着，不用二选一。\n'
-      + '扫码：把 PNG 给本人扫，然后 dy_login_poll。\n'
-      + '短信：同一个窗口上再调 dy_login_sms，不会刷新这张二维码。\n'
+    description: '打开登录窗并截下二维码。本人扫完后调 dy_login_poll。\n'
+      + '扫码之后抖音会再弹一层二次验证：上面先是「收验证码」，点开之后才有「获取验证码」。\n'
+      + 'poll 返回 need_sms 时调 dy_login_sms，它会按这个顺序点，不会刷新页面、不会重新出码。\n'
       + '若弹出图形验证，让本人在这个窗口里拖完，不要关窗、不要重新出码。',
     parameters: {},
     async execute() {
@@ -2722,7 +2726,7 @@ export function apply(ctx, config) {
         png,
         pngExists: exists,
         hint: exists
-          ? (obj.hint || '左边二维码、右边短信在同一个窗口。扫完调 dy_login_poll；要短信就接着 dy_login_sms，不要重新出码。')
+          ? (obj.hint || '二维码出来了。扫完调 dy_login_poll。若弹出二次验证，接着 dy_login_sms，它会先点「收验证码」再点「获取验证码」，不要重新出码。')
           : (obj.hint || 'MCP 没截到二维码 —— 可能页面没弹登录层；再调一次，或先用 dy_whoami 看是不是已经登过了'),
         smsVisible: obj.smsVisible,
         methods: obj.methods,
@@ -2733,7 +2737,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_login_poll',
-    description: '查扫码结果：返回 loggedIn。检测登录态（昵称头像出现 / cookie 里有 sessionid）。',
+    description: '查扫码结果。state=need_sms 表示扫完弹出了二次验证，接着调 dy_login_sms（先点「收验证码」，再点「获取验证码」），不要重新出码。',
     parameters: {},
     async execute() {
       let r
@@ -2745,10 +2749,12 @@ export function apply(ctx, config) {
       return {
         ok: obj.ok !== false,
         loggedIn,
-        // ⭐ 分状态回：waiting_scan / scanned_need_confirm / no_qr（「扫完没反应」得说清是哪一种）
+        // waiting_scan / scanned_need_confirm / need_sms / need_captcha / no_qr
         state: obj.state || '',
         qrVisible: obj.qrVisible,
         scanned: obj.scanned,
+        receiveVisible: obj.receiveVisible,
+        needCaptcha: obj.needCaptcha,
         ...(obj.hint ? { hint: obj.hint } : {}),
         ...(obj.evidence ? { evidence: obj.evidence } : {}),
       }
@@ -2757,16 +2763,17 @@ export function apply(ctx, config) {
 
   tool({
     name: 'dy_login_sms',
-    description: '在当前登录窗的右边填手机号并点获取验证码。左边二维码保持不动，不会整页刷新。\n'
-      + '若返回 needCaptcha，图形验证和二维码在同一个窗口，让本人拖完滑块，不要重新出码。\n'
+    description: '扫码后的二次验证。在当前窗口先点「收验证码」，再点「获取验证码」，不会刷新页面。\n'
+      + '弹层里已经带出手机号时 phone 可以不填。号码是空的才要 11 位。\n'
+      + '若返回 needCaptcha，让本人在这个窗口里拖完滑块，不要重新出码。\n'
       + '短信到了再调 dy_login_sms_submit。只发给本人确认过的号码。',
     parameters: {
-      phone: { type: 'string', description: '本人手机号（11 位）' },
+      phone: { type: 'string', description: '本人手机号（11 位）。二次验证弹层里已经有号码时留空。' },
     },
     async execute(args) {
       const phone = String(args.phone ?? '').replace(/\D/g, '')
-      if (phone.length !== 11) return { ok: false, error: '手机号要给 11 位数字', phone }
-      log(`短信验证码：给 ${phone.slice(0, 3)}****${phone.slice(-2)} 发短信`)
+      if (phone && phone.length !== 11) return { ok: false, error: '手机号要给 11 位数字', phone }
+      log(phone ? `短信验证码：给 ${phone.slice(0, 3)}****${phone.slice(-2)} 发短信` : '短信验证码：按弹层上的号码，先点收验证码再点获取验证码')
       return call('douyin_login_sms', { phone }, { timeoutMs: 90_000 })
     },
   })
@@ -4090,6 +4097,26 @@ export function apply(ctx, config) {
       return sendJson(res, 405, { ok: false, error: 'config 只支持 GET / POST' })
     }
 
+    if (method === 'POST' && path === '/api/douyin-duty/login/browser') {
+      try {
+        mkdirSync(stateDir, { recursive: true })
+        writeFileSync(loginBrowserFlagFile, String(Date.now()), 'utf8')
+        try { await mcp?.stop?.() } catch { /* 旧进程可能没起 */ }
+        await ensureMcp()
+        log('浏览器登录：已切到带界面，登录页会在 Chrome 窗口里打开')
+        return sendJson(res, 200, { ok: true, hint: '浏览器窗口已打开：在里面扫码 / 收短信验证码，登录成功后会自动切回后台运行' })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+      }
+    }
+
+    if (method === 'POST' && path === '/api/douyin-duty/login/browser/close') {
+      try { rmSync(loginBrowserFlagFile, { force: true }) } catch { /* 已经没了 */ }
+      try { await mcp?.stop?.() } catch { /* 没起 */ }
+      try { await ensureMcp() } catch (e) { log('切回后台失败：' + String(e?.message ?? e)) }
+      return sendJson(res, 200, { ok: true, hint: '已切回后台无头模式' })
+    }
+
     if (method === 'POST' && path === '/api/douyin-duty/login/qr') {
       try {
         const r = await call('douyin_login_qr', {}, { timeoutMs: 90_000 })
@@ -4109,7 +4136,20 @@ export function apply(ctx, config) {
         const r = await call('douyin_login_poll', {}, { timeoutMs: 90_000 })
         const obj = typeof r === 'object' && r ? r : {}
         if (typeof obj.loggedIn === 'boolean') markLogin(obj.loggedIn)
-        return sendJson(res, 200, { ok: obj.ok !== false, loggedIn: Boolean(obj.loggedIn), hint: obj.hint || '' })
+        if (obj.loggedIn && hasLoginBrowserFlag()) {
+          try { rmSync(loginBrowserFlagFile, { force: true }) } catch { /* 忽略 */ }
+          log('浏览器登录成功：切回后台无头模式')
+          try { await mcp?.stop?.() } catch { /* 忽略 */ }
+          try { await ensureMcp() } catch (e) { log('切回无头失败：' + String(e?.message ?? e)) }
+        }
+        return sendJson(res, 200, {
+          ok: obj.ok !== false,
+          loggedIn: Boolean(obj.loggedIn),
+          state: obj.state || '',
+          hint: obj.hint || '',
+          receiveVisible: obj.receiveVisible,
+          needCaptcha: obj.needCaptcha,
+        })
       } catch (e) {
         return sendJson(res, 200, { ok: false, loggedIn: false, error: String(e?.message ?? e) })
       }
@@ -4361,11 +4401,11 @@ export function apply(ctx, config) {
     if (method === 'POST' && path === '/api/douyin-duty/login/sms') {
       const body = await readBody(req)
       const phone = String(body?.phone || '').replace(/\D/g, '')
-      if (phone.length !== 11) return sendJson(res, 200, { ok: false, error: '手机号要 11 位数字' })
+      if (phone && phone.length !== 11) return sendJson(res, 200, { ok: false, error: '手机号要 11 位数字' })
       try {
         const r = await call('douyin_login_sms', { phone }, { timeoutMs: 90_000 })
         const obj = typeof r === 'object' && r ? r : {}
-        log(`短信验证码：发到 ${phone.slice(0, 3)}****${phone.slice(-2)}，sent=${obj.sent}`)
+        log(phone ? `短信验证码：发到 ${phone.slice(0, 3)}****${phone.slice(-2)}，sent=${obj.sent}` : `短信验证码：弹层自带号码，sent=${obj.sent}`)
         return sendJson(res, 200, { ok: obj.ok !== false, phone, ...obj })
       } catch (e) {
         return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
